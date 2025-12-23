@@ -162,6 +162,67 @@ pub fn build(b: *std.Build) void {
     const benchmark_step = b.step("benchmark", "Run SIMD benchmark");
     benchmark_step.dependOn(&benchmark_cmd.step);
 
+    // MatchFiles example executable
+    const matchfiles_example = b.addExecutable(.{
+        .name = "matchfiles",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/matchfiles.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "simdglob", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(matchfiles_example);
+
+    // MatchFiles example run step
+    const matchfiles_cmd = b.addRunArtifact(matchfiles_example);
+    matchfiles_cmd.step.dependOn(b.getInstallStep());
+    const matchfiles_step = b.step("matchfiles", "Run matchFiles() API examples");
+    matchfiles_step.dependOn(&matchfiles_cmd.step);
+
+    // libc comparison benchmark executable
+    const compare_libc = b.addExecutable(.{
+        .name = "compare_libc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/compare_libc.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "simdglob", .module = mod },
+            },
+        }),
+    });
+    compare_libc.linkLibC(); // Link against libc for glob()
+    b.installArtifact(compare_libc);
+
+    // libc comparison run step
+    const compare_libc_cmd = b.addRunArtifact(compare_libc);
+    compare_libc_cmd.step.dependOn(b.getInstallStep());
+    const compare_libc_step = b.step("compare-libc", "Compare SIMD glob vs libc glob()");
+    compare_libc_step.dependOn(&compare_libc_cmd.step);
+
+    // Profiling executable
+    const profile = b.addExecutable(.{
+        .name = "profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/profile.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "simdglob", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(profile);
+
+    // Profiling run step
+    const profile_cmd = b.addRunArtifact(profile);
+    profile_cmd.step.dependOn(b.getInstallStep());
+    const profile_step = b.step("profile", "Profile simdglob performance bottlenecks");
+    profile_step.dependOn(&profile_cmd.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

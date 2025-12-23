@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const glob = @import("glob.zig");
+const root = @import("root.zig");
 
 // SIMD Character Search Tests
 // These tests verify the core SIMD optimization functionality
@@ -159,4 +160,171 @@ test "Constants - check flag values" {
     try testing.expect(glob.GLOB_MARK == 0x0008);
     try testing.expect(glob.GLOB_NOSORT == 0x0020);
     try testing.expect(glob.GLOB_NOESCAPE == 0x1000);
+}
+
+// matchFiles() API Tests
+// These tests verify the new pre-built file list matching API
+
+test "matchFiles - simple wildcard" {
+    const files = [_][]const u8{
+        "test.zig",
+        "main.c",
+        "lib.zig",
+        "readme.md",
+    };
+
+    var result = try root.matchFiles(testing.allocator, "*.zig", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 2), result.match_count);
+    // Results are sorted alphabetically
+    try testing.expectEqualStrings("lib.zig", result.paths[0]);
+    try testing.expectEqualStrings("test.zig", result.paths[1]);
+}
+
+test "matchFiles - question mark wildcard" {
+    const files = [_][]const u8{
+        "a.c",
+        "b.c",
+        "ab.c",
+        "abc.c",
+    };
+
+    var result = try root.matchFiles(testing.allocator, "?.c", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqualStrings("a.c", result.paths[0]);
+    try testing.expectEqualStrings("b.c", result.paths[1]);
+}
+
+test "matchFiles - character class" {
+    const files = [_][]const u8{
+        "test1.txt",
+        "test2.txt",
+        "test3.txt",
+        "testa.txt",
+        "testb.txt",
+    };
+
+    var result = try root.matchFiles(testing.allocator, "test[123].txt", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqualStrings("test1.txt", result.paths[0]);
+    try testing.expectEqualStrings("test2.txt", result.paths[1]);
+    try testing.expectEqualStrings("test3.txt", result.paths[2]);
+}
+
+test "matchFiles - negated character class" {
+    const files = [_][]const u8{
+        "test1.txt",
+        "test2.txt",
+        "testa.txt",
+        "testb.txt",
+    };
+
+    var result = try root.matchFiles(testing.allocator, "test[!12].txt", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqualStrings("testa.txt", result.paths[0]);
+    try testing.expectEqualStrings("testb.txt", result.paths[1]);
+}
+
+test "matchFiles - no matches" {
+    const files = [_][]const u8{
+        "test.c",
+        "main.c",
+        "lib.c",
+    };
+
+    var result = try root.matchFiles(testing.allocator, "*.zig", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 0), result.match_count);
+}
+
+test "matchFiles - all match" {
+    const files = [_][]const u8{
+        "test.zig",
+        "main.zig",
+        "lib.zig",
+    };
+
+    var result = try root.matchFiles(testing.allocator, "*.zig", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 3), result.match_count);
+}
+
+test "matchFiles - empty file list" {
+    const files = [_][]const u8{};
+
+    var result = try root.matchFiles(testing.allocator, "*.zig", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 0), result.match_count);
+}
+
+test "matchFiles - exact match pattern" {
+    const files = [_][]const u8{
+        "exact.txt",
+        "not-exact.txt",
+        "exact-not.txt",
+    };
+
+    var result = try root.matchFiles(testing.allocator, "exact.txt", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqualStrings("exact.txt", result.paths[0]);
+}
+
+test "matchFiles - complex pattern" {
+    const files = [_][]const u8{
+        "test_01.txt",
+        "test_02.txt",
+        "test_99.txt",
+        "test_ab.txt",
+        "prod_01.txt",
+    };
+
+    var result = try root.matchFiles(testing.allocator, "test_[0-9][0-9].txt", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqualStrings("test_01.txt", result.paths[0]);
+    try testing.expectEqualStrings("test_02.txt", result.paths[1]);
+    try testing.expectEqualStrings("test_99.txt", result.paths[2]);
+}
+
+test "matchFiles - paths with directories" {
+    const files = [_][]const u8{
+        "src/main.zig",
+        "src/test.zig",
+        "lib/helper.zig",
+        "main.c",
+    };
+
+    var result = try root.matchFiles(testing.allocator, "src/*.zig", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqualStrings("src/main.zig", result.paths[0]);
+    try testing.expectEqualStrings("src/test.zig", result.paths[1]);
+}
+
+test "matchFiles - special characters in filenames" {
+    const files = [_][]const u8{
+        "test-file.txt",
+        "test_file.txt",
+        "test.file.txt",
+        "testfile.txt",
+    };
+
+    var result = try root.matchFiles(testing.allocator, "test*.txt", &files, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 4), result.match_count);
 }

@@ -46,6 +46,9 @@ pub fn main() !void {
         std.debug.print("{s}:\n", .{tc.name});
         std.debug.print("  Haystack length: {} bytes\n", .{tc.haystack.len});
 
+        var naive_elapsed: f64 = undefined;
+        var simd_elapsed: f64 = undefined;
+
         // Benchmark naive implementation
         {
             const start = std.time.nanoTimestamp();
@@ -53,11 +56,12 @@ pub fn main() !void {
             var i: usize = 0;
             while (i < ITERATIONS) : (i += 1) {
                 result = naiveFind(tc.haystack, tc.needle);
+                std.mem.doNotOptimizeAway(&result); // Prevent optimization
             }
             const end = std.time.nanoTimestamp();
-            const elapsed = @as(f64, @floatFromInt(end - start)) / @as(f64, ITERATIONS);
+            naive_elapsed = @as(f64, @floatFromInt(end - start)) / @as(f64, ITERATIONS);
 
-            std.debug.print("  Naive:  {d:.2}ns per search", .{elapsed});
+            std.debug.print("  Native:  {d:.2}ns per search", .{naive_elapsed});
             if (result) |pos| {
                 std.debug.print(" (found at {})\n", .{pos});
             } else {
@@ -72,11 +76,12 @@ pub fn main() !void {
             var i: usize = 0;
             while (i < ITERATIONS) : (i += 1) {
                 result = simdglob.simdFindChar(tc.haystack, tc.needle);
+                std.mem.doNotOptimizeAway(&result); // Prevent optimization
             }
             const end = std.time.nanoTimestamp();
-            const elapsed = @as(f64, @floatFromInt(end - start)) / @as(f64, ITERATIONS);
+            simd_elapsed = @as(f64, @floatFromInt(end - start)) / @as(f64, ITERATIONS);
 
-            std.debug.print("  SIMD:   {d:.2}ns per search", .{elapsed});
+            std.debug.print("  SIMD:   {d:.2}ns per search", .{simd_elapsed});
             if (result) |pos| {
                 std.debug.print(" (found at {})\n", .{pos});
             } else {
@@ -84,31 +89,9 @@ pub fn main() !void {
             }
         }
 
-        // Calculate speedup
-        {
-            var naive_sum: i128 = 0;
-            var simd_sum: i128 = 0;
-
-            // Warmup and accurate measurement
-            var iter: usize = 0;
-            while (iter < 100) : (iter += 1) {
-                const naive_start = std.time.nanoTimestamp();
-                _ = naiveFind(tc.haystack, tc.needle);
-                const naive_end = std.time.nanoTimestamp();
-                naive_sum += naive_end - naive_start;
-
-                const simd_start = std.time.nanoTimestamp();
-                _ = simdglob.simdFindChar(tc.haystack, tc.needle);
-                const simd_end = std.time.nanoTimestamp();
-                simd_sum += simd_end - simd_start;
-            }
-
-            const naive_avg = @as(f64, @floatFromInt(naive_sum)) / 100.0;
-            const simd_avg = @as(f64, @floatFromInt(simd_sum)) / 100.0;
-            const speedup = naive_avg / simd_avg;
-
-            std.debug.print("  Speedup: {d:.2}x\n\n", .{speedup});
-        }
+        // Calculate speedup from the SAME measurements
+        const speedup = naive_elapsed / simd_elapsed;
+        std.debug.print("  Speedup: {d:.2}x\n\n", .{speedup});
     }
 
     std.debug.print("=== Benchmark Notes ===\n", .{});

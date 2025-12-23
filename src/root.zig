@@ -32,7 +32,7 @@ pub const GLOB_TILDE = glob.GLOB_TILDE;
 pub const GLOB_BRACE = glob.GLOB_BRACE;
 pub const GLOB_LIMIT = glob.GLOB_LIMIT;
 
-/// Convenience function to perform glob matching
+/// Convenience function to perform glob matching on filesystem
 ///
 /// Example:
 /// ```zig
@@ -44,6 +44,24 @@ pub const GLOB_LIMIT = glob.GLOB_LIMIT;
 /// ```
 pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !GlobResult {
     return glob.glob(allocator, pattern, flags);
+}
+
+/// Match a pattern against a pre-built array of filenames
+/// This avoids filesystem I/O when you already have a file list
+///
+/// Example:
+/// ```zig
+/// const files = [_][]const u8{ "test.txt", "main.zig", "data.json" };
+/// const result = try simdglob.matchFiles(allocator, "*.txt", &files, 0);
+/// defer result.deinit();
+/// for (result.paths) |path| {
+///     std.debug.print("Matched: {s}\n", .{path});
+/// }
+/// ```
+pub fn matchFiles(allocator: std.mem.Allocator, pattern: []const u8, files: []const []const u8, flags: u32) !GlobResult {
+    var g = glob.Glob.init(allocator, flags);
+    defer g.deinit();
+    return try g.matchFiles(pattern, files);
 }
 
 test {
