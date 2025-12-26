@@ -54,7 +54,7 @@ pub fn main() !void {
         std.debug.print("Directory iteration only: {d:.2}μs per call\n", .{avg_us});
     }
 
-    // Test 3: matchFiles (in-memory, no I/O)
+    // Test 3: matchFiles without reuse (worst case)
     {
         const files = [_][]const u8{
             "src/main.zig",
@@ -70,21 +70,46 @@ pub fn main() !void {
 
         var i: usize = 0;
         while (i < iterations * 10) : (i += 1) {
-            var result = try simdglob.matchFiles(allocator, "src/*.zig", &files, 0);
+            var result = try simdglob.matchFiles(allocator, "src/*.zig", &files, 0, null);
             result.deinit();
         }
 
         const elapsed = timer.read() - start;
         const avg_ns = elapsed / (iterations * 10);
         const avg_us = @as(f64, @floatFromInt(avg_ns)) / 1000.0;
-        std.debug.print("matchFiles (in-memory, 6 files): {d:.2}μs per call\n", .{avg_us});
+        std.debug.print("matchFiles (no reuse, 6 files): {d:.2}μs per call\n", .{avg_us});
+    }
+
+    // Test 4: matchFiles WITH reuse (optimized)
+    {
+        const files = [_][]const u8{
+            "src/main.zig",
+            "src/test.zig",
+            "src/lib.zig",
+            "src/glob.zig",
+            "src/root.zig",
+            "src/helper.c",
+        };
+
+        var g = simdglob.Glob.init(allocator, 0);
+        defer g.deinit();
+
+        var timer = try Timer.start();
+        const start = timer.lap();
+
+        var i: usize = 0;
+        while (i < iterations * 10) : (i += 1) {
+            var result = try simdglob.matchFiles(allocator, "src/*.zig", &files, 0, &g);
+            result.deinit();
+        }
+
+        const elapsed = timer.read() - start;
+        const avg_ns = elapsed / (iterations * 10);
+        const avg_us = @as(f64, @floatFromInt(avg_ns)) / 1000.0;
+        std.debug.print("matchFiles (with reuse, 6 files): {d:.2}μs per call\n", .{avg_us});
     }
 
     std.debug.print("\n=== Analysis ===\n", .{});
-    std.debug.print("Directory iteration ~= Full glob → filesystem I/O is the bottleneck\n", .{});
-    std.debug.print("matchFiles shows pure pattern matching performance (no I/O)\n", .{});
-    std.debug.print("\nBottleneck breakdown:\n", .{});
-    std.debug.print("- If dir iteration is 80%+ of total: I/O bound (expected)\n", .{});
-    std.debug.print("- If memory allocation is high: need pooling/caching\n", .{});
-    std.debug.print("- matchFiles vs Full glob shows pattern matching overhead\n", .{});
+    std.debug.print("Compare 'matchFiles (no reuse)' vs 'matchFiles (with reuse)' to see allocation overhead\n", .{});
+    std.debug.print("The 'with reuse' version should be significantly faster if allocation was the bottleneck\n", .{});
 }

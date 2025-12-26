@@ -69,15 +69,16 @@ const TestDir = struct {
         var g = glob.Glob.init(allocator, 0);
         defer g.deinit();
 
-        const result = try g.glob(pattern);
-        defer {
-            for (result.paths) |path| {
-                allocator.free(path);
+        // Handle NoMatch by returning empty array (Rust glob behavior)
+        var result = g.glob(pattern) catch |err| {
+            if (err == error.NoMatch) {
+                return try allocator.alloc([]const u8, 0);
             }
-            allocator.free(result.paths);
-        }
+            return err;
+        };
+        defer result.deinit();
 
-        // Copy paths to return
+        // Copy paths to return (must copy because result will be freed)
         const paths = try allocator.alloc([]const u8, result.paths.len);
         for (result.paths, 0..) |path, i| {
             paths[i] = try allocator.dupe(u8, path);

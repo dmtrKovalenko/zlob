@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .link_libc = true,
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -222,6 +223,46 @@ pub fn build(b: *std.Build) void {
     profile_cmd.step.dependOn(b.getInstallStep());
     const profile_step = b.step("profile", "Profile simdglob performance bottlenecks");
     profile_step.dependOn(&profile_cmd.step);
+
+    // C-style glob benchmark
+    const test_libc_style = b.addExecutable(.{
+        .name = "test_libc_style",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/test_libc_style.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "glob_libc", .module = glob_libc_mod },
+            },
+        }),
+    });
+    test_libc_style.linkLibC();
+    b.installArtifact(test_libc_style);
+
+    const test_libc_style_cmd = b.addRunArtifact(test_libc_style);
+    test_libc_style_cmd.step.dependOn(b.getInstallStep());
+    const test_libc_style_step = b.step("test-libc-style", "Test C-style glob vs libc");
+    test_libc_style_step.dependOn(&test_libc_style_cmd.step);
+
+    // Perf test for C-style glob
+    const perf_test_libc = b.addExecutable(.{
+        .name = "perf_test_libc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/perf_test_libc.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "glob_libc", .module = glob_libc_mod },
+            },
+        }),
+    });
+    perf_test_libc.linkLibC();
+    b.installArtifact(perf_test_libc);
+
+    const perf_test_libc_cmd = b.addRunArtifact(perf_test_libc);
+    perf_test_libc_cmd.step.dependOn(b.getInstallStep());
+    const perf_test_libc_step = b.step("perf-test-libc", "Perf profiling for C-style glob");
+    perf_test_libc_step.dependOn(&perf_test_libc_cmd.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

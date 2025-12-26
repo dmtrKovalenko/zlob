@@ -11,7 +11,7 @@ test "matchFiles - simple wildcard" {
         "readme.md",
     };
 
-    var result = try simdglob.matchFiles(testing.allocator, "*.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "*.txt", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -35,7 +35,7 @@ test "matchFiles - question mark" {
         "x.txt",
     };
 
-    var result = try simdglob.matchFiles(testing.allocator, "?.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "?.txt", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -49,7 +49,7 @@ test "matchFiles - character class" {
         "d4.txt",
     };
 
-    var result = try simdglob.matchFiles(testing.allocator, "[ab]*.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "[ab]*.txt", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -62,7 +62,7 @@ test "matchFiles - negated character class" {
         "c3.txt",
     };
 
-    var result = try simdglob.matchFiles(testing.allocator, "[!a]*.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "[!a]*.txt", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -76,7 +76,7 @@ test "matchFiles - with paths" {
         "docs/readme.md",
     };
 
-    var result = try simdglob.matchFiles(testing.allocator, "src/*.zig", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "src/*.zig", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -90,7 +90,7 @@ test "matchFiles - basename only match" {
     };
 
     // Pattern without / should match basename only
-    var result = try simdglob.matchFiles(testing.allocator, "test.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "test.txt", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -102,7 +102,7 @@ test "matchFiles - no matches" {
         "main.zig",
     };
 
-    var result = try simdglob.matchFiles(testing.allocator, "*.log", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "*.log", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 0), result.match_count);
@@ -111,7 +111,7 @@ test "matchFiles - no matches" {
 test "matchFiles - empty file list" {
     const files = [_][]const u8{};
 
-    var result = try simdglob.matchFiles(testing.allocator, "*.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "*.txt", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 0), result.match_count);
@@ -124,7 +124,7 @@ test "matchFiles - exact match" {
         "file.txt",
     };
 
-    var result = try simdglob.matchFiles(testing.allocator, "test.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "test.txt", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);
@@ -139,7 +139,7 @@ test "matchFiles - complex pattern" {
         "test_ab.txt",
     };
 
-    var result = try simdglob.matchFiles(testing.allocator, "test_[0-9]*.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "test_[0-9]*.txt", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -152,7 +152,7 @@ test "matchFiles - sorted results" {
         "b.txt",
     };
 
-    var result = try simdglob.matchFiles(testing.allocator, "*.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "*.txt", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
@@ -186,7 +186,7 @@ test "matchFiles - large file list" {
         files[i] = name;
     }
 
-    var result = try simdglob.matchFiles(testing.allocator, "file_5*.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "file_5*.txt", &files, 0, null);
     defer result.deinit();
 
     // Should match file_5.txt, file_50.txt, file_51.txt, ..., file_599.txt
@@ -202,7 +202,7 @@ test "matchFiles - SIMD fast path" {
     };
 
     // Long literal pattern should use SIMD fast path
-    var result = try simdglob.matchFiles(testing.allocator, "very_long_filename_that_triggers_simd.txt", &files, 0);
+    var result = try simdglob.matchFiles(testing.allocator, "very_long_filename_that_triggers_simd.txt", &files, 0, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);

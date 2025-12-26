@@ -49,19 +49,31 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !Glo
 /// Match a pattern against a pre-built array of filenames
 /// This avoids filesystem I/O when you already have a file list
 ///
-/// Example:
+/// For better performance when calling repeatedly, pass a reusable Glob instance:
 /// ```zig
-/// const files = [_][]const u8{ "test.txt", "main.zig", "data.json" };
-/// const result = try simdglob.matchFiles(allocator, "*.txt", &files, 0);
-/// defer result.deinit();
-/// for (result.paths) |path| {
-///     std.debug.print("Matched: {s}\n", .{path});
-/// }
+/// var g = simdglob.Glob.init(allocator, 0);
+/// defer g.deinit();
+/// const result1 = try simdglob.matchFiles(allocator, "*.txt", &files1, 0, &g);
+/// defer result1.deinit();
+/// const result2 = try simdglob.matchFiles(allocator, "*.zig", &files2, 0, &g);
+/// defer result2.deinit();
 /// ```
-pub fn matchFiles(allocator: std.mem.Allocator, pattern: []const u8, files: []const []const u8, flags: u32) !GlobResult {
-    var g = glob.Glob.init(allocator, flags);
-    defer g.deinit();
-    return try g.matchFiles(pattern, files);
+///
+/// Or pass null for one-off calls (less efficient):
+/// ```zig
+/// const result = try simdglob.matchFiles(allocator, "*.txt", &files, 0, null);
+/// defer result.deinit();
+/// ```
+pub fn matchFiles(allocator: std.mem.Allocator, pattern: []const u8, files: []const []const u8, flags: u32, reusable_glob: ?*Glob) !GlobResult {
+    if (reusable_glob) |g| {
+        g.reset();
+        g.flags = flags;
+        return try g.matchFiles(pattern, files);
+    } else {
+        var g = glob.Glob.init(allocator, flags);
+        defer g.deinit();
+        return try g.matchFiles(pattern, files);
+    }
 }
 
 test {
