@@ -2,9 +2,14 @@ const std = @import("std");
 const simdglob = @import("simdglob");
 
 pub fn main() !void {
+    // Use GPA as backing allocator for arena
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+
+    // Use arena allocator for efficient bulk deallocation
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Get command line arguments
     var args = try std.process.argsWithAllocator(allocator);

@@ -11,7 +11,7 @@ const TestCase = struct {
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    _ = gpa.allocator();
+    const allocator = gpa.allocator();
 
     // Change to big repo
     try std.process.changeCurDir("/home/neogoose/dev/fff.nvim/big-repo");
@@ -65,10 +65,10 @@ pub fn main() !void {
         // Warmup run to avoid cold cache
         {
             var pglob: glob_libc.glob_t = undefined;
-            const result = glob_libc.glob(tc.pattern.ptr, 0, null, &pglob);
+            const result = glob_libc.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
             if (result == 0) {
                 std.debug.print("  Matches: {d}\n", .{pglob.gl_pathc});
-                glob_libc.globfree(&pglob);
+                glob_libc.globfree(allocator, &pglob);
             } else {
                 std.debug.print("  Matches: 0 (error code: {d})\n", .{result});
             }
@@ -82,10 +82,10 @@ pub fn main() !void {
         var matches_this_test: usize = 0;
         while (i < tc.iterations) : (i += 1) {
             var pglob: glob_libc.glob_t = undefined;
-            const result = glob_libc.glob(tc.pattern.ptr, 0, null, &pglob);
+            const result = glob_libc.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
             if (result == 0) {
                 matches_this_test = pglob.gl_pathc;
-                glob_libc.globfree(&pglob);
+                glob_libc.globfree(allocator, &pglob);
             }
         }
 

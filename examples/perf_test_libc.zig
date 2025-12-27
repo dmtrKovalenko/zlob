@@ -2,6 +2,7 @@ const std = @import("std");
 const glob_libc = @import("glob_libc");
 
 pub fn main() !void {
+    const allocator = std.heap.c_allocator;
     // Heavy workload for perf profiling
     const iterations = 10000;
 
@@ -14,9 +15,9 @@ pub fn main() !void {
     while (i < iterations) : (i += 1) {
         var pglob: glob_libc.glob_t = undefined;
         // Use a pattern that matches many files
-        const result = glob_libc.glob("drivers/*.c", 0, null, &pglob);
+        const result = glob_libc.glob(allocator, "drivers/*.c", 0, null, &pglob);
         if (result == 0) {
-            glob_libc.globfree(&pglob);
+            glob_libc.globfree(allocator, &pglob);
         }
     }
 

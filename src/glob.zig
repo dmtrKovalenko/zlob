@@ -38,9 +38,9 @@ pub const GlobResult = struct {
 
     pub fn deinit(self: *GlobResult) void {
         if (self.pglob) |*pglob_ptr| {
-            // Zero-copy mode: use globfree() which handles both arena and malloc'd paths
-            glob_libc.globfree(pglob_ptr);
-            // Free only the slice array, not the strings themselves
+            // Zero-copy mode: use globfree() which handles allocated paths
+            glob_libc.globfree(self.allocator, pglob_ptr);
+            // Free only the slice array, not the strings themselves (already freed by globfree)
             self.allocator.free(self.paths);
         } else {
             // Normal mode: paths are Zig-allocated, free them
@@ -149,12 +149,12 @@ fn glob_internal(allocator: Allocator, pattern: []const u8, flags: u32) !GlobRes
     defer allocator.free(pattern_z);
 
     var pglob: glob_libc.glob_t = undefined;
-    const result = glob_libc.glob(pattern_z.ptr, @intCast(flags), null, &pglob);
+    const result = glob_libc.glob(allocator, pattern_z.ptr, @intCast(flags), null, &pglob);
 
     switch (result) {
         0 => {
             // Success - zero-copy: wrap C pointers directly without duplication
-            // DON'T call globfree - we're taking ownership of the C memory
+            // DON'T call globfree yet - we're taking ownership of the C memory
 
             var paths = try allocator.alloc([]const u8, pglob.gl_pathc);
             errdefer allocator.free(paths);
