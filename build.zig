@@ -224,6 +224,13 @@ pub fn build(b: *std.Build) void {
     const profile_step = b.step("profile", "Profile simdglob performance bottlenecks");
     profile_step.dependOn(&profile_cmd.step);
 
+    // C-style glob module
+    const glob_libc_mod = b.addModule("glob_libc", .{
+        .root_source_file = b.path("src/glob_libc.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+
     // C-style glob benchmark
     const test_libc_style = b.addExecutable(.{
         .name = "test_libc_style",
@@ -263,6 +270,46 @@ pub fn build(b: *std.Build) void {
     perf_test_libc_cmd.step.dependOn(b.getInstallStep());
     const perf_test_libc_step = b.step("perf-test-libc", "Perf profiling for C-style glob");
     perf_test_libc_step.dependOn(&perf_test_libc_cmd.step);
+
+    // Test new features (brace expansion, recursive glob)
+    const test_new_features = b.addExecutable(.{
+        .name = "test_new_features",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/test_new_features.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "glob_libc", .module = glob_libc_mod },
+            },
+        }),
+    });
+    test_new_features.linkLibC();
+    b.installArtifact(test_new_features);
+
+    const test_new_features_cmd = b.addRunArtifact(test_new_features);
+    test_new_features_cmd.step.dependOn(b.getInstallStep());
+    const test_new_features_step = b.step("test-new-features", "Test brace expansion and recursive glob");
+    test_new_features_step.dependOn(&test_new_features_cmd.step);
+
+    // Profile big repo with glob_libc
+    const profile_big_repo = b.addExecutable(.{
+        .name = "profile_big_repo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/profile_big_repo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "glob_libc", .module = glob_libc_mod },
+            },
+        }),
+    });
+    profile_big_repo.linkLibC();
+    b.installArtifact(profile_big_repo);
+
+    const profile_big_repo_cmd = b.addRunArtifact(profile_big_repo);
+    profile_big_repo_cmd.step.dependOn(b.getInstallStep());
+    const profile_big_repo_step = b.step("profile-big-repo", "Profile glob_libc on Linux kernel repository");
+    profile_big_repo_step.dependOn(&profile_big_repo_cmd.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

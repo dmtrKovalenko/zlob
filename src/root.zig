@@ -10,6 +10,9 @@ const std = @import("std");
 // Re-export the glob module
 pub const glob = @import("glob.zig");
 
+// Re-export glob_libc module for C-style glob API
+pub const glob_libc = @import("glob_libc.zig");
+
 // Re-export common types and functions for convenience
 pub const Glob = glob.Glob;
 pub const GlobResult = glob.GlobResult;
@@ -83,4 +86,7 @@ test {
 
     // Import comprehensive Rust-ported tests
     _ = @import("glob_rust_tests.zig");
+
+    // Import glob_libc tests for recursive directory search
+    _ = @import("glob_libc_test.zig");
 }

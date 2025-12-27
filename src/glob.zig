@@ -32,20 +32,14 @@ pub const GlobResult = struct {
     paths: [][]const u8,
     match_count: usize,
     allocator: Allocator,
-    // C pointer for zero-copy glob results (null if paths are Zig-allocated)
-    c_pathv: ?[*c][*c]u8 = null,
+    // Store full glob_t for zero-copy glob results (null if paths are Zig-allocated)
+    // This allows proper cleanup via globfree() which handles arena allocator
+    pglob: ?glob_libc.glob_t = null,
 
     pub fn deinit(self: *GlobResult) void {
-        if (self.c_pathv) |pathv| {
-            // Zero-copy mode: paths are slices wrapping C pointers
-            // Free the C strings directly
-            var i: usize = 0;
-            while (i < self.match_count) : (i += 1) {
-                if (pathv[i]) |path| {
-                    std.c.free(@ptrCast(path));
-                }
-            }
-            std.c.free(@ptrCast(pathv));
+        if (self.pglob) |*pglob_ptr| {
+            // Zero-copy mode: use globfree() which handles both arena and malloc'd paths
+            glob_libc.globfree(pglob_ptr);
             // Free only the slice array, not the strings themselves
             self.allocator.free(self.paths);
         } else {
@@ -176,7 +170,7 @@ fn glob_internal(allocator: Allocator, pattern: []const u8, flags: u32) !GlobRes
                 .paths = paths,
                 .match_count = pglob.gl_pathc,
                 .allocator = allocator,
-                .c_pathv = pglob.gl_pathv, // Store C pointer for cleanup
+                .pglob = pglob, // Store full glob_t for proper cleanup
             };
         },
         glob_libc.GLOB_NOSPACE => return error.OutOfMemory,

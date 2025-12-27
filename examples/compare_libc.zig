@@ -65,28 +65,28 @@ pub fn main() !void {
     }{
         .{
             .name = "Simple wildcard in current directory",
-            .pattern = "**/*.c",
-            .iterations = 1000,
+            .pattern = "*.zig",
+            .iterations = 10000,
         },
         .{
             .name = "Source files pattern",
-            .pattern = "src/*.c",
-            .iterations = 1000,
+            .pattern = "src/*.zig",
+            .iterations = 10000,
         },
-        // .{
-        //     .name = "All Zig files (non-recursive)",
-        //     .pattern = "*/*.zig",  // TODO: Fix wildcard directory expansion
-        //     .iterations = 500,
-        // },
+        .{
+            .name = "Wildcard directory expansion",
+            .pattern = "*/*.zig",
+            .iterations = 5000,
+        },
         .{
             .name = "Specific character class",
-            .pattern = "src/[gmr]*.c",
-            .iterations = 1000,
+            .pattern = "src/[gmr]*.zig",
+            .iterations = 10000,
         },
         .{
             .name = "Prefix wildcard pattern",
-            .pattern = "src/glob*.c",
-            .iterations = 1000,
+            .pattern = "src/glob*.zig",
+            .iterations = 10000,
         },
     };
 
