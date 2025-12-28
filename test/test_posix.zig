@@ -395,8 +395,6 @@ test "GLOB_PERIOD - explicit dot still matches" {
 test "GLOB_TILDE - expands tilde to home directory" {
     const allocator = testing.allocator;
 
-    const GLOB_TILDE: c_int = 0x0800;
-
     // Get $HOME environment variable
     const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
 
@@ -412,7 +410,7 @@ test "GLOB_TILDE - expands tilde to home directory" {
     defer allocator.free(pattern);
 
     var pglob: glob_libc.glob_t = undefined;
-    const result = glob_libc.glob(allocator, pattern.ptr, GLOB_TILDE, null, &pglob);
+    const result = glob_libc.glob(allocator, pattern.ptr, glob_libc.GLOB_TILDE, null, &pglob);
     defer if (result == 0) glob_libc.globfree(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -424,8 +422,6 @@ test "GLOB_TILDE - expands tilde to home directory" {
 
 test "GLOB_TILDE - expands ~username to user home" {
     const allocator = testing.allocator;
-
-    const GLOB_TILDE: c_int = 0x0800;
 
     // Get current username
     const username = std.posix.getenv("USER") orelse return error.SkipZigTest;
@@ -446,7 +442,7 @@ test "GLOB_TILDE - expands ~username to user home" {
     defer allocator.free(pattern);
 
     var pglob: glob_libc.glob_t = undefined;
-    const result = glob_libc.glob(allocator, pattern.ptr, GLOB_TILDE, null, &pglob);
+    const result = glob_libc.glob(allocator, pattern.ptr, glob_libc.GLOB_TILDE, null, &pglob);
     defer if (result == 0) glob_libc.globfree(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -478,14 +474,11 @@ test "GLOB_TILDE - without flag treats tilde as literal" {
 test "GLOB_TILDE_CHECK - errors on nonexistent username" {
     const allocator = testing.allocator;
 
-    const GLOB_TILDE: c_int = 0x0800;
-    const GLOB_TILDE_CHECK: c_int = 0x4000;
-
     const pattern = try allocator.dupeZ(u8, "~nonexistentuser99999/*.txt");
     defer allocator.free(pattern);
 
     var pglob: glob_libc.glob_t = undefined;
-    const result = glob_libc.glob(allocator, pattern.ptr, GLOB_TILDE | GLOB_TILDE_CHECK, null, &pglob);
+    const result = glob_libc.glob(allocator, pattern.ptr, glob_libc.GLOB_TILDE | glob_libc.GLOB_TILDE_CHECK, null, &pglob);
     defer if (result == 0) glob_libc.globfree(allocator, &pglob);
 
     // Should return GLOB_NOMATCH for nonexistent user
@@ -495,13 +488,11 @@ test "GLOB_TILDE_CHECK - errors on nonexistent username" {
 test "GLOB_TILDE_CHECK - without flag returns tilde literal on unknown user" {
     const allocator = testing.allocator;
 
-    const GLOB_TILDE: c_int = 0x0800;
-
     const pattern = try allocator.dupeZ(u8, "~nonexistentuser99999");
     defer allocator.free(pattern);
 
     var pglob: glob_libc.glob_t = undefined;
-    const result = glob_libc.glob(allocator, pattern.ptr, GLOB_TILDE | glob_libc.GLOB_NOCHECK, null, &pglob);
+    const result = glob_libc.glob(allocator, pattern.ptr, glob_libc.GLOB_TILDE | glob_libc.GLOB_NOCHECK, null, &pglob);
     defer if (result == 0) glob_libc.globfree(allocator, &pglob);
 
     // Without GLOB_TILDE_CHECK, should fall back to literal tilde
@@ -615,7 +606,7 @@ test "GLOB_NOMAGIC - succeeds for literal that exists" {
 // Combined flags tests
 // ============================================================================
 
-test "combined - GLOB_MARK and GLOB_PERIOD together" {
+test "GLOB_MARK and GLOB_PERIOD together" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -656,10 +647,8 @@ test "combined - GLOB_MARK and GLOB_PERIOD together" {
     try testing.expect(hidden_dir_with_slash); // .hidden_dir/
 }
 
-test "combined - GLOB_TILDE with recursive glob" {
+test "GLOB_TILDE with recursive glob" {
     const allocator = testing.allocator;
-
-    const GLOB_TILDE: c_int = 0x0800;
 
     const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
 
@@ -680,7 +669,7 @@ test "combined - GLOB_TILDE with recursive glob" {
     defer allocator.free(pattern);
 
     var pglob: glob_libc.glob_t = undefined;
-    const result = glob_libc.glob(allocator, pattern.ptr, GLOB_TILDE, null, &pglob);
+    const result = glob_libc.glob(allocator, pattern.ptr, glob_libc.GLOB_TILDE, null, &pglob);
     defer if (result == 0) glob_libc.globfree(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);

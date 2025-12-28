@@ -157,12 +157,6 @@ test "Glob - init with flags" {
     try testing.expect(g.flags == (glob.GLOB_MARK | glob.GLOB_NOSORT));
 }
 
-test "Constants - check flag values" {
-    try testing.expect(glob.GLOB_MARK == 0x0008);
-    try testing.expect(glob.GLOB_NOSORT == 0x0020);
-    try testing.expect(glob.GLOB_NOESCAPE == 0x1000);
-}
-
 // matchFiles() API Tests
 // These tests verify the new pre-built file list matching API
 

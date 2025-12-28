@@ -1,11 +1,7 @@
-//! Pure C-style glob implementation matching glibc exactly
-//! Uses raw malloc/realloc/free for zero Zig overhead
-
 const std = @import("std");
 const c = std.c;
 const mem = std.mem;
 
-// Import pwd.h for getpwnam
 const pwd = @cImport({
     @cInclude("pwd.h");
 });
@@ -17,24 +13,24 @@ pub const glob_t = extern struct {
     gl_offs: usize,
 };
 
-// Standard POSIX glob flags (matching glibc values)
-pub const GLOB_ERR = 0x0001;
-pub const GLOB_MARK = 0x0008;
-pub const GLOB_NOSORT = 0x0020;
-pub const GLOB_DOOFFS = 0x0004;
-pub const GLOB_NOCHECK = 0x0010;
-pub const GLOB_APPEND = 0x0002;
-pub const GLOB_NOESCAPE = 0x1000;
-pub const GLOB_BRACE = 0x0080;
+// Standard POSIX glob flags (matching glibc values exactly)
+pub const GLOB_ERR = 1 << 0; // 0x0001 - Return on read errors
+pub const GLOB_MARK = 1 << 1; // 0x0002 - Append a slash to each name
+pub const GLOB_NOSORT = 1 << 2; // 0x0004 - Don't sort the names
+pub const GLOB_DOOFFS = 1 << 3; // 0x0008 - Insert PGLOB->gl_offs NULLs
+pub const GLOB_NOCHECK = 1 << 4; // 0x0010 - If nothing matches, return the pattern
+pub const GLOB_APPEND = 1 << 5; // 0x0020 - Append to results of a previous call
+pub const GLOB_NOESCAPE = 1 << 6; // 0x0040 - Backslashes don't quote metacharacters
+pub const GLOB_PERIOD = 1 << 7; // 0x0080 - Leading `.' can be matched by metachars
 
 // GNU extensions
-pub const GLOB_PERIOD = 0x0080; // Allow leading . to match wildcards
-pub const GLOB_MAGCHAR = 0x0100; // Set if pattern had metacharacters
-pub const GLOB_ALTDIRFUNC = 0x0200; // Use custom directory functions
-pub const GLOB_NOMAGIC = 0x0200; // Return empty if no wildcards and no match
-pub const GLOB_TILDE = 0x0800; // Expand ~ and ~user
-pub const GLOB_ONLYDIR = 0x1000; // Match only directories
-pub const GLOB_TILDE_CHECK = 0x4000; // Error if username not found
+pub const GLOB_MAGCHAR = 1 << 8; // 0x0100 - Set in gl_flags if any metachars seen
+pub const GLOB_ALTDIRFUNC = 1 << 9; // 0x0200 - Use gl_opendir et al functions
+pub const GLOB_BRACE = 1 << 10; // 0x0400 - Expand "{a,b}" to "a" "b"
+pub const GLOB_NOMAGIC = 1 << 11; // 0x0800 - If no magic chars, return the pattern
+pub const GLOB_TILDE = 1 << 12; // 0x1000 - Expand ~user and ~ to home directories
+pub const GLOB_ONLYDIR = 1 << 13; // 0x2000 - Match only directories
+pub const GLOB_TILDE_CHECK = 1 << 14; // 0x4000 - Like GLOB_TILDE but return error if user name not available
 
 // Error codes
 pub const GLOB_NOSPACE = 1;
