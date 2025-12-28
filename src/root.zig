@@ -82,11 +82,4 @@ pub fn matchFiles(allocator: std.mem.Allocator, pattern: []const u8, files: []co
 test {
     // Import all tests from glob module
     std.testing.refAllDecls(@This());
-    _ = @import("glob_test.zig");
-
-    // Import comprehensive Rust-ported tests
-    _ = @import("glob_rust_tests.zig");
-
-    // Import glob_libc tests for recursive directory search
-    _ = @import("glob_libc_test.zig");
 }

@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const glob_libc = @import("glob_libc.zig");
+const glob_libc = @import("glob_libc");
 const c = std.c;
 
 // Helper to create test directory structure

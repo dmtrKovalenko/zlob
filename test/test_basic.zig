@@ -170,7 +170,7 @@ test "matchFiles - NOSORT flag" {
         "b.txt",
     };
 
-    var result = try simdglob.matchFiles(testing.allocator, "*.txt", &files, simdglob.GLOB_NOSORT);
+    var result = try simdglob.matchFiles(testing.allocator, "*.txt", &files, simdglob.GLOB_NOSORT, null);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);

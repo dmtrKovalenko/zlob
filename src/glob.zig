@@ -80,15 +80,71 @@ pub const Glob = struct {
     }
 
     pub fn matchFiles(self: *Glob, pattern: []const u8, files: []const []const u8) !GlobResult {
-        // Count matches first
+        // Check if pattern contains '/' - if not, match against basename only
+        const match_basename = std.mem.indexOfScalar(u8, pattern, '/') == null;
+
+        // Fast path: if matching full paths, use original logic
+        if (!match_basename) {
+            // Count matches first
+            var count: usize = 0;
+            for (files) |file| {
+                if (glob_libc.fnmatch(pattern, file)) {
+                    count += 1;
+                }
+            }
+
+            // Handle NOCHECK flag
+            if (count == 0 and self.flags & GLOB_NOCHECK != 0) {
+                var paths = try self.allocator.alloc([]const u8, 1);
+                errdefer self.allocator.free(paths);
+                paths[0] = try self.allocator.dupe(u8, pattern);
+                self.match_count = 1;
+                return GlobResult{
+                    .paths = paths,
+                    .match_count = 1,
+                    .allocator = self.allocator,
+                };
+            }
+
+            // Allocate and populate matches
+            var paths = try self.allocator.alloc([]const u8, count);
+            errdefer self.allocator.free(paths);
+
+            var idx: usize = 0;
+            for (files) |file| {
+                if (glob_libc.fnmatch(pattern, file)) {
+                    paths[idx] = try self.allocator.dupe(u8, file);
+                    idx += 1;
+                }
+            }
+
+            // Sort results unless NOSORT flag is set
+            if (self.flags & GLOB_NOSORT == 0) {
+                std.mem.sort([]const u8, paths, {}, struct {
+                    fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                        return std.mem.order(u8, a, b) == .lt;
+                    }
+                }.lessThan);
+            }
+
+            self.match_count = count;
+            return GlobResult{
+                .paths = paths,
+                .match_count = count,
+                .allocator = self.allocator,
+            };
+        }
+
+        // Basename matching path: extract basename once per file
         var count: usize = 0;
         for (files) |file| {
-            if (glob_libc.fnmatch(pattern, file)) {
+            const basename = std.fs.path.basename(file);
+            if (glob_libc.fnmatch(pattern, basename)) {
                 count += 1;
             }
         }
 
-        // Handle NOCHECK flag
+        // Handle NOCHECK flag for basename matching
         if (count == 0 and self.flags & GLOB_NOCHECK != 0) {
             var paths = try self.allocator.alloc([]const u8, 1);
             errdefer self.allocator.free(paths);
@@ -101,13 +157,14 @@ pub const Glob = struct {
             };
         }
 
-        // Allocate and populate matches
+        // Allocate and populate matches for basename matching
         var paths = try self.allocator.alloc([]const u8, count);
         errdefer self.allocator.free(paths);
 
         var idx: usize = 0;
         for (files) |file| {
-            if (glob_libc.fnmatch(pattern, file)) {
+            const basename = std.fs.path.basename(file);
+            if (glob_libc.fnmatch(pattern, basename)) {
                 paths[idx] = try self.allocator.dupe(u8, file);
                 idx += 1;
             }

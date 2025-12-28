@@ -7,7 +7,8 @@
 
 const std = @import("std");
 const testing = std.testing;
-const glob = @import("glob.zig");
+const simdglob = @import("simdglob");
+const glob = simdglob.glob;
 const fs = std.fs;
 
 const TestDir = struct {
