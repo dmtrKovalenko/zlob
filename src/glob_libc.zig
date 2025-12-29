@@ -1169,6 +1169,9 @@ fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const 
 fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, results: *ResultsList, directories_only: bool) c_int {
     const pattern_ctx = PatternContext.init(pattern);
 
+    // Pre-compute whether to use dirname in path building
+    const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
+
     var dirname_z: [4096:0]u8 = undefined;
     @memcpy(dirname_z[0..dirname.len], dirname);
     dirname_z[dirname.len] = 0;
@@ -1190,21 +1193,10 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirna
                 if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
             }
 
-            // Build full path
-            const path_len = if (dirname.len > 0 and !mem.eql(u8, dirname, "."))
-                dirname.len + 1 + name.len
-            else
-                name.len;
-            const path_buf_slice = allocator.allocSentinel(u8, path_len, 0) catch return GLOB_NOSPACE;
+            // Build full path using helper function
+            const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return GLOB_NOSPACE;
             var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-
-            if (dirname.len > 0 and !mem.eql(u8, dirname, ".")) {
-                @memcpy(path_buf_slice[0..dirname.len], dirname);
-                path_buf_slice[dirname.len] = '/';
-                @memcpy(path_buf_slice[dirname.len + 1 ..][0..name.len], name);
-            } else {
-                @memcpy(path_buf_slice[0..name.len], name);
-            }
+            const path_len = path_buf_slice.len;
 
             // Check if directory for GLOB_MARK
             var is_dir = entry.type == DT_DIR;
@@ -1237,6 +1229,26 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirna
     }
 
     return 0;
+}
+
+// Helper to build full path from dirname and filename
+inline fn buildFullPath(allocator: std.mem.Allocator, dirname: []const u8, name: []const u8, use_dirname: bool) ![]u8 {
+    const path_len = if (use_dirname)
+        dirname.len + 1 + name.len
+    else
+        name.len;
+
+    const path_buf_slice = try allocator.allocSentinel(u8, path_len, 0);
+
+    if (use_dirname) {
+        @memcpy(path_buf_slice[0..dirname.len], dirname);
+        path_buf_slice[dirname.len] = '/';
+        @memcpy(path_buf_slice[dirname.len + 1 ..][0..name.len], name);
+    } else {
+        @memcpy(path_buf_slice[0..name.len], name);
+    }
+
+    return path_buf_slice;
 }
 
 // Helper to check if filename should be skipped (returns true to skip)
@@ -1294,6 +1306,9 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     // Pre-compute pattern properties once to avoid redundant hasWildcardsSIMD calls in hot loop
     const pattern_ctx = PatternContext.init(pattern);
 
+    // Pre-compute whether to use dirname in path building (avoid repeated string comparisons)
+    const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
+
     // Open directory
     var dirname_z: [4096:0]u8 = undefined;
     @memcpy(dirname_z[0..dirname.len], dirname);
@@ -1347,21 +1362,10 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
                     }
 
                     const name_to_add = batch_names[i];
-                    // Build full path with allocator
-                    const path_len = if (dirname.len > 0 and !mem.eql(u8, dirname, "."))
-                        dirname.len + 1 + name_to_add.len
-                    else
-                        name_to_add.len;
-                    const path_buf_slice = allocator.allocSentinel(u8, path_len, 0) catch return GLOB_NOSPACE;
+                    // Build full path using helper function
+                    const path_buf_slice = buildFullPath(allocator, dirname, name_to_add, use_dirname) catch return GLOB_NOSPACE;
                     var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-
-                    if (dirname.len > 0 and !mem.eql(u8, dirname, ".")) {
-                        @memcpy(path_buf_slice[0..dirname.len], dirname);
-                        path_buf_slice[dirname.len] = '/';
-                        @memcpy(path_buf_slice[dirname.len + 1 ..][0..name_to_add.len], name_to_add);
-                    } else {
-                        @memcpy(path_buf_slice[0..name_to_add.len], name_to_add);
-                    }
+                    const path_len = path_buf_slice.len;
 
                     // Check if it's a directory for GLOB_MARK or directories_only
                     var is_dir = batch_entries[i].type == DT_DIR;
@@ -1406,21 +1410,10 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
                     if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
                 }
 
-                // Build full path with allocator
-                const path_len = if (dirname.len > 0 and !mem.eql(u8, dirname, "."))
-                    dirname.len + 1 + name.len
-                else
-                    name.len;
-                const path_buf_slice = allocator.allocSentinel(u8, path_len, 0) catch return GLOB_NOSPACE;
+                // Build full path using helper function
+                const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return GLOB_NOSPACE;
                 var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-
-                if (dirname.len > 0 and !mem.eql(u8, dirname, ".")) {
-                    @memcpy(path_buf_slice[0..dirname.len], dirname);
-                    path_buf_slice[dirname.len] = '/';
-                    @memcpy(path_buf_slice[dirname.len + 1 ..][0..name.len], name);
-                } else {
-                    @memcpy(path_buf_slice[0..name.len], name);
-                }
+                const path_len = path_buf_slice.len;
 
                 // Check if it's a directory for GLOB_MARK or directories_only
                 var is_dir = batch_entries[i].type == DT_DIR;
