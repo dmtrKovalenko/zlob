@@ -37,17 +37,11 @@ pub const GLOB_NOSPACE = 1;
 pub const GLOB_ABORTED = 2;
 pub const GLOB_NOMATCH = 3;
 
-// C dirent
-const dirent = extern struct {
-    d_ino: u64,
-    d_off: i64,
-    d_reclen: u16,
-    d_type: u8,
-    d_name: [256]u8,
-};
+// Use Zig's cross-platform dirent structure
+const dirent = std.c.dirent;
 
-const DT_UNKNOWN: u8 = 0;
-const DT_DIR: u8 = 4;
+const DT_UNKNOWN = std.c.DT.UNKNOWN;
+const DT_DIR = std.c.DT.DIR;
 
 const NameArray = struct {
     items: [*c][*c]u8,
@@ -636,7 +630,7 @@ fn expandWildcardComponents(
 
         while (c.readdir(dir)) |entry_raw| {
             const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-            const name = mem.sliceTo(&entry.d_name, 0);
+            const name = mem.sliceTo(&entry.name, 0);
 
             // Skip . and ..
             if (shouldSkipFile(name, component, 0)) continue;
@@ -649,10 +643,10 @@ fn expandWildcardComponents(
 
             if (matches) {
                 // For non-final components, only traverse directories
-                if (!is_final and entry.d_type != DT_DIR) continue;
+                if (!is_final and entry.type != DT_DIR) continue;
 
                 // For final component with directories_only flag, only keep directories
-                if (is_final and directories_only and entry.d_type != DT_DIR) continue;
+                if (is_final and directories_only and entry.type != DT_DIR) continue;
 
                 // Build new path
                 var new_path_buf: [4096]u8 = undefined;
@@ -1063,7 +1057,7 @@ fn globRecursiveHelper(allocator: std.mem.Allocator, rec_pattern: *const Recursi
     // Recursively search subdirectories
     while (c.readdir(dir)) |entry_raw| {
         const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-        const name = mem.sliceTo(&entry.d_name, 0);
+        const name = mem.sliceTo(&entry.name, 0);
 
         // Skip . and ..
         if (name.len == 0 or name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) {
@@ -1086,8 +1080,8 @@ fn globRecursiveHelper(allocator: std.mem.Allocator, rec_pattern: *const Recursi
         }
 
         // Check if it's a directory (with fallback to stat if d_type unknown)
-        var is_dir = entry.d_type == DT_DIR;
-        if (entry.d_type == DT_UNKNOWN) {
+        var is_dir = entry.type == DT_DIR;
+        if (entry.type == DT_UNKNOWN) {
             // Fallback to stat for filesystems that don't support d_type
             var subdir_buf_tmp: [4096:0]u8 = undefined;
             var subdir_len_tmp: usize = 0;
@@ -1228,7 +1222,7 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     // Read entries with batching
     while (c.readdir(dir)) |entry_raw| {
         const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-        const name = mem.sliceTo(&entry.d_name, 0);
+        const name = mem.sliceTo(&entry.name, 0);
 
         // Skip check using inlined function
         if (shouldSkipFile(name, pattern, flags)) continue;
@@ -1253,7 +1247,7 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
                 if ((match_mask & (@as(u4, 1) << @intCast(i))) != 0) {
                     // Use d_type to filter directories if needed (avoids stat syscall!)
                     if (directories_only) {
-                        const entry_dtype = batch_entries[i].d_type;
+                        const entry_dtype = batch_entries[i].type;
                         // Skip non-directories (d_type == DT_DIR is 4 on Linux)
                         if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
                         // If DT_UNKNOWN, we'll do stat check below (rare on modern filesystems)
@@ -1277,8 +1271,8 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
                     }
 
                     // Check if it's a directory for GLOB_MARK or directories_only
-                    var is_dir = batch_entries[i].d_type == DT_DIR;
-                    if (batch_entries[i].d_type == DT_UNKNOWN) {
+                    var is_dir = batch_entries[i].type == DT_DIR;
+                    if (batch_entries[i].type == DT_UNKNOWN) {
                         var stat_buf: std.c.Stat = undefined;
                         if (std.c.stat(path, &stat_buf) == 0) {
                             is_dir = std.c.S.ISDIR(stat_buf.mode);
@@ -1315,7 +1309,7 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
             if (fnmatchWithContext(&pattern_ctx, name)) {
                 // Use d_type to filter directories if needed (avoids stat syscall!)
                 if (directories_only) {
-                    const entry_dtype = batch_entries[i].d_type;
+                    const entry_dtype = batch_entries[i].type;
                     if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
                 }
 
@@ -1336,8 +1330,8 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
                 }
 
                 // Check if it's a directory for GLOB_MARK or directories_only
-                var is_dir = batch_entries[i].d_type == DT_DIR;
-                if (batch_entries[i].d_type == DT_UNKNOWN) {
+                var is_dir = batch_entries[i].type == DT_DIR;
+                if (batch_entries[i].type == DT_UNKNOWN) {
                     var stat_buf: std.c.Stat = undefined;
                     if (std.c.stat(path, &stat_buf) == 0) {
                         is_dir = std.c.S.ISDIR(stat_buf.mode);
