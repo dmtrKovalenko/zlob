@@ -239,7 +239,7 @@ test "recursive glob - **/*.txt finds all text files" {
     try testing.expectEqual(@as(usize, 2), pglob.gl_pathc);
 }
 
-test "recursive glob - no matches returns success with count 0" {
+test "recursive glob - no matches returns GLOB_NOMATCH" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -264,9 +264,8 @@ test "recursive glob - no matches returns success with count 0" {
     var pglob: glob_libc.glob_t = undefined;
     const result = glob_libc.glob(testing.allocator, pattern.ptr, 0, null, &pglob);
 
-    // Recursive glob returns success (0) with pathc=0 when no matches found
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 0), pglob.gl_pathc);
+    // Recursive glob returns GLOB_NOMATCH when no matches found (consistent with glibc)
+    try testing.expectEqual(@as(c_int, glob_libc.GLOB_NOMATCH), result);
 }
 
 test "recursive glob - GLOB_APPEND correctly accumulates results" {

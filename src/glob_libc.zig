@@ -936,8 +936,8 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
 
 // Pattern components for recursive glob
 const RecursivePattern = struct {
-    dir_components: []const []const u8,  // Directory components to match (e.g., [".glob_test_nested"])
-    file_pattern: []const u8,             // Final filename pattern (e.g., "*.txt")
+    dir_components: []const []const u8, // Directory components to match (e.g., [".glob_test_nested"])
+    file_pattern: []const u8, // Final filename pattern (e.g., "*.txt")
 };
 
 // Recursive glob implementation for ** patterns
@@ -1003,47 +1003,116 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
         .file_pattern = file_pattern,
     };
 
-    // Helper function to recursively glob a directory
-    return globRecursiveHelper(allocator, &rec_pattern, start_dir, flags, pglob, 0, &info);
+    // OPTIMIZATION: Use ArrayList to accumulate ALL results, avoiding O(n²) append behavior
+    // Instead of using GLOB_APPEND which reallocates pathv for every directory,
+    // we collect all results in a list and convert to pathv once at the end
+    var all_results = NameArray.init(allocator);
+    defer all_results.deinit();
+
+    // Recursively collect all matching paths
+    const result = globRecursiveHelperCollect(allocator, &rec_pattern, start_dir, flags, &all_results, 0, &info);
+    if (result != 0) {
+        // Error occurred - cleanup is handled by defer
+        return result;
+    }
+
+    // No matches found - return GLOB_NOMATCH (consistent with glibc)
+    if (all_results.len == 0) {
+        return GLOB_NOMATCH;
+    }
+
+    // Sort results unless NOSORT flag is set
+    if (flags & GLOB_NOSORT == 0) {
+        qsort(@ptrCast(all_results.items), all_results.len, @sizeOf([*c]u8), c_cmp_strs);
+    }
+
+    // Convert ArrayList to pathv format
+    return finalizeResults(allocator, &all_results, flags, pglob);
 }
 
-fn globRecursiveHelper(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: c_int, pglob: *glob_t, depth: usize, info: *const PatternInfo) c_int {
-    // Limit recursion depth to prevent stack overflow
+// Helper to finalize results from ArrayList to glob_t
+fn finalizeResults(allocator: std.mem.Allocator, results: *NameArray, flags: c_int, pglob: *glob_t) c_int {
+    const offs = if (flags & GLOB_DOOFFS != 0) pglob.gl_offs else 0;
+
+    // Handle GLOB_APPEND - merge with existing results
+    if (flags & GLOB_APPEND != 0 and pglob.gl_pathv != null and pglob.gl_pathc > 0) {
+        const old_count = pglob.gl_pathc;
+        const new_count = results.len;
+        const total_count = old_count + new_count;
+
+        const pathv_buf = allocator.alloc([*c]u8, offs + total_count + 1) catch return GLOB_NOSPACE;
+        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+
+        // Fill offset slots
+        var k: usize = 0;
+        while (k < offs) : (k += 1) result[k] = null;
+
+        // Copy old results
+        var i: usize = 0;
+        while (i < old_count) : (i += 1) {
+            result[offs + i] = pglob.gl_pathv[offs + i];
+        }
+
+        // Append new results
+        var j: usize = 0;
+        while (j < new_count) : (j += 1) {
+            result[offs + old_count + j] = results.items[j];
+        }
+        result[offs + total_count] = null;
+
+        // Free old pathv array
+        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pglob.gl_pathv))[0 .. offs + old_count + 1];
+        allocator.free(old_pathv_slice);
+
+        pglob.gl_pathc = total_count;
+        pglob.gl_pathv = result;
+    } else {
+        // Fresh allocation
+        const pathv_buf = allocator.alloc([*c]u8, offs + results.len + 1) catch return GLOB_NOSPACE;
+        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+
+        // Fill offset slots
+        var k: usize = 0;
+        while (k < offs) : (k += 1) result[k] = null;
+
+        // Copy results
+        var i: usize = 0;
+        while (i < results.len) : (i += 1) {
+            result[offs + i] = results.items[i];
+        }
+        result[offs + results.len] = null;
+
+        pglob.gl_pathc = results.len;
+        pglob.gl_pathv = result;
+    }
+
+    return 0;
+}
+
+// Recursive helper that collects results into ArrayList instead of using GLOB_APPEND
+fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: c_int, results: *NameArray, depth: usize, info: *const PatternInfo) c_int {
+    // Limit recursion depth
     if (depth > 100) return 0;
 
-    // Early exit if this directory can't possibly match
+    // Early exit if this directory can't match
     if (!canMatchPattern(dirname, depth, info)) {
         return 0;
     }
 
-    // Only match files if we've reached the literal prefix
+    // Should we match files in this directory?
     const should_match_here = if (info.literal_prefix.len > 0)
-        mem.startsWith(u8, dirname, info.literal_prefix) and
-            (dirname.len >= info.literal_prefix.len)
+        mem.startsWith(u8, dirname, info.literal_prefix) and (dirname.len >= info.literal_prefix.len)
     else
         true;
 
-    // Match files in current directory if we have no more directory components to match
+    // Match files in current directory if we have no more directory components
     if (should_match_here and rec_pattern.dir_components.len == 0) {
-        // Always use APPEND flag for recursive helper to accumulate results
-        // The initial call from globRecursive will pass clean pglob
-        const match_flags = if (depth > 0 or pglob.gl_pathc > 0)
-            flags | GLOB_APPEND
-        else
-            flags;
-
-        const result = globInDirFiltered(allocator, rec_pattern.file_pattern, dirname, match_flags, pglob, info.directories_only);
-
-        // Continue even if glob fails - we still want to recurse into subdirectories
-        // Only fatal errors should stop us
+        // Call globInDirImpl directly to collect matches into our results list
+        const result = globInDirImplCollect(allocator, rec_pattern.file_pattern, dirname, flags, results, info.directories_only);
         if (result == GLOB_NOSPACE) {
             return result;
         }
-        // If first call returned GLOB_NOMATCH, initialize pglob so APPEND works
-        if (result == GLOB_NOMATCH and depth == 0 and pglob.gl_pathc == 0) {
-            pglob.gl_pathv = null;
-        }
-        // Ignore other errors like GLOB_ABORTED or GLOB_NOMATCH and continue recursing
+        // Continue recursing even if no matches in this directory
     }
 
     // Open directory to find subdirectories
@@ -1064,25 +1133,22 @@ fn globRecursiveHelper(allocator: std.mem.Allocator, rec_pattern: *const Recursi
             continue;
         }
 
-        // Skip hidden files/directories unless GLOB_PERIOD is set or pattern explicitly starts with '.'
+        // Skip hidden directories unless allowed
         if (name[0] == '.') {
-            // Allow if GLOB_PERIOD flag is set
             if (flags & GLOB_PERIOD != 0) {
                 // GLOB_PERIOD allows wildcards to match hidden files
             } else if (rec_pattern.dir_components.len > 0 and rec_pattern.dir_components[0].len > 0 and rec_pattern.dir_components[0][0] == '.') {
-                // First directory component explicitly starts with '.' (e.g., ".glob_test_nested")
+                // First directory component explicitly starts with '.'
             } else if (rec_pattern.dir_components.len == 0 and rec_pattern.file_pattern.len > 0 and rec_pattern.file_pattern[0] == '.') {
-                // File pattern explicitly starts with '.' (e.g., ".hidden")
+                // File pattern explicitly starts with '.'
             } else {
-                // Skip hidden directories by default
                 continue;
             }
         }
 
-        // Check if it's a directory (with fallback to stat if d_type unknown)
+        // Check if it's a directory
         var is_dir = entry.type == DT_DIR;
         if (entry.type == DT_UNKNOWN) {
-            // Fallback to stat for filesystems that don't support d_type
             var subdir_buf_tmp: [4096:0]u8 = undefined;
             var subdir_len_tmp: usize = 0;
 
@@ -1103,43 +1169,108 @@ fn globRecursiveHelper(allocator: std.mem.Allocator, rec_pattern: *const Recursi
         }
 
         if (is_dir) {
-            // If we have directory components, check if this directory matches the next component
+            // Check if directory matches pattern component
             var next_rec_pattern = rec_pattern.*;
             if (rec_pattern.dir_components.len > 0) {
                 const next_component = rec_pattern.dir_components[0];
-
-                // Check if directory name matches the component (could be wildcard pattern)
-                if (!fnmatch(next_component, name)) {
-                    continue; // Doesn't match, skip this directory
-                }
-
-                // Match! Advance to next component
+                if (!fnmatch(next_component, name)) continue;
                 next_rec_pattern.dir_components = rec_pattern.dir_components[1..];
             }
 
             // Build subdirectory path
             var subdir_buf: [4096]u8 = undefined;
             var subdir_len: usize = 0;
-
             if (dirname.len > 0 and !mem.eql(u8, dirname, ".")) {
                 @memcpy(subdir_buf[0..dirname.len], dirname);
                 subdir_buf[dirname.len] = '/';
                 subdir_len = dirname.len + 1;
             }
-
             @memcpy(subdir_buf[subdir_len..][0..name.len], name);
             subdir_len += name.len;
-
             const subdir = subdir_buf[0..subdir_len];
 
-            // Smart filtering: only recurse if this path can match the pattern
+            // Filter by pattern
             if (!canMatchPattern(subdir, depth + 1, info)) continue;
 
-            // Recursively glob subdirectory with remaining pattern components
-            const sub_result = globRecursiveHelper(allocator, &next_rec_pattern, subdir, flags, pglob, depth + 1, info);
-            if (sub_result != 0 and sub_result != GLOB_NOMATCH) {
-                return sub_result;
+            // Recurse into subdirectory
+            const result = globRecursiveHelperCollect(allocator, &next_rec_pattern, subdir, flags, results, depth + 1, info);
+            if (result == GLOB_NOSPACE) {
+                return result;
             }
+        }
+    }
+
+    return 0;
+}
+
+// Version of globInDirImpl that appends directly to NameArray instead of creating new pglob
+fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, results: *NameArray, directories_only: bool) c_int {
+    const pattern_ctx = PatternContext.init(pattern);
+
+    var dirname_z: [4096:0]u8 = undefined;
+    @memcpy(dirname_z[0..dirname.len], dirname);
+    dirname_z[dirname.len] = 0;
+
+    const dir = c.opendir(&dirname_z) orelse return GLOB_ABORTED;
+    defer _ = c.closedir(dir);
+
+    // Read and match entries
+    while (c.readdir(dir)) |entry_raw| {
+        const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
+        const name = mem.sliceTo(&entry.name, 0);
+
+        if (shouldSkipFile(name, pattern, flags)) continue;
+
+        if (fnmatchWithContext(&pattern_ctx, name)) {
+            // Filter directories if needed
+            if (directories_only) {
+                const entry_dtype = entry.type;
+                if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
+            }
+
+            // Build full path
+            const path_len = if (dirname.len > 0 and !mem.eql(u8, dirname, "."))
+                dirname.len + 1 + name.len
+            else
+                name.len;
+            const path_buf_slice = allocator.allocSentinel(u8, path_len, 0) catch return GLOB_NOSPACE;
+            var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
+
+            if (dirname.len > 0 and !mem.eql(u8, dirname, ".")) {
+                @memcpy(path_buf_slice[0..dirname.len], dirname);
+                path_buf_slice[dirname.len] = '/';
+                @memcpy(path_buf_slice[dirname.len + 1 ..][0..name.len], name);
+            } else {
+                @memcpy(path_buf_slice[0..name.len], name);
+            }
+
+            // Check if directory for GLOB_MARK
+            var is_dir = entry.type == DT_DIR;
+            if (entry.type == DT_UNKNOWN) {
+                var stat_buf: std.c.Stat = undefined;
+                if (std.c.stat(path, &stat_buf) == 0) {
+                    is_dir = std.c.S.ISDIR(stat_buf.mode);
+                } else {
+                    allocator.free(path_buf_slice);
+                    continue;
+                }
+            }
+
+            // Skip non-directories if directories_only
+            if (directories_only and !is_dir) {
+                allocator.free(path_buf_slice);
+                continue;
+            }
+
+            // Append '/' if GLOB_MARK
+            if (maybeAppendSlash(allocator, path, path_len, is_dir, flags) catch {
+                allocator.free(path_buf_slice);
+                return GLOB_NOSPACE;
+            }) |new_path| {
+                path = new_path;
+            }
+
+            results.append(path) catch return GLOB_NOSPACE;
         }
     }
 
