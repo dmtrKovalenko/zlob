@@ -43,45 +43,7 @@ const dirent = std.c.dirent;
 const DT_UNKNOWN = std.c.DT.UNKNOWN;
 const DT_DIR = std.c.DT.DIR;
 
-const NameArray = struct {
-    items: [*c][*c]u8,
-    len: usize,
-    cap: usize,
-    allocator: std.mem.Allocator,
-
-    fn init(allocator: std.mem.Allocator) NameArray {
-        return .{ .items = null, .len = 0, .cap = 0, .allocator = allocator };
-    }
-
-    fn append(self: *NameArray, item: [*c]u8) !void {
-        if (self.len >= self.cap) {
-            const new_cap = if (self.cap == 0) 8 else self.cap * 2;
-
-            // Use Zig allocator instead of c.realloc
-            if (self.items) |items| {
-                // Realloc existing memory
-                const old_mem = @as([*]u8, @ptrCast(items))[0 .. self.cap * @sizeOf([*c]u8)];
-                const new_mem = try self.allocator.realloc(old_mem, new_cap * @sizeOf([*c]u8));
-                self.items = @ptrCast(@alignCast(new_mem.ptr));
-            } else {
-                // First allocation
-                const new_mem = try self.allocator.alloc(u8, new_cap * @sizeOf([*c]u8));
-                self.items = @ptrCast(@alignCast(new_mem.ptr));
-            }
-            self.cap = new_cap;
-        }
-
-        self.items[self.len] = item;
-        self.len += 1;
-    }
-
-    fn deinit(self: *NameArray) void {
-        if (self.items) |items| {
-            const items_mem = @as([*]u8, @ptrCast(items))[0 .. self.cap * @sizeOf([*c]u8)];
-            self.allocator.free(items_mem);
-        }
-    }
-};
+const ResultsList = std.array_list.AlignedManaged([*c]u8, null);
 
 // Pattern analysis structure for optimization
 const PatternInfo = struct {
@@ -338,7 +300,7 @@ fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
 }
 
 // Expand brace pattern into multiple patterns
-fn expandBraces(allocator: std.mem.Allocator, pattern: []const u8, results: *NameArray) !void {
+fn expandBraces(allocator: std.mem.Allocator, pattern: []const u8, results: *ResultsList) !void {
     // Find first unescaped opening brace
     var brace_start: ?usize = null;
     var i: usize = 0;
@@ -378,7 +340,7 @@ fn expandBraces(allocator: std.mem.Allocator, pattern: []const u8, results: *Nam
 
     // Split brace content by commas
     var start: usize = 0;
-    var alternatives = NameArray.init(allocator);
+    var alternatives = ResultsList.init(allocator);
     defer alternatives.deinit();
 
     i = 0;
@@ -401,7 +363,7 @@ fn expandBraces(allocator: std.mem.Allocator, pattern: []const u8, results: *Nam
     }
 
     // Recursively expand each alternative
-    for (alternatives.items[0..alternatives.len]) |alt_pattern| {
+    for (alternatives.items) |alt_pattern| {
         const alt_slice = mem.sliceTo(alt_pattern, 0);
         try expandBraces(allocator, alt_slice, results);
         allocator.free(alt_slice);
@@ -447,13 +409,13 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
     }
 
     // Collect all matching paths
-    var result_paths = NameArray.init(allocator);
+    var result_paths = ResultsList.init(allocator);
     defer result_paths.deinit();
 
     // Start recursive expansion from current directory
     expandWildcardComponents(allocator, ".", components[0..component_count], 0, &result_paths, directories_only) catch |err| {
         // Clean up any allocated paths on error
-        for (result_paths.items[0..result_paths.len]) |path| {
+        for (result_paths.items) |path| {
             const path_slice = mem.sliceTo(path, 0);
             allocator.free(path_slice);
         }
@@ -461,7 +423,7 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
     };
 
     // Handle no matches
-    if (result_paths.len == 0) {
+    if (result_paths.items.len == 0) {
         if (flags & GLOB_NOCHECK != 0) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return GLOB_NOSPACE;
             @memcpy(pat_copy[0..pattern.len], pattern);
@@ -481,20 +443,20 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
 
     // Sort unless NOSORT
     if (flags & GLOB_NOSORT == 0) {
-        qsort(@ptrCast(result_paths.items), result_paths.len, @sizeOf([*c]u8), c_cmp_strs);
+        qsort(@ptrCast(result_paths.items.ptr), result_paths.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
     // Build result
-    const pathv_buf = allocator.alloc([*c]u8, result_paths.len + 1) catch return GLOB_NOSPACE;
+    const pathv_buf = allocator.alloc([*c]u8, result_paths.items.len + 1) catch return GLOB_NOSPACE;
     const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
     var i: usize = 0;
-    while (i < result_paths.len) : (i += 1) {
+    while (i < result_paths.items.len) : (i += 1) {
         result[i] = result_paths.items[i];
     }
-    result[result_paths.len] = null;
+    result[result_paths.items.len] = null;
 
-    pglob.gl_pathc = result_paths.len;
+    pglob.gl_pathc = result_paths.items.len;
     pglob.gl_pathv = result;
 
     return 0;
@@ -524,7 +486,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     }
 
     // Collect all matching paths
-    var result_paths = NameArray.init(allocator);
+    var result_paths = ResultsList.init(allocator);
     defer result_paths.deinit();
 
     // Start from literal prefix instead of "."
@@ -535,7 +497,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
 
     expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only) catch |err| {
         // Clean up any allocated paths on error
-        for (result_paths.items[0..result_paths.len]) |path| {
+        for (result_paths.items) |path| {
             const path_slice = mem.sliceTo(path, 0);
             allocator.free(path_slice);
         }
@@ -543,7 +505,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     };
 
     // Handle no matches
-    if (result_paths.len == 0) {
+    if (result_paths.items.len == 0) {
         if (flags & GLOB_NOCHECK != 0) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return GLOB_NOSPACE;
             @memcpy(pat_copy[0..pattern.len], pattern);
@@ -563,20 +525,20 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
 
     // Sort unless NOSORT
     if (flags & GLOB_NOSORT == 0) {
-        qsort(@ptrCast(result_paths.items), result_paths.len, @sizeOf([*c]u8), c_cmp_strs);
+        qsort(@ptrCast(result_paths.items.ptr), result_paths.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
     // Build result
-    const pathv_buf = allocator.alloc([*c]u8, result_paths.len + 1) catch return GLOB_NOSPACE;
+    const pathv_buf = allocator.alloc([*c]u8, result_paths.items.len + 1) catch return GLOB_NOSPACE;
     const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
     var i: usize = 0;
-    while (i < result_paths.len) : (i += 1) {
+    while (i < result_paths.items.len) : (i += 1) {
         result[i] = result_paths.items[i];
     }
-    result[result_paths.len] = null;
+    result[result_paths.items.len] = null;
 
-    pglob.gl_pathc = result_paths.len;
+    pglob.gl_pathc = result_paths.items.len;
     pglob.gl_pathv = result;
 
     return 0;
@@ -588,7 +550,7 @@ fn expandWildcardComponents(
     current_dir: []const u8,
     components: []const []const u8,
     component_idx: usize,
-    results: *NameArray,
+    results: *ResultsList,
     directories_only: bool,
 ) !void {
     // Safety: limit recursion depth
@@ -902,9 +864,9 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
 
     // Handle brace expansion if GLOB_BRACE is set
     if (flags & GLOB_BRACE != 0) {
-        var expanded = NameArray.init(allocator);
+        var expanded = ResultsList.init(allocator);
         defer {
-            for (expanded.items[0..expanded.len]) |item| {
+            for (expanded.items) |item| {
                 const item_mem = mem.sliceTo(item, 0);
                 allocator.free(item_mem);
             }
@@ -915,7 +877,7 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
 
         // Glob each expanded pattern
         var first = true;
-        for (expanded.items[0..expanded.len]) |exp_pattern| {
+        for (expanded.items) |exp_pattern| {
             const exp_slice = mem.sliceTo(exp_pattern, 0);
             const result = globSingle(allocator, exp_slice, if (first) flags else flags | GLOB_APPEND, pglob);
 
@@ -1006,7 +968,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     // OPTIMIZATION: Use ArrayList to accumulate ALL results, avoiding O(n²) append behavior
     // Instead of using GLOB_APPEND which reallocates pathv for every directory,
     // we collect all results in a list and convert to pathv once at the end
-    var all_results = NameArray.init(allocator);
+    var all_results = ResultsList.init(allocator);
     defer all_results.deinit();
 
     // Recursively collect all matching paths
@@ -1017,13 +979,13 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     }
 
     // No matches found - return GLOB_NOMATCH (consistent with glibc)
-    if (all_results.len == 0) {
+    if (all_results.items.len == 0) {
         return GLOB_NOMATCH;
     }
 
     // Sort results unless NOSORT flag is set
     if (flags & GLOB_NOSORT == 0) {
-        qsort(@ptrCast(all_results.items), all_results.len, @sizeOf([*c]u8), c_cmp_strs);
+        qsort(@ptrCast(all_results.items.ptr), all_results.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
     // Convert ArrayList to pathv format
@@ -1031,13 +993,13 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
 }
 
 // Helper to finalize results from ArrayList to glob_t
-fn finalizeResults(allocator: std.mem.Allocator, results: *NameArray, flags: c_int, pglob: *glob_t) c_int {
+fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: c_int, pglob: *glob_t) c_int {
     const offs = if (flags & GLOB_DOOFFS != 0) pglob.gl_offs else 0;
 
     // Handle GLOB_APPEND - merge with existing results
     if (flags & GLOB_APPEND != 0 and pglob.gl_pathv != null and pglob.gl_pathc > 0) {
         const old_count = pglob.gl_pathc;
-        const new_count = results.len;
+        const new_count = results.items.len;
         const total_count = old_count + new_count;
 
         const pathv_buf = allocator.alloc([*c]u8, offs + total_count + 1) catch return GLOB_NOSPACE;
@@ -1068,7 +1030,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *NameArray, flags: c_i
         pglob.gl_pathv = result;
     } else {
         // Fresh allocation
-        const pathv_buf = allocator.alloc([*c]u8, offs + results.len + 1) catch return GLOB_NOSPACE;
+        const pathv_buf = allocator.alloc([*c]u8, offs + results.items.len + 1) catch return GLOB_NOSPACE;
         const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
         // Fill offset slots
@@ -1077,12 +1039,12 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *NameArray, flags: c_i
 
         // Copy results
         var i: usize = 0;
-        while (i < results.len) : (i += 1) {
+        while (i < results.items.len) : (i += 1) {
             result[offs + i] = results.items[i];
         }
-        result[offs + results.len] = null;
+        result[offs + results.items.len] = null;
 
-        pglob.gl_pathc = results.len;
+        pglob.gl_pathc = results.items.len;
         pglob.gl_pathv = result;
     }
 
@@ -1090,7 +1052,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *NameArray, flags: c_i
 }
 
 // Recursive helper that collects results into ArrayList instead of using GLOB_APPEND
-fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: c_int, results: *NameArray, depth: usize, info: *const PatternInfo) c_int {
+fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: c_int, results: *ResultsList, depth: usize, info: *const PatternInfo) c_int {
     // Limit recursion depth
     if (depth > 100) return 0;
 
@@ -1204,7 +1166,7 @@ fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const 
 }
 
 // Version of globInDirImpl that appends directly to NameArray instead of creating new pglob
-fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, results: *NameArray, directories_only: bool) c_int {
+fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, results: *ResultsList, directories_only: bool) c_int {
     const pattern_ctx = PatternContext.init(pattern);
 
     var dirname_z: [4096:0]u8 = undefined;
@@ -1341,7 +1303,7 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     defer _ = c.closedir(dir);
 
     // Zig-style array with allocator
-    var names = NameArray.init(allocator);
+    var names = ResultsList.init(allocator);
     defer names.deinit();
 
     // Batch processing buffer for parallel matching
@@ -1492,7 +1454,7 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     }
 
     // Handle no matches
-    if (names.len == 0) {
+    if (names.items.len == 0) {
         if (flags & GLOB_NOCHECK != 0) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return GLOB_NOSPACE;
             @memcpy(pat_copy[0..pattern.len], pattern);
@@ -1512,13 +1474,13 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
 
     // Sort unless NOSORT
     if (flags & GLOB_NOSORT == 0) {
-        qsort(@ptrCast(names.items), names.len, @sizeOf([*c]u8), c_cmp_strs);
+        qsort(@ptrCast(names.items.ptr), names.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
     // Handle GLOB_APPEND flag - merge with existing results
     if (flags & GLOB_APPEND != 0 and pglob.gl_pathv != null and pglob.gl_pathc > 0) {
         const old_count = pglob.gl_pathc;
-        const new_count = names.len;
+        const new_count = names.items.len;
         const total_count = old_count + new_count;
         const offs = if (flags & GLOB_DOOFFS != 0) pglob.gl_offs else 0;
 
@@ -1554,7 +1516,7 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     } else {
         // No APPEND or first call - allocate fresh result array
         const offs = if (flags & GLOB_DOOFFS != 0) pglob.gl_offs else 0;
-        const pathv_buf = allocator.alloc([*c]u8, offs + names.len + 1) catch return GLOB_NOSPACE;
+        const pathv_buf = allocator.alloc([*c]u8, offs + names.items.len + 1) catch return GLOB_NOSPACE;
         const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
         // Fill offset slots with NULL (if GLOB_DOOFFS)
@@ -1565,12 +1527,12 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
 
         // Copy matches starting after offset
         var i: usize = 0;
-        while (i < names.len) : (i += 1) {
+        while (i < names.items.len) : (i += 1) {
             result[offs + i] = names.items[i];
         }
-        result[offs + names.len] = null;
+        result[offs + names.items.len] = null;
 
-        pglob.gl_pathc = names.len;
+        pglob.gl_pathc = names.items.len;
         pglob.gl_pathv = result;
     }
 
