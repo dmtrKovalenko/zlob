@@ -71,7 +71,7 @@ const TestDir = struct {
         defer g.deinit();
 
         // Handle NoMatch by returning empty array (Rust glob behavior)
-        var result = g.glob(pattern) catch |err| {
+        var result = g.glob_match(pattern) catch |err| {
             if (err == error.NoMatch) {
                 return try allocator.alloc([]const u8, 0);
             }

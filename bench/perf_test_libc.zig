@@ -1,5 +1,5 @@
 const std = @import("std");
-const glob_libc = @import("glob_libc");
+const glob = @import("glob");
 
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
@@ -13,11 +13,11 @@ pub fn main() !void {
 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        var pglob: glob_libc.glob_t = undefined;
+        var pglob: glob.glob_t = undefined;
         // Use a pattern that matches many files
-        const result = glob_libc.glob(allocator, "drivers/*.c", 0, null, &pglob);
+        const result = glob.glob(allocator, "drivers/*.c", 0, null, &pglob);
         if (result == 0) {
-            glob_libc.globfree(allocator, &pglob);
+            glob.globfree(allocator, &pglob);
         }
     }
 

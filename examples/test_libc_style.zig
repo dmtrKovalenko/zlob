@@ -1,11 +1,11 @@
 const std = @import("std");
-const glob_libc = @import("glob_libc");
+const glob_impl = @import("glob");
 
 const Timer = std.time.Timer;
 
 // Real libc glob
-extern "c" fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: ?*const anyopaque, pglob: *glob_libc.glob_t) c_int;
-extern "c" fn globfree(pglob: *glob_libc.glob_t) void;
+extern "c" fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: ?*const anyopaque, pglob: *glob_impl.glob_t) c_int;
+extern "c" fn globfree(pglob: *glob_impl.glob_t) void;
 
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
@@ -33,7 +33,7 @@ pub fn main() !void {
 
             var i: usize = 0;
             while (i < tc.iterations) : (i += 1) {
-                var pglob: glob_libc.glob_t = undefined;
+                var pglob: glob_impl.glob_t = undefined;
                 const result = glob(tc.pattern.ptr, 0, null, &pglob);
                 if (result == 0) {
                     globfree(&pglob);
@@ -53,10 +53,10 @@ pub fn main() !void {
 
             var i: usize = 0;
             while (i < tc.iterations) : (i += 1) {
-                var pglob: glob_libc.glob_t = undefined;
-                const result = glob_libc.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
+                var pglob: glob_impl.glob_t = undefined;
+                const result = glob_impl.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
                 if (result == 0) {
-                    glob_libc.globfree(allocator, &pglob);
+                    glob_impl.globfree(allocator, &pglob);
                 }
             }
 
@@ -79,17 +79,17 @@ pub fn main() !void {
     };
 
     for (verify_patterns) |pattern| {
-        var libc_pglob: glob_libc.glob_t = undefined;
-        var our_pglob: glob_libc.glob_t = undefined;
+        var libc_pglob: glob_impl.glob_t = undefined;
+        var our_pglob: glob_impl.glob_t = undefined;
 
         const libc_result = glob(pattern.ptr, 0, null, &libc_pglob);
-        const our_result = glob_libc.glob(allocator, pattern.ptr, 0, null, &our_pglob);
+        const our_result = glob_impl.glob(allocator, pattern.ptr, 0, null, &our_pglob);
 
         const libc_count = if (libc_result == 0) libc_pglob.gl_pathc else 0;
         const our_count = if (our_result == 0) our_pglob.gl_pathc else 0;
 
         if (libc_result == 0) globfree(&libc_pglob);
-        if (our_result == 0) glob_libc.globfree(allocator, &our_pglob);
+        if (our_result == 0) glob_impl.globfree(allocator, &our_pglob);
 
         const match = if (libc_count == our_count) "✓" else "✗";
         std.debug.print("{s} Pattern '{s}': libc={d}, ours={d}\n", .{ match, pattern, libc_count, our_count });

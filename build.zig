@@ -35,16 +35,16 @@ pub fn build(b: *std.Build) void {
         // intend to expose to consumers that were defined in other files part
         // of this module, you will have to make sure to re-export them from
         // the root file.
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/lib.zig"),
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
         .link_libc = true,
     });
 
-    // C-style glob module (defined early for use in tests)
-    const glob_libc_mod = b.addModule("glob_libc", .{
-        .root_source_file = b.path("src/glob_libc.zig"),
+    // glob module (for direct access to glob implementation)
+    const glob_mod = b.addModule("glob", .{
+        .root_source_file = b.path("src/glob.zig"),
         .target = target,
         .link_libc = true,
     });
@@ -145,7 +145,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "simdglob", .module = mod },
-                    .{ .name = "glob_libc", .module = glob_libc_mod },
+                    .{ .name = "glob", .module = glob_mod },
                 },
             }),
         });
@@ -276,7 +276,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "glob_libc", .module = glob_libc_mod },
+                .{ .name = "glob", .module = glob_mod },
             },
         }),
     });
@@ -296,7 +296,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "glob_libc", .module = glob_libc_mod },
+                .{ .name = "glob", .module = glob_mod },
             },
         }),
     });
@@ -316,7 +316,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "glob_libc", .module = glob_libc_mod },
+                .{ .name = "glob", .module = glob_mod },
             },
         }),
     });
@@ -336,7 +336,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "glob_libc", .module = glob_libc_mod },
+                .{ .name = "glob", .module = glob_mod },
             },
         }),
     });

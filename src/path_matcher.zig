@@ -5,19 +5,18 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
-const glob_libc = @import("glob_libc.zig");
 const glob = @import("glob.zig");
 
 // Import existing functions
-const fnmatch = glob_libc.fnmatch;
-const hasWildcardsSIMD = glob_libc.hasWildcardsSIMD;
+const fnmatch = glob.fnmatch;
+const hasWildcardsSIMD = glob.hasWildcardsSIMD;
 
 // Re-export types and flags
 pub const GlobResult = glob.GlobResult;
-pub const GLOB_NOSORT = glob_libc.GLOB_NOSORT;
-pub const GLOB_PERIOD = glob_libc.GLOB_PERIOD;
-pub const GLOB_NOCHECK = glob_libc.GLOB_NOCHECK;
-pub const GLOB_NOESCAPE = glob_libc.GLOB_NOESCAPE;
+pub const GLOB_NOSORT = glob.GLOB_NOSORT;
+pub const GLOB_PERIOD = glob.GLOB_PERIOD;
+pub const GLOB_NOCHECK = glob.GLOB_NOCHECK;
+pub const GLOB_NOESCAPE = glob.GLOB_NOESCAPE;
 
 /// Internal structure to hold pattern segments split by **
 const PatternSegments = struct {
@@ -490,7 +489,7 @@ pub fn matchPaths(
 
     if (is_simple_suffix) {
         const suffix = pattern[1..];
-        const simdSuffixMatch = glob_libc.simdSuffixMatch;
+        const simdSuffixMatch = glob.simdSuffixMatch;
 
         // Single pass: collect matches directly
         var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);

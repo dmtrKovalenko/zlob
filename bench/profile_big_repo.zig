@@ -1,5 +1,5 @@
 const std = @import("std");
-const glob_libc = @import("glob_libc");
+const glob = @import("glob");
 
 const TestCase = struct {
     name: []const u8,
@@ -16,7 +16,7 @@ pub fn main() !void {
     // Change to big repo
     try std.process.changeCurDir("/home/neogoose/dev/fff.nvim/big-repo");
     std.debug.print("Changed to big-repo directory\n", .{});
-    std.debug.print("Profiling glob_libc.zig implementation\n", .{});
+    std.debug.print("Profiling glob.zig implementation\n", .{});
     std.debug.print("========================================\n\n", .{});
 
     const test_cases = [_]TestCase{
@@ -64,11 +64,11 @@ pub fn main() !void {
 
         // Warmup run to avoid cold cache
         {
-            var pglob: glob_libc.glob_t = undefined;
-            const result = glob_libc.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
+            var pglob: glob.glob_t = undefined;
+            const result = glob.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
             if (result == 0) {
                 std.debug.print("  Matches: {d}\n", .{pglob.gl_pathc});
-                glob_libc.globfree(allocator, &pglob);
+                glob.globfree(allocator, &pglob);
             } else {
                 std.debug.print("  Matches: 0 (error code: {d})\n", .{result});
             }
@@ -81,11 +81,11 @@ pub fn main() !void {
         var i: usize = 0;
         var matches_this_test: usize = 0;
         while (i < tc.iterations) : (i += 1) {
-            var pglob: glob_libc.glob_t = undefined;
-            const result = glob_libc.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
+            var pglob: glob.glob_t = undefined;
+            const result = glob.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
             if (result == 0) {
                 matches_this_test = pglob.gl_pathc;
-                glob_libc.globfree(allocator, &pglob);
+                glob.globfree(allocator, &pglob);
             }
         }
 

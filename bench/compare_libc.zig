@@ -40,7 +40,7 @@ fn benchmarkSimdGlob(allocator: std.mem.Allocator, pattern: []const u8, iteratio
 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        var result = try g.glob(pattern);
+        var result = try g.glob_match(pattern);
         result.deinit();
         // Glob automatically resets itself after returning result
     }

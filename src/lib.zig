@@ -7,19 +7,19 @@
 
 const std = @import("std");
 
-// Re-export the glob module
+// Re-export the glob module (contains all implementation)
 pub const glob = @import("glob.zig");
-
-// Re-export glob_libc module for C-style glob API
-pub const glob_libc = @import("glob_libc.zig");
 
 // Re-export common types and functions for convenience
 pub const Glob = glob.Glob;
 pub const GlobResult = glob.GlobResult;
 pub const GlobError = glob.GlobError;
 
-// Re-export SIMD function for benchmarking
+// Re-export SIMD functions for benchmarking
 pub const simdFindChar = glob.simdFindChar;
+pub const hasWildcardsSIMD = glob.hasWildcardsSIMD;
+pub const simdSuffixMatch = glob.simdSuffixMatch;
+pub const fnmatch = glob.fnmatch;
 
 // Re-export flags
 pub const GLOB_APPEND = glob.GLOB_APPEND;
@@ -33,8 +33,9 @@ pub const GLOB_MAGCHAR = glob.GLOB_MAGCHAR;
 pub const GLOB_NOMAGIC = glob.GLOB_NOMAGIC;
 pub const GLOB_TILDE = glob.GLOB_TILDE;
 pub const GLOB_BRACE = glob.GLOB_BRACE;
-pub const GLOB_LIMIT = glob.GLOB_LIMIT;
-pub const GLOB_PERIOD = glob_libc.GLOB_PERIOD;
+pub const GLOB_PERIOD = glob.GLOB_PERIOD;
+pub const GLOB_ONLYDIR = glob.GLOB_ONLYDIR;
+pub const GLOB_TILDE_CHECK = glob.GLOB_TILDE_CHECK;
 
 /// Perform glob matching on filesystem
 ///
@@ -47,7 +48,7 @@ pub const GLOB_PERIOD = glob_libc.GLOB_PERIOD;
 /// }
 /// ```
 pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !GlobResult {
-    return glob.glob(allocator, pattern, flags);
+    return glob.globMatch(allocator, pattern, flags);
 }
 
 /// Match glob pattern against array of paths with full ** recursive support
