@@ -105,7 +105,7 @@ test "recursive glob - **/*.c finds all C files" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob(testing.allocator, pattern.ptr, 0, null, &pglob);
+    const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
     defer if (result == 0) glob.globfree(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -138,7 +138,7 @@ test "recursive glob - dir1/**/*.c finds C files in dir1" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob(testing.allocator, pattern.ptr, 0, null, &pglob);
+    const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
     defer if (result == 0) glob.globfree(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -169,7 +169,7 @@ test "recursive glob - **/*.h finds all header files" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob(testing.allocator, pattern.ptr, 0, null, &pglob);
+    const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
     defer if (result == 0) glob.globfree(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -200,7 +200,7 @@ test "recursive glob - dir2/**/*.c finds files in dir2 subdirectories" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob(testing.allocator, pattern.ptr, 0, null, &pglob);
+    const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
     defer if (result == 0) glob.globfree(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -231,7 +231,7 @@ test "recursive glob - **/*.txt finds all text files" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob(testing.allocator, pattern.ptr, 0, null, &pglob);
+    const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
     defer if (result == 0) glob.globfree(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -262,7 +262,7 @@ test "recursive glob - no matches returns GLOB_NOMATCH" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob(testing.allocator, pattern.ptr, 0, null, &pglob);
+    const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
 
     // Recursive glob returns GLOB_NOMATCH when no matches found (consistent with glibc)
     try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
@@ -292,7 +292,7 @@ test "recursive glob - GLOB_APPEND correctly accumulates results" {
     // First glob for .c files
     const pattern1 = try allocator.dupeZ(u8, "**/*.c");
     defer allocator.free(pattern1);
-    const result1 = glob.glob(testing.allocator, pattern1.ptr, 0, null, &pglob);
+    const result1 = glob.glob_c(testing.allocator, pattern1.ptr, 0, null, &pglob);
     try testing.expectEqual(@as(c_int, 0), result1);
     const first_count = pglob.gl_pathc;
     try testing.expectEqual(@as(usize, 8), first_count);
@@ -300,7 +300,7 @@ test "recursive glob - GLOB_APPEND correctly accumulates results" {
     // Second glob for .h files with GLOB_APPEND
     const pattern2 = try allocator.dupeZ(u8, "**/*.h");
     defer allocator.free(pattern2);
-    const result2 = glob.glob(testing.allocator, pattern2.ptr, glob.GLOB_APPEND, null, &pglob);
+    const result2 = glob.glob_c(testing.allocator, pattern2.ptr, glob.GLOB_APPEND, null, &pglob);
     defer glob.globfree(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result2);
@@ -331,7 +331,7 @@ test "recursive glob - empty pattern component" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob(testing.allocator, pattern.ptr, 0, null, &pglob);
+    const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
     defer if (result == 0) glob.globfree(testing.allocator, &pglob);
 
     // Should handle gracefully, either finding directories or returning NOMATCH

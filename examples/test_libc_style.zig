@@ -54,7 +54,7 @@ pub fn main() !void {
             var i: usize = 0;
             while (i < tc.iterations) : (i += 1) {
                 var pglob: glob_impl.glob_t = undefined;
-                const result = glob_impl.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
+                const result = glob_impl.glob_c(allocator, tc.pattern.ptr, 0, null, &pglob);
                 if (result == 0) {
                     glob_impl.globfree(allocator, &pglob);
                 }
@@ -83,7 +83,7 @@ pub fn main() !void {
         var our_pglob: glob_impl.glob_t = undefined;
 
         const libc_result = glob(pattern.ptr, 0, null, &libc_pglob);
-        const our_result = glob_impl.glob(allocator, pattern.ptr, 0, null, &our_pglob);
+        const our_result = glob_impl.glob_c(allocator, pattern.ptr, 0, null, &our_pglob);
 
         const libc_count = if (libc_result == 0) libc_pglob.gl_pathc else 0;
         const our_count = if (our_result == 0) our_pglob.gl_pathc else 0;

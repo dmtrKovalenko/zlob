@@ -65,7 +65,7 @@ pub fn main() !void {
         // Warmup run to avoid cold cache
         {
             var pglob: glob.glob_t = undefined;
-            const result = glob.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
+            const result = glob.glob_c(allocator, tc.pattern.ptr, 0, null, &pglob);
             if (result == 0) {
                 std.debug.print("  Matches: {d}\n", .{pglob.gl_pathc});
                 glob.globfree(allocator, &pglob);
@@ -82,7 +82,7 @@ pub fn main() !void {
         var matches_this_test: usize = 0;
         while (i < tc.iterations) : (i += 1) {
             var pglob: glob.glob_t = undefined;
-            const result = glob.glob(allocator, tc.pattern.ptr, 0, null, &pglob);
+            const result = glob.glob_c(allocator, tc.pattern.ptr, 0, null, &pglob);
             if (result == 0) {
                 matches_this_test = pglob.gl_pathc;
                 glob.globfree(allocator, &pglob);

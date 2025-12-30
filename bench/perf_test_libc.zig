@@ -15,7 +15,7 @@ pub fn main() !void {
     while (i < iterations) : (i += 1) {
         var pglob: glob.glob_t = undefined;
         // Use a pattern that matches many files
-        const result = glob.glob(allocator, "drivers/*.c", 0, null, &pglob);
+        const result = glob.glob_c(allocator, "drivers/*.c", 0, null, &pglob);
         if (result == 0) {
             glob.globfree(allocator, &pglob);
         }

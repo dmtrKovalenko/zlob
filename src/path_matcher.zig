@@ -10,6 +10,8 @@ const glob = @import("glob.zig");
 // Import existing functions
 const fnmatch = glob.fnmatch;
 const hasWildcardsSIMD = glob.hasWildcardsSIMD;
+const PatternContext = glob.PatternContext;
+const fnmatchWithContext = glob.fnmatchWithContext;
 
 // Re-export types and flags
 pub const GlobResult = glob.GlobResult;
@@ -21,10 +23,12 @@ pub const GLOB_NOESCAPE = glob.GLOB_NOESCAPE;
 /// Internal structure to hold pattern segments split by **
 const PatternSegments = struct {
     segments: [][]const u8,
+    contexts: []PatternContext, // Pre-computed contexts to avoid redundant hasWildcardsSIMD calls
     allocator: Allocator,
 
     pub fn deinit(self: *PatternSegments) void {
         self.allocator.free(self.segments);
+        self.allocator.free(self.contexts);
     }
 };
 
@@ -46,8 +50,13 @@ fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8) !PatternS
     if (mem.indexOf(u8, pattern, "**") == null) {
         var segments = try allocator.alloc([]const u8, 1);
         segments[0] = pattern;
+
+        var contexts = try allocator.alloc(PatternContext, 1);
+        contexts[0] = PatternContext.init(pattern);
+
         return PatternSegments{
             .segments = segments,
+            .contexts = contexts,
             .allocator = allocator,
         };
     }
@@ -63,16 +72,21 @@ fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8) !PatternS
     var segments = try allocator.alloc([]const u8, segment_count);
     errdefer allocator.free(segments);
 
+    var contexts = try allocator.alloc(PatternContext, segment_count);
+    errdefer allocator.free(contexts);
+
     // Split and populate segments
     var idx: usize = 0;
     iter = mem.splitScalar(u8, pattern, '/');
     while (iter.next()) |segment| {
         if (segment.len > 0) {
             segments[idx] = segment;
+            contexts[idx] = PatternContext.init(segment);
             idx += 1;
         } else if (idx == 0 and pattern.len > 0 and pattern[0] == '/') {
             // Leading slash - preserve as empty segment to indicate absolute path
             segments[idx] = "";
+            contexts[idx] = PatternContext.init("");
             idx += 1;
         }
     }
@@ -80,10 +94,12 @@ fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8) !PatternS
     // Trim to actual count
     if (idx < segment_count) {
         segments = try allocator.realloc(segments, idx);
+        contexts = try allocator.realloc(contexts, idx);
     }
 
     return PatternSegments{
         .segments = segments,
+        .contexts = contexts,
         .allocator = allocator,
     };
 }
@@ -179,6 +195,7 @@ fn shouldSkipHidden(path_component: []const u8, pattern: []const u8, flags: u32)
 fn matchPathSegments(
     path_components: [][]const u8,
     pattern_segments: [][]const u8,
+    pattern_contexts: []PatternContext,
     segment_idx: usize,
     path_idx: usize,
     flags: u32,
@@ -198,7 +215,7 @@ fn matchPathSegments(
         // ** can match zero or more path components
 
         // Try matching 0 directories (** matches nothing)
-        if (matchPathSegments(path_components, pattern_segments, segment_idx + 1, path_idx, flags)) {
+        if (matchPathSegments(path_components, pattern_segments, pattern_contexts, segment_idx + 1, path_idx, flags)) {
             return true;
         }
 
@@ -218,7 +235,7 @@ fn matchPathSegments(
             }
 
             if (!should_block) {
-                if (matchPathSegments(path_components, pattern_segments, segment_idx + 1, path_idx + skip, flags)) {
+                if (matchPathSegments(path_components, pattern_segments, pattern_contexts, segment_idx + 1, path_idx + skip, flags)) {
                     return true;
                 }
             }
@@ -238,9 +255,9 @@ fn matchPathSegments(
             return false;
         }
 
-        // Match using fnmatch
-        if (fnmatch(current_pattern, path_component)) {
-            return matchPathSegments(path_components, pattern_segments, segment_idx + 1, path_idx + 1, flags);
+        // Match using pre-computed context to avoid redundant hasWildcardsSIMD calls
+        if (fnmatchWithContext(&pattern_contexts[segment_idx], path_component)) {
+            return matchPathSegments(path_components, pattern_segments, pattern_contexts, segment_idx + 1, path_idx + 1, flags);
         }
 
         return false;
@@ -301,7 +318,9 @@ fn matchSinglePath(
             }
         }
 
-        return fnmatch(pattern_buf[0..pattern_len], normalized_path_buf[0..norm_len]);
+        // Use PatternContext to avoid redundant hasWildcardsSIMD calls
+        const pattern_ctx = PatternContext.init(pattern_buf[0..pattern_len]);
+        return fnmatchWithContext(&pattern_ctx, normalized_path_buf[0..norm_len]);
     }
 
     // Slow path: pattern contains **, do component-by-component matching
@@ -325,6 +344,7 @@ fn matchSinglePath(
     return matchPathSegments(
         path_components,
         pattern_segments.segments[pattern_start..],
+        pattern_segments.contexts[pattern_start..],
         0,
         path_start,
         flags,

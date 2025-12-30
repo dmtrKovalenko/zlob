@@ -8,7 +8,7 @@ pub fn main() !void {
     // Test 1: Brace expansion
     std.debug.print("Test 1: Brace expansion {{src,examples}}/*.zig\n", .{});
     var pglob: glob.glob_t = undefined;
-    var result = glob.glob(allocator, "{src,examples}/*.zig", glob.GLOB_BRACE, null, &pglob);
+    var result = glob.glob_c(allocator, "{src,examples}/*.zig", glob.GLOB_BRACE, null, &pglob);
     if (result == 0) {
         std.debug.print("  SUCCESS: Matches: {d}\n", .{pglob.gl_pathc});
         var i: usize = 0;
@@ -23,7 +23,7 @@ pub fn main() !void {
 
     // Test 2: Nested braces
     std.debug.print("\nTest 2: Nested braces src/*.{{zig,c}}\n", .{});
-    result = glob.glob(allocator, "src/*.{zig,c}", glob.GLOB_BRACE, null, &pglob);
+    result = glob.glob_c(allocator, "src/*.{zig,c}", glob.GLOB_BRACE, null, &pglob);
     if (result == 0) {
         std.debug.print("  SUCCESS: Matches: {d}\n", .{pglob.gl_pathc});
         var i: usize = 0;
@@ -38,7 +38,7 @@ pub fn main() !void {
 
     // Test 3: Recursive glob **/*.zig
     std.debug.print("\nTest 3: Recursive glob **/*.zig\n", .{});
-    result = glob.glob(allocator, "**/*.zig", 0, null, &pglob);
+    result = glob.glob_c(allocator, "**/*.zig", 0, null, &pglob);
     if (result == 0) {
         std.debug.print("  SUCCESS: Matches: {d}\n", .{pglob.gl_pathc});
         var i: usize = 0;
@@ -56,7 +56,7 @@ pub fn main() !void {
 
     // Test 4: Recursive with specific dir
     std.debug.print("\nTest 4: Recursive in subdirectory src/**/*.zig\n", .{});
-    result = glob.glob(allocator, "src/**/*.zig", 0, null, &pglob);
+    result = glob.glob_c(allocator, "src/**/*.zig", 0, null, &pglob);
     if (result == 0) {
         std.debug.print("  SUCCESS: Matches: {d}\n", .{pglob.gl_pathc});
         var i: usize = 0;
@@ -71,7 +71,7 @@ pub fn main() !void {
 
     // Test 5: Combined - brace + recursive
     std.debug.print("\nTest 5: Combined brace + recursive {{src,examples}}/**/*.zig\n", .{});
-    result = glob.glob(allocator, "{src,examples}/**/*.zig", glob.GLOB_BRACE, null, &pglob);
+    result = glob.glob_c(allocator, "{src,examples}/**/*.zig", glob.GLOB_BRACE, null, &pglob);
     if (result == 0) {
         std.debug.print("  SUCCESS: Matches: {d}\n", .{pglob.gl_pathc});
         var i: usize = 0;
