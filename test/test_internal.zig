@@ -157,10 +157,10 @@ test "Glob - init with flags" {
     try testing.expect(g.flags == (glob.GLOB_MARK | glob.GLOB_NOSORT));
 }
 
-// matchFiles() API Tests
-// These tests verify the new pre-built file list matching API
+// matchPaths() API Tests
+// These tests verify the in-memory path matching API with recursive ** support
 
-test "matchFiles - simple wildcard" {
+test "matchPaths - simple wildcard" {
     const files = [_][]const u8{
         "test.zig",
         "main.c",
@@ -168,7 +168,7 @@ test "matchFiles - simple wildcard" {
         "readme.md",
     };
 
-    var result = try root.matchFiles(testing.allocator, "*.zig", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "*.zig", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -177,7 +177,7 @@ test "matchFiles - simple wildcard" {
     try testing.expectEqualStrings("test.zig", result.paths[1]);
 }
 
-test "matchFiles - question mark wildcard" {
+test "matchPaths - question mark wildcard" {
     const files = [_][]const u8{
         "a.c",
         "b.c",
@@ -185,7 +185,7 @@ test "matchFiles - question mark wildcard" {
         "abc.c",
     };
 
-    var result = try root.matchFiles(testing.allocator, "?.c", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "?.c", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -193,7 +193,7 @@ test "matchFiles - question mark wildcard" {
     try testing.expectEqualStrings("b.c", result.paths[1]);
 }
 
-test "matchFiles - character class" {
+test "matchPaths - character class" {
     const files = [_][]const u8{
         "test1.txt",
         "test2.txt",
@@ -202,7 +202,7 @@ test "matchFiles - character class" {
         "testb.txt",
     };
 
-    var result = try root.matchFiles(testing.allocator, "test[123].txt", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "test[123].txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
@@ -211,7 +211,7 @@ test "matchFiles - character class" {
     try testing.expectEqualStrings("test3.txt", result.paths[2]);
 }
 
-test "matchFiles - negated character class" {
+test "matchPaths - negated character class" {
     const files = [_][]const u8{
         "test1.txt",
         "test2.txt",
@@ -219,7 +219,7 @@ test "matchFiles - negated character class" {
         "testb.txt",
     };
 
-    var result = try root.matchFiles(testing.allocator, "test[!12].txt", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "test[!12].txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -227,56 +227,56 @@ test "matchFiles - negated character class" {
     try testing.expectEqualStrings("testb.txt", result.paths[1]);
 }
 
-test "matchFiles - no matches" {
+test "matchPaths - no matches" {
     const files = [_][]const u8{
         "test.c",
         "main.c",
         "lib.c",
     };
 
-    var result = try root.matchFiles(testing.allocator, "*.zig", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "*.zig", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 0), result.match_count);
 }
 
-test "matchFiles - all match" {
+test "matchPaths - all match" {
     const files = [_][]const u8{
         "test.zig",
         "main.zig",
         "lib.zig",
     };
 
-    var result = try root.matchFiles(testing.allocator, "*.zig", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "*.zig", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
 }
 
-test "matchFiles - empty file list" {
+test "matchPaths - empty file list" {
     const files = [_][]const u8{};
 
-    var result = try root.matchFiles(testing.allocator, "*.zig", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "*.zig", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 0), result.match_count);
 }
 
-test "matchFiles - exact match pattern" {
+test "matchPaths - exact match pattern" {
     const files = [_][]const u8{
         "exact.txt",
         "not-exact.txt",
         "exact-not.txt",
     };
 
-    var result = try root.matchFiles(testing.allocator, "exact.txt", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "exact.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);
     try testing.expectEqualStrings("exact.txt", result.paths[0]);
 }
 
-test "matchFiles - complex pattern" {
+test "matchPaths - complex pattern" {
     const files = [_][]const u8{
         "test_01.txt",
         "test_02.txt",
@@ -285,7 +285,7 @@ test "matchFiles - complex pattern" {
         "prod_01.txt",
     };
 
-    var result = try root.matchFiles(testing.allocator, "test_[0-9][0-9].txt", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "test_[0-9][0-9].txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
@@ -294,7 +294,7 @@ test "matchFiles - complex pattern" {
     try testing.expectEqualStrings("test_99.txt", result.paths[2]);
 }
 
-test "matchFiles - paths with directories" {
+test "matchPaths - paths with directories" {
     const files = [_][]const u8{
         "src/main.zig",
         "src/test.zig",
@@ -302,7 +302,7 @@ test "matchFiles - paths with directories" {
         "main.c",
     };
 
-    var result = try root.matchFiles(testing.allocator, "src/*.zig", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "src/*.zig", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -310,7 +310,7 @@ test "matchFiles - paths with directories" {
     try testing.expectEqualStrings("src/test.zig", result.paths[1]);
 }
 
-test "matchFiles - special characters in filenames" {
+test "matchPaths - special characters in filenames" {
     const files = [_][]const u8{
         "test-file.txt",
         "test_file.txt",
@@ -318,7 +318,7 @@ test "matchFiles - special characters in filenames" {
         "testfile.txt",
     };
 
-    var result = try root.matchFiles(testing.allocator, "test*.txt", &files, 0, null);
+    var result = try root.matchPaths(testing.allocator, "test*.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 4), result.match_count);

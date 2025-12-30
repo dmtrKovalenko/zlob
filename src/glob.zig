@@ -35,6 +35,8 @@ pub const GlobResult = struct {
     // Store full glob_t for zero-copy glob results (null if paths are Zig-allocated)
     // This allows proper cleanup via globfree() which handles arena allocator
     pglob: ?glob_libc.glob_t = null,
+    // Whether we own the path strings (true for glob(), false for matchPaths())
+    owns_paths: bool = true,
 
     pub fn deinit(self: *GlobResult) void {
         if (self.pglob) |*pglob_ptr| {
@@ -42,11 +44,14 @@ pub const GlobResult = struct {
             glob_libc.globfree(self.allocator, pglob_ptr);
             // Free only the slice array, not the strings themselves (already freed by globfree)
             self.allocator.free(self.paths);
-        } else {
+        } else if (self.owns_paths) {
             // Normal mode: paths are Zig-allocated, free them
             for (self.paths) |path| {
                 self.allocator.free(path);
             }
+            self.allocator.free(self.paths);
+        } else {
+            // matchPaths mode: we don't own the path strings, only free the array
             self.allocator.free(self.paths);
         }
     }
@@ -74,117 +79,60 @@ pub const Glob = struct {
     }
 
     pub fn glob(self: *Glob, pattern: []const u8) !GlobResult {
-        const result = try glob_internal(self.allocator, pattern, self.flags);
-        self.match_count = result.paths.len;
-        return result;
-    }
+        // Call the module-level glob function
+        const pattern_z = try self.allocator.dupeZ(u8, pattern);
+        defer self.allocator.free(pattern_z);
 
-    pub fn matchFiles(self: *Glob, pattern: []const u8, files: []const []const u8) !GlobResult {
-        // Check if pattern contains '/' - if not, match against basename only
-        const match_basename = std.mem.indexOfScalar(u8, pattern, '/') == null;
+        var pglob: glob_libc.glob_t = undefined;
+        const result = glob_libc.glob(self.allocator, pattern_z.ptr, @intCast(self.flags), null, &pglob);
 
-        // Fast path: if matching full paths, use original logic
-        if (!match_basename) {
-            // Count matches first
-            var count: usize = 0;
-            for (files) |file| {
-                if (glob_libc.fnmatch(pattern, file)) {
-                    count += 1;
-                }
-            }
-
-            // Handle NOCHECK flag
-            if (count == 0 and self.flags & GLOB_NOCHECK != 0) {
-                var paths = try self.allocator.alloc([]const u8, 1);
+        switch (result) {
+            0 => {
+                // Success - zero-copy: wrap C pointers directly without duplication
+                var paths = try self.allocator.alloc([]const u8, pglob.gl_pathc);
                 errdefer self.allocator.free(paths);
-                paths[0] = try self.allocator.dupe(u8, pattern);
-                self.match_count = 1;
+
+                var i: usize = 0;
+                while (i < pglob.gl_pathc) : (i += 1) {
+                    const c_path = pglob.gl_pathv[i];
+                    paths[i] = std.mem.sliceTo(c_path, 0);
+                }
+
+                self.match_count = pglob.gl_pathc;
                 return GlobResult{
                     .paths = paths,
-                    .match_count = 1,
+                    .match_count = pglob.gl_pathc,
                     .allocator = self.allocator,
+                    .pglob = pglob,
                 };
-            }
-
-            // Allocate and populate matches
-            var paths = try self.allocator.alloc([]const u8, count);
-            errdefer self.allocator.free(paths);
-
-            var idx: usize = 0;
-            for (files) |file| {
-                if (glob_libc.fnmatch(pattern, file)) {
-                    paths[idx] = try self.allocator.dupe(u8, file);
-                    idx += 1;
+            },
+            glob_libc.GLOB_NOSPACE => return error.OutOfMemory,
+            glob_libc.GLOB_ABORTED => return error.Aborted,
+            glob_libc.GLOB_NOMATCH => {
+                if (self.flags & GLOB_NOCHECK != 0) {
+                    var paths = try self.allocator.alloc([]const u8, 1);
+                    errdefer self.allocator.free(paths);
+                    paths[0] = try self.allocator.dupe(u8, pattern);
+                    self.match_count = 1;
+                    return GlobResult{
+                        .paths = paths,
+                        .match_count = 1,
+                        .allocator = self.allocator,
+                    };
                 }
-            }
-
-            // Sort results unless NOSORT flag is set
-            if (self.flags & GLOB_NOSORT == 0) {
-                std.mem.sort([]const u8, paths, {}, struct {
-                    fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-                        return std.mem.order(u8, a, b) == .lt;
-                    }
-                }.lessThan);
-            }
-
-            self.match_count = count;
-            return GlobResult{
-                .paths = paths,
-                .match_count = count,
-                .allocator = self.allocator,
-            };
+                return error.NoMatch;
+            },
+            else => return error.Aborted,
         }
+    }
 
-        // Basename matching path: extract basename once per file
-        var count: usize = 0;
-        for (files) |file| {
-            const basename = std.fs.path.basename(file);
-            if (glob_libc.fnmatch(pattern, basename)) {
-                count += 1;
-            }
-        }
-
-        // Handle NOCHECK flag for basename matching
-        if (count == 0 and self.flags & GLOB_NOCHECK != 0) {
-            var paths = try self.allocator.alloc([]const u8, 1);
-            errdefer self.allocator.free(paths);
-            paths[0] = try self.allocator.dupe(u8, pattern);
-            self.match_count = 1;
-            return GlobResult{
-                .paths = paths,
-                .match_count = 1,
-                .allocator = self.allocator,
-            };
-        }
-
-        // Allocate and populate matches for basename matching
-        var paths = try self.allocator.alloc([]const u8, count);
-        errdefer self.allocator.free(paths);
-
-        var idx: usize = 0;
-        for (files) |file| {
-            const basename = std.fs.path.basename(file);
-            if (glob_libc.fnmatch(pattern, basename)) {
-                paths[idx] = try self.allocator.dupe(u8, file);
-                idx += 1;
-            }
-        }
-
-        // Sort results unless NOSORT flag is set
-        if (self.flags & GLOB_NOSORT == 0) {
-            std.mem.sort([]const u8, paths, {}, struct {
-                fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-                    return std.mem.order(u8, a, b) == .lt;
-                }
-            }.lessThan);
-        }
-
-        self.match_count = count;
-        return GlobResult{
-            .paths = paths,
-            .match_count = count,
-            .allocator = self.allocator,
-        };
+    /// Match glob pattern against array of paths with full ** recursive support
+    /// This is an instance method version of the standalone matchPaths function
+    pub fn matchPaths(self: *Glob, pattern: []const u8, paths: []const []const u8) !GlobResult {
+        const path_matcher = @import("path_matcher.zig");
+        const result = try path_matcher.matchPaths(self.allocator, pattern, paths, self.flags);
+        self.match_count = result.match_count;
+        return result;
     }
 };
 
@@ -196,12 +144,6 @@ pub const fnmatch = glob_libc.fnmatch;
 
 /// Main glob function - matches pattern against filesystem (public API)
 pub fn glob(allocator: Allocator, pattern: []const u8, flags: u32) !GlobResult {
-    return glob_internal(allocator, pattern, flags);
-}
-
-/// Internal glob function - matches pattern against filesystem
-fn glob_internal(allocator: Allocator, pattern: []const u8, flags: u32) !GlobResult {
-    // Allocate null-terminated pattern for C API
     const pattern_z = try allocator.dupeZ(u8, pattern);
     defer allocator.free(pattern_z);
 

@@ -1533,7 +1533,7 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
 }
 
 // SIMD wildcard detection
-fn hasWildcardsSIMD(s: []const u8) bool {
+pub fn hasWildcardsSIMD(s: []const u8) bool {
     if (s.len >= 32) {
         const Vec32 = @Vector(32, u8);
         const star_vec: Vec32 = @splat('*');
@@ -1563,7 +1563,7 @@ fn hasWildcardsSIMD(s: []const u8) bool {
 }
 
 // SIMD suffix comparison for *.ext patterns
-fn simdSuffixMatch(string: []const u8, suffix: []const u8) bool {
+pub fn simdSuffixMatch(string: []const u8, suffix: []const u8) bool {
     if (string.len < suffix.len) return false;
     const start = string.len - suffix.len;
     const tail = string[start..];

@@ -34,8 +34,9 @@ pub const GLOB_NOMAGIC = glob.GLOB_NOMAGIC;
 pub const GLOB_TILDE = glob.GLOB_TILDE;
 pub const GLOB_BRACE = glob.GLOB_BRACE;
 pub const GLOB_LIMIT = glob.GLOB_LIMIT;
+pub const GLOB_PERIOD = glob_libc.GLOB_PERIOD;
 
-/// Convenience function to perform glob matching on filesystem
+/// Perform glob matching on filesystem
 ///
 /// Example:
 /// ```zig
@@ -49,34 +50,41 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !Glo
     return glob.glob(allocator, pattern, flags);
 }
 
-/// Match a pattern against a pre-built array of filenames
-/// This avoids filesystem I/O when you already have a file list
+/// Match glob pattern against array of paths with full ** recursive support
 ///
-/// For better performance when calling repeatedly, pass a reusable Glob instance:
-/// ```zig
-/// var g = simdglob.Glob.init(allocator, 0);
-/// defer g.deinit();
-/// const result1 = try simdglob.matchFiles(allocator, "*.txt", &files1, 0, &g);
-/// defer result1.deinit();
-/// const result2 = try simdglob.matchFiles(allocator, "*.zig", &files2, 0, &g);
-/// defer result2.deinit();
-/// ```
+/// This function provides in-memory pattern matching against an array of path strings
+/// WITHOUT any filesystem I/O. It properly handles recursive ** patterns that match
+/// zero or more directory components.
 ///
-/// Or pass null for one-off calls (less efficient):
+/// Pattern examples:
+/// - `**/*.c` - All .c files at any depth
+/// - `/users/**/code/*.zig` - All .zig files in any 'code' directory under /users
+/// - `src/**/test_*.zig` - All test files under src/
+///
+/// Example:
 /// ```zig
-/// const result = try simdglob.matchFiles(allocator, "*.txt", &files, 0, null);
+/// const paths = [_][]const u8{
+///     "/users/alice/code/main.c",
+///     "/users/alice/code/src/utils.c",
+///     "/users/bob/docs/readme.md",
+/// };
+///
+/// const result = try simdglob.matchPaths(allocator, "/users/**/code/*.c", &paths, 0);
 /// defer result.deinit();
+///
+/// for (result.paths) |path| {
+///     std.debug.print("Match: {s}\n", .{path});
+/// }
 /// ```
-pub fn matchFiles(allocator: std.mem.Allocator, pattern: []const u8, files: []const []const u8, flags: u32, reusable_glob: ?*Glob) !GlobResult {
-    if (reusable_glob) |g| {
-        g.reset();
-        g.flags = flags;
-        return try g.matchFiles(pattern, files);
-    } else {
-        var g = glob.Glob.init(allocator, flags);
-        defer g.deinit();
-        return try g.matchFiles(pattern, files);
-    }
+///
+/// Supported flags:
+/// - GLOB_NOSORT: Don't sort results
+/// - GLOB_NOCHECK: Return pattern itself if no matches
+/// - GLOB_PERIOD: Allow wildcards to match hidden files (starting with '.')
+/// - GLOB_NOESCAPE: Treat backslashes as literal characters
+pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags: u32) !GlobResult {
+    const path_matcher = @import("path_matcher.zig");
+    return path_matcher.matchPaths(allocator, pattern, paths, flags);
 }
 
 test {

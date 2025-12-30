@@ -133,6 +133,7 @@ pub fn build(b: *std.Build) void {
         "test/test_internal.zig",
         "test/test_posix.zig",
         "test/test_rust_glob.zig",
+        "test/test_path_matcher.zig",
     };
 
     for (test_files) |test_file| {
@@ -156,7 +157,7 @@ pub fn build(b: *std.Build) void {
     const benchmark = b.addExecutable(.{
         .name = "benchmark",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/benchmark.zig"),
+            .root_source_file = b.path("bench/benchmark.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -171,6 +172,40 @@ pub fn build(b: *std.Build) void {
     benchmark_cmd.step.dependOn(b.getInstallStep());
     const benchmark_step = b.step("benchmark", "Run SIMD benchmark");
     benchmark_step.dependOn(&benchmark_cmd.step);
+
+    // matchPaths benchmark executable
+    const bench_matchpaths = b.addExecutable(.{
+        .name = "bench_matchpaths",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench_matchPaths.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "simdglob", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(bench_matchpaths);
+
+    // matchPaths benchmark run step
+    const bench_matchpaths_cmd = b.addRunArtifact(bench_matchpaths);
+    bench_matchpaths_cmd.step.dependOn(b.getInstallStep());
+    const bench_matchpaths_step = b.step("bench-matchpaths", "Benchmark matchPaths() performance");
+    bench_matchpaths_step.dependOn(&bench_matchpaths_cmd.step);
+
+    // Recursive pattern benchmark for perf profiling
+    const bench_recursive = b.addExecutable(.{
+        .name = "bench_recursive",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench_recursive.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "simdglob", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(bench_recursive);
 
     // MatchFiles example executable
     const matchfiles_example = b.addExecutable(.{
@@ -196,7 +231,7 @@ pub fn build(b: *std.Build) void {
     const compare_libc = b.addExecutable(.{
         .name = "compare_libc",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/compare_libc.zig"),
+            .root_source_file = b.path("bench/compare_libc.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -217,7 +252,7 @@ pub fn build(b: *std.Build) void {
     const profile = b.addExecutable(.{
         .name = "profile",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/profile.zig"),
+            .root_source_file = b.path("bench/profile.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -257,7 +292,7 @@ pub fn build(b: *std.Build) void {
     const perf_test_libc = b.addExecutable(.{
         .name = "perf_test_libc",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/perf_test_libc.zig"),
+            .root_source_file = b.path("bench/perf_test_libc.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -297,7 +332,7 @@ pub fn build(b: *std.Build) void {
     const profile_big_repo = b.addExecutable(.{
         .name = "profile_big_repo",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/profile_big_repo.zig"),
+            .root_source_file = b.path("bench/profile_big_repo.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{

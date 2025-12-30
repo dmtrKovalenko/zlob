@@ -23,7 +23,7 @@ pub fn main() !void {
     var g = simdglob.Glob.init(allocator, 0);
     defer g.deinit();
 
-    var result1 = try simdglob.matchFiles(allocator, "*.json", &database_files, 0, &g);
+    var result1 = try g.matchPaths("*.json", &database_files);
     defer result1.deinit();
 
     std.debug.print("Pattern: *.json\n", .{});
@@ -46,7 +46,7 @@ pub fn main() !void {
         "prod1.log",
     };
 
-    var result2 = try simdglob.matchFiles(allocator, "test[0-9].log", &api_files, 0, &g);
+    var result2 = try g.matchPaths("test[0-9].log", &api_files);
     defer result2.deinit();
 
     std.debug.print("Pattern: test[0-9].log\n", .{});
@@ -69,7 +69,7 @@ pub fn main() !void {
         "test/test_main.zig",
     };
 
-    var result3 = try simdglob.matchFiles(allocator, "src/*.zig", &cached_paths, 0, &g);
+    var result3 = try g.matchPaths("src/*.zig", &cached_paths);
     defer result3.deinit();
 
     std.debug.print("Pattern: src/*.zig\n", .{});
@@ -91,7 +91,7 @@ pub fn main() !void {
         "fileB.txt",
     };
 
-    var result4 = try simdglob.matchFiles(allocator, "file[!12].txt", &files, 0, &g);
+    var result4 = try g.matchPaths("file[!12].txt", &files);
     defer result4.deinit();
 
     std.debug.print("Pattern: file[!12].txt\n", .{});
