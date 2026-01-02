@@ -9,9 +9,9 @@ const TestCase = struct {
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer _ = arena.deinit();
+    const allocator = arena.allocator();
 
     // Change to big repo
     try std.process.changeCurDir("/home/neogoose/dev/fff.nvim/big-repo");

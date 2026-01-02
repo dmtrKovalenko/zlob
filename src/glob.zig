@@ -490,9 +490,16 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         component_count += 1;
     }
 
-    // Collect all matching paths
     var result_paths = ResultsList.init(allocator);
     defer result_paths.deinit();
+
+    const estimated_capacity: usize = if (info.has_recursive)
+        1024 // Recursive patterns can match many files
+    else if (info.has_dir_wildcards)
+        256 // Directory wildcards match moderate number
+    else
+        64; // Simple wildcards match fewer files
+    result_paths.ensureTotalCapacity(estimated_capacity) catch {}; // Best effort
 
     // Start from literal prefix instead of "."
     const start_dir = if (info.literal_prefix.len > 0)
@@ -1072,6 +1079,9 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     // we collect all results in a list and convert to pathv once at the end
     var all_results = ResultsList.init(allocator);
     defer all_results.deinit();
+
+    // Pre-allocate capacity for recursive patterns (typically thousands of matches)
+    all_results.ensureTotalCapacity(2048) catch {}; // Best effort
 
     // Recursively collect all matching paths
     try globRecursiveHelperCollect(allocator, &rec_pattern, start_dir, flags, &all_results, 0, &info);
