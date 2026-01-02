@@ -340,9 +340,9 @@ test "recursive glob - empty pattern component" {
 
 // Tests for pattern analysis and optimization
 
-test "extractLiteralPrefix - simple pattern" {
+test "analyzePattern - simple pattern" {
     const pattern = "src/foo/*.c";
-    const info = glob.extractLiteralPrefix(pattern, 0);
+    const info = glob.analyzePattern(pattern, 0);
 
     try testing.expectEqualStrings("src/foo", info.literal_prefix);
     try testing.expectEqualStrings("*.c", info.wildcard_suffix);
@@ -350,9 +350,9 @@ test "extractLiteralPrefix - simple pattern" {
     try testing.expectEqualStrings(".c", info.simple_extension.?);
 }
 
-test "extractLiteralPrefix - recursive pattern" {
+test "analyzePattern - recursive pattern" {
     const pattern = "arch/x86/**/*.c";
-    const info = glob.extractLiteralPrefix(pattern, 0);
+    const info = glob.analyzePattern(pattern, 0);
 
     try testing.expectEqualStrings("arch/x86", info.literal_prefix);
     try testing.expectEqualStrings("**/*.c", info.wildcard_suffix);
@@ -361,9 +361,9 @@ test "extractLiteralPrefix - recursive pattern" {
     try testing.expectEqual(@as(?[]const u8, null), info.simple_extension);
 }
 
-test "extractLiteralPrefix - no literal prefix" {
+test "analyzePattern - no literal prefix" {
     const pattern = "**/*.c";
-    const info = glob.extractLiteralPrefix(pattern, 0);
+    const info = glob.analyzePattern(pattern, 0);
 
     try testing.expectEqualStrings("", info.literal_prefix);
     try testing.expectEqualStrings("**/*.c", info.wildcard_suffix);
@@ -372,9 +372,9 @@ test "extractLiteralPrefix - no literal prefix" {
     try testing.expectEqual(@as(?[]const u8, null), info.simple_extension);
 }
 
-test "extractLiteralPrefix - no wildcards" {
+test "analyzePattern - no wildcards" {
     const pattern = "src/main.c";
-    const info = glob.extractLiteralPrefix(pattern, 0);
+    const info = glob.analyzePattern(pattern, 0);
 
     // When pattern has a slash but no wildcards, it treats the last component as wildcard suffix
     // This is a quirk of the implementation but doesn't affect glob functionality
@@ -383,9 +383,9 @@ test "extractLiteralPrefix - no wildcards" {
     try testing.expectEqual(false, info.has_recursive);
 }
 
-test "extractLiteralPrefix - complex extension" {
+test "analyzePattern - complex extension" {
     const pattern = "docs/**/*.md";
-    const info = glob.extractLiteralPrefix(pattern, 0);
+    const info = glob.analyzePattern(pattern, 0);
 
     try testing.expectEqualStrings("docs", info.literal_prefix);
     try testing.expectEqualStrings("**/*.md", info.wildcard_suffix);
@@ -394,9 +394,9 @@ test "extractLiteralPrefix - complex extension" {
     try testing.expectEqual(@as(?[]const u8, null), info.simple_extension);
 }
 
-test "extractLiteralPrefix - multiple wildcards no simple extension" {
+test "analyzePattern - multiple wildcards no simple extension" {
     const pattern = "src/**/test_*.c";
-    const info = glob.extractLiteralPrefix(pattern, 0);
+    const info = glob.analyzePattern(pattern, 0);
 
     try testing.expectEqualStrings("src", info.literal_prefix);
     try testing.expectEqualStrings("**/test_*.c", info.wildcard_suffix);

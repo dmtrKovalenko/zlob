@@ -1,16 +1,8 @@
-//! Main glob implementation with SIMD optimizations
-//!
-//! This module contains all core glob functionality including:
-//! - Pattern matching with wildcards (*, ?, [])
-//! - Recursive globbing with **
-//! - SIMD-accelerated string operations
-//! - C-style glob API for compatibility (glob_t, glob(), globfree())
-//! - Zig-friendly API with GlobResult and Glob types
-
 const std = @import("std");
 const c = std.c;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
+const suffix_match = @import("suffix_match.zig");
 
 const pwd = @cImport({
     @cInclude("pwd.h");
@@ -31,7 +23,7 @@ pub const GLOB_DOOFFS = 1 << 3; // 0x0008 - Insert PGLOB->gl_offs NULLs
 pub const GLOB_NOCHECK = 1 << 4; // 0x0010 - If nothing matches, return the pattern
 pub const GLOB_APPEND = 1 << 5; // 0x0020 - Append to results of a previous call
 pub const GLOB_NOESCAPE = 1 << 6; // 0x0040 - Backslashes don't quote metacharacters
-pub const GLOB_PERIOD = 1 << 7; // 0x0080 - Leading `.' can be matched by metachars
+pub const GLOB_PERIOD = 1 << 7; // 0x0080 - Leading `.` can be matched by metachars
 
 // GNU extensions
 pub const GLOB_MAGCHAR = 1 << 8; // 0x0100 - Set in gl_flags if any metachars seen
@@ -48,12 +40,12 @@ pub const GLOB_ABORTED = 2;
 pub const GLOB_NOMATCH = 3;
 
 // Use Zig's cross-platform dirent structure
-const dirent = std.c.dirent;
+pub const dirent = std.c.dirent;
 
-const DT_UNKNOWN = std.c.DT.UNKNOWN;
-const DT_DIR = std.c.DT.DIR;
+pub const DT_UNKNOWN = std.c.DT.UNKNOWN;
+pub const DT_DIR = std.c.DT.DIR;
 
-const ResultsList = std.array_list.AlignedManaged([*c]u8, null);
+pub const ResultsList = std.array_list.AlignedManaged([*c]u8, null);
 
 // Pattern analysis structure for optimization
 const PatternInfo = struct {
@@ -69,35 +61,40 @@ const PatternInfo = struct {
     directories_only: bool, // Only match directories (from GLOB_ONLYDIR flag)
 };
 
-// Pre-computed pattern matching context to avoid redundant hasWildcardsSIMD calls
+// Fast to analyze pattern context created for every independent global pattern block
+// when the appropriate directory is already visited
 pub const PatternContext = struct {
     pattern: []const u8,
     has_wildcards: bool, // Pattern contains wildcards
-    is_simple_star_ext: bool, // Pattern is *.ext form
-    simple_ext: []const u8, // The extension for *.ext patterns
+    starts_with_dot: bool, // Pattern starts with '.'
+    is_dot_or_dotdot: bool, // Pattern is exactly "." or ".."
+
+    // prebuilt patterns for varios suffix matching optimizations
+    simd_batched_suffix_match: ?suffix_match.SimdBatchedSuffixMatch,
+    only_suffix_match: ?suffix_match.SuffixMatch,
 
     pub fn init(pattern: []const u8) PatternContext {
-        const has_wc = hasWildcardsSIMD(pattern);
-        var is_simple = false;
-        var ext: []const u8 = "";
+        const has_wildcards = hasWildcardsSIMD(pattern);
 
-        // Check for *.ext pattern
-        if (pattern.len >= 2 and pattern[0] == '*' and !hasWildcardsSIMD(pattern[1..])) {
-            is_simple = true;
-            ext = pattern[1..];
-        }
+        const starts_with_dot = pattern.len > 0 and pattern[0] == '.';
+        const is_dot_or_dotdot = mem.eql(u8, pattern, ".") or mem.eql(u8, pattern, "..");
+        const simd_batched_suffix_match, const only_suffix_match = if (has_wildcards)
+            suffix_match.check_simple_star_sufix(pattern)
+        else
+            .{ null, null };
 
         return PatternContext{
             .pattern = pattern,
-            .has_wildcards = has_wc,
-            .is_simple_star_ext = is_simple,
-            .simple_ext = ext,
+            .has_wildcards = has_wildcards,
+            .simd_batched_suffix_match = simd_batched_suffix_match,
+            .only_suffix_match = only_suffix_match,
+            .starts_with_dot = starts_with_dot,
+            .is_dot_or_dotdot = is_dot_or_dotdot,
         };
     }
 };
 
-// Extract literal prefix from pattern for optimization
-pub fn extractLiteralPrefix(pattern: []const u8, flags: c_int) PatternInfo {
+pub fn analyzePattern(pattern: []const u8, flags: c_int) PatternInfo {
     var info = PatternInfo{
         .literal_prefix = "",
         .wildcard_start_pos = 0,
@@ -559,10 +556,11 @@ fn expandWildcardComponents(
     results: *ResultsList,
     directories_only: bool,
 ) !void {
-    // Safety: limit recursion depth
-    if (component_idx > 65536) return error.Aborted;
+    if (component_idx > 65536) {
+        @branchHint(.unlikely);
+        return error.Aborted;
+    }
 
-    // Base case: processed all components
     if (component_idx >= components.len) {
         // Add current_dir to results
         const path_copy = try allocator.allocSentinel(u8, current_dir.len, 0);
@@ -575,7 +573,6 @@ fn expandWildcardComponents(
     const component = components[component_idx];
     const is_final = component_idx == components.len - 1;
 
-    // Pre-compute pattern context to avoid redundant hasWildcardsSIMD calls
     const component_ctx = PatternContext.init(component);
 
     if (component_ctx.has_wildcards) {
@@ -592,16 +589,16 @@ fn expandWildcardComponents(
             const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
             const name = mem.sliceTo(&entry.name, 0);
 
-            // Skip . and ..
-            if (shouldSkipFile(name, component, 0)) continue;
+            // For non-final components, only traverse directories
+            if (!is_final and entry.type != DT_DIR) continue;
+            if (shouldSkipFile(name, &component_ctx, 0)) continue;
 
-            // Match against component pattern using pre-computed context
-            const matches = fnmatchWithContext(&component_ctx, name);
+            const matches = if (is_final and component_ctx.simd_batched_suffix_match != null)
+                component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
+            else
+                fnmatchWithContext(&component_ctx, name);
 
             if (matches) {
-                // For non-final components, only traverse directories
-                if (!is_final and entry.type != DT_DIR) continue;
-
                 // For final component with directories_only flag, only keep directories
                 if (is_final and directories_only and entry.type != DT_DIR) continue;
 
@@ -723,8 +720,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, p
         }
     }
 
-    // Extract pattern info for optimization (will set info.directories_only from GLOB_ONLYDIR flag)
-    const info = extractLiteralPrefix(effective_pattern, effective_flags);
+    const info = analyzePattern(effective_pattern, effective_flags);
 
     // Fast path: simple pattern with literal prefix (e.g., "src/foo/*.txt")
     if (info.simple_extension != null and info.literal_prefix.len > 0) {
@@ -1011,7 +1007,7 @@ const RecursivePattern = struct {
 // Recursive glob implementation for ** patterns
 fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, pglob: *glob_t, directories_only: bool) !?void {
     // Extract pattern info for optimization (will set directories_only from GLOB_ONLYDIR flag)
-    const info = extractLiteralPrefix(pattern, flags);
+    const info = analyzePattern(pattern, flags);
 
     // Split pattern at **
     const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInDirFiltered(allocator, pattern, dirname, flags, pglob, directories_only);
@@ -1258,7 +1254,6 @@ fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const 
     }
 }
 
-// Version of globInDirImpl that appends directly to NameArray instead of creating new pglob
 fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, results: *ResultsList, directories_only: bool) !void {
     const pattern_ctx = PatternContext.init(pattern);
 
@@ -1271,14 +1266,20 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirna
     const dir = c.opendir(&dirname_z) orelse return error.Aborted;
     defer _ = c.closedir(dir);
 
-    // Read and match entries
+    // Process directory entries with optimized suffix matching when available
     while (c.readdir(dir)) |entry_raw| {
         const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
         const name = mem.sliceTo(&entry.name, 0);
 
-        if (shouldSkipFile(name, pattern, flags)) continue;
+        if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
 
-        if (fnmatchWithContext(&pattern_ctx, name)) {
+        // Fast path: use optimized suffix matching for *.ext patterns
+        const matches = if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+            batched_suffix_match.matchSuffix(name)
+        else
+            fnmatchWithContext(&pattern_ctx, name);
+
+        if (matches) {
             // Filter directories if needed
             if (directories_only) {
                 const entry_dtype = entry.type;
@@ -1322,7 +1323,7 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirna
 }
 
 // Helper to build full path from dirname and filename
-inline fn buildFullPath(allocator: std.mem.Allocator, dirname: []const u8, name: []const u8, use_dirname: bool) ![]u8 {
+pub inline fn buildFullPath(allocator: std.mem.Allocator, dirname: []const u8, name: []const u8, use_dirname: bool) ![]u8 {
     const path_len = if (use_dirname)
         dirname.len + 1 + name.len
     else
@@ -1331,6 +1332,8 @@ inline fn buildFullPath(allocator: std.mem.Allocator, dirname: []const u8, name:
     const path_buf_slice = try allocator.allocSentinel(u8, path_len, 0);
 
     if (use_dirname) {
+        @branchHint(.unlikely);
+
         @memcpy(path_buf_slice[0..dirname.len], dirname);
         path_buf_slice[dirname.len] = '/';
         @memcpy(path_buf_slice[dirname.len + 1 ..][0..name.len], name);
@@ -1342,7 +1345,7 @@ inline fn buildFullPath(allocator: std.mem.Allocator, dirname: []const u8, name:
 }
 
 // Helper to check if filename should be skipped (returns true to skip)
-inline fn shouldSkipFile(name: []const u8, pattern: []const u8, flags: c_int) bool {
+pub inline fn shouldSkipFile(name: []const u8, pattern_ctx: *const PatternContext, flags: c_int) bool {
     if (name.len == 0) return true;
 
     const first_byte = name[0];
@@ -1353,7 +1356,7 @@ inline fn shouldSkipFile(name: []const u8, pattern: []const u8, flags: c_int) bo
 
         // Don't skip if pattern explicitly asks for "." or ".."
         if (is_dot or is_dotdot) {
-            if (mem.eql(u8, name, pattern)) return false;
+            if (pattern_ctx.is_dot_or_dotdot) return false;
             return true;
         }
 
@@ -1361,13 +1364,13 @@ inline fn shouldSkipFile(name: []const u8, pattern: []const u8, flags: c_int) bo
         if (flags & GLOB_PERIOD != 0) return false;
 
         // Skip hidden files unless pattern starts with '.'
-        if (pattern.len > 0 and pattern[0] != '.') return true;
+        if (!pattern_ctx.starts_with_dot) return true;
     }
     return false;
 }
 
 // Helper to check if path is a directory and append '/' if GLOB_MARK is set
-inline fn maybeAppendSlash(allocator: std.mem.Allocator, path: [*c]u8, path_len: usize, is_dir: bool, flags: c_int) !?[*c]u8 {
+pub inline fn maybeAppendSlash(allocator: std.mem.Allocator, path: [*c]u8, path_len: usize, is_dir: bool, flags: c_int) !?[*c]u8 {
     if (!is_dir or (flags & GLOB_MARK == 0)) {
         return null; // No modification needed
     }
@@ -1391,15 +1394,10 @@ fn globInDir(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const
     return globInDirImpl(allocator, pattern, dirname, flags, pglob, false);
 }
 
-// Implementation with optional directory filtering using d_type (avoids stat calls)
 fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, pglob: *glob_t, directories_only: bool) !?void {
-    // Pre-compute pattern properties once to avoid redundant hasWildcardsSIMD calls in hot loop
     const pattern_ctx = PatternContext.init(pattern);
-
-    // Pre-compute whether to use dirname in path building (avoid repeated string comparisons)
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
 
-    // Open directory
     var dirname_z: [4096:0]u8 = undefined;
     @memcpy(dirname_z[0..dirname.len], dirname);
     dirname_z[dirname.len] = 0;
@@ -1407,132 +1405,54 @@ fn globInDirImpl(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     const dir = c.opendir(&dirname_z) orelse return error.Aborted;
     defer _ = c.closedir(dir);
 
-    // Zig-style array with allocator
     var names = ResultsList.init(allocator);
     defer names.deinit();
 
-    // Batch processing buffer for parallel matching
-    const BatchSize = 4;
-    var batch_names: [BatchSize][]const u8 = undefined;
-    var batch_entries: [BatchSize]*const dirent = undefined;
-    var batch_count: usize = 0;
-
-    // Read entries with batching
     while (c.readdir(dir)) |entry_raw| {
         const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
         const name = mem.sliceTo(&entry.name, 0);
+        if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
 
-        // Skip check using inlined function
-        if (shouldSkipFile(name, pattern, flags)) continue;
+        // Fast path: use optimized suffix matching for *.ext patterns
+        const matches = if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+            batched_suffix_match.matchSuffix(name)
+        else
+            fnmatchWithContext(&pattern_ctx, name);
 
-        // Add to bach
-        batch_names[batch_count] = name;
-        batch_entries[batch_count] = entry;
-        batch_count += 1;
-
-        // Process batch when full
-        if (batch_count == BatchSize) {
-            // SIMD-accelerated parallel matching using mask with pre-computed context
-            var match_mask: u4 = 0;
-            for (batch_names[0..batch_count], 0..) |bname, i| {
-                if (fnmatchWithContext(&pattern_ctx, bname)) {
-                    match_mask |= @as(u4, 1) << @intCast(i);
-                }
+        if (matches) {
+            if (directories_only) {
+                const entry_dtype = entry.type;
+                if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
             }
 
-            // Process matches
-            for (0..batch_count) |i| {
-                if ((match_mask & (@as(u4, 1) << @intCast(i))) != 0) {
-                    // Use d_type to filter directories if needed (avoids stat syscall!)
-                    if (directories_only) {
-                        const entry_dtype = batch_entries[i].type;
-                        // Skip non-directories (d_type == DT_DIR is 4 on Linux)
-                        if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
-                        // If DT_UNKNOWN, we'll do stat check below (rare on modern filesystems)
-                    }
+            const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
+            var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
+            const path_len = path_buf_slice.len;
 
-                    const name_to_add = batch_names[i];
-                    // Build full path using helper function
-                    const path_buf_slice = buildFullPath(allocator, dirname, name_to_add, use_dirname) catch return error.OutOfMemory;
-                    var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-                    const path_len = path_buf_slice.len;
-
-                    // Check if it's a directory for GLOB_MARK or directories_only
-                    var is_dir = batch_entries[i].type == DT_DIR;
-                    if (batch_entries[i].type == DT_UNKNOWN) {
-                        var stat_buf: std.c.Stat = undefined;
-                        if (std.c.stat(path, &stat_buf) == 0) {
-                            is_dir = std.c.S.ISDIR(stat_buf.mode);
-                        } else {
-                            allocator.free(path_buf_slice);
-                            continue;
-                        }
-                    }
-
-                    // Skip non-directories if directories_only
-                    if (directories_only and !is_dir) {
-                        allocator.free(path_buf_slice);
-                        continue;
-                    }
-
-                    // Append '/' to directories if GLOB_MARK is set
-                    if (maybeAppendSlash(allocator, path, path_len, is_dir, flags) catch {
-                        allocator.free(path_buf_slice);
-                        return error.OutOfMemory;
-                    }) |new_path| {
-                        path = new_path;
-                    }
-
-                    names.append(path) catch return error.OutOfMemory;
-                }
-            }
-            batch_count = 0;
-        }
-    }
-
-    // Process remaining batch
-    if (batch_count > 0) {
-        for (batch_names[0..batch_count], 0..) |name, i| {
-            if (fnmatchWithContext(&pattern_ctx, name)) {
-                // Use d_type to filter directories if needed (avoids stat syscall!)
-                if (directories_only) {
-                    const entry_dtype = batch_entries[i].type;
-                    if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
-                }
-
-                // Build full path using helper function
-                const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
-                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-                const path_len = path_buf_slice.len;
-
-                // Check if it's a directory for GLOB_MARK or directories_only
-                var is_dir = batch_entries[i].type == DT_DIR;
-                if (batch_entries[i].type == DT_UNKNOWN) {
-                    var stat_buf: std.c.Stat = undefined;
-                    if (std.c.stat(path, &stat_buf) == 0) {
-                        is_dir = std.c.S.ISDIR(stat_buf.mode);
-                    } else {
-                        allocator.free(path_buf_slice);
-                        continue;
-                    }
-                }
-
-                // Skip non-directories if directories_only
-                if (directories_only and !is_dir) {
+            var is_dir = entry.type == DT_DIR;
+            if (entry.type == DT_UNKNOWN) {
+                var stat_buf: std.c.Stat = undefined;
+                if (std.c.stat(path, &stat_buf) == 0) {
+                    is_dir = std.c.S.ISDIR(stat_buf.mode);
+                } else {
                     allocator.free(path_buf_slice);
                     continue;
                 }
-
-                // Append '/' to directories if GLOB_MARK is set
-                if (maybeAppendSlash(allocator, path, path_len, is_dir, flags) catch {
-                    allocator.free(path_buf_slice);
-                    return error.OutOfMemory;
-                }) |new_path| {
-                    path = new_path;
-                }
-
-                names.append(path) catch return error.OutOfMemory;
             }
+
+            if (directories_only and !is_dir) {
+                allocator.free(path_buf_slice);
+                continue;
+            }
+
+            if (maybeAppendSlash(allocator, path, path_len, is_dir, flags) catch {
+                allocator.free(path_buf_slice);
+                return error.OutOfMemory;
+            }) |new_path| {
+                path = new_path;
+            }
+
+            names.append(path) catch return error.OutOfMemory;
         }
     }
 
@@ -1650,29 +1570,6 @@ pub fn hasWildcardsSIMD(s: []const u8) bool {
     return false;
 }
 
-// SIMD suffix comparison for *.ext patterns
-pub fn simdSuffixMatch(string: []const u8, suffix: []const u8) bool {
-    if (string.len < suffix.len) return false;
-    const start = string.len - suffix.len;
-    const tail = string[start..];
-
-    // SIMD comparison for longer suffixes
-    if (suffix.len >= 16) {
-        const Vec16 = @Vector(16, u8);
-        var i: usize = 0;
-        while (i + 16 <= suffix.len) : (i += 16) {
-            const s_vec: Vec16 = tail[i..][0..16].*;
-            const p_vec: Vec16 = suffix[i..][0..16].*;
-            const eq = s_vec == p_vec;
-            const mask = @as(u16, @bitCast(eq));
-            if (mask != 0xFFFF) return false;
-        }
-        // Check remainder
-        return mem.eql(u8, tail[i..], suffix[i..]);
-    }
-    return mem.eql(u8, tail, suffix);
-}
-
 // SIMD character search - find all positions of a character
 pub fn simdFindChar(haystack: []const u8, needle: u8) ?usize {
     if (haystack.len >= 32) {
@@ -1722,41 +1619,11 @@ pub inline fn fnmatchWithContext(ctx: *const PatternContext, string: []const u8)
         return mem.eql(u8, ctx.pattern, string);
     }
 
-    // Fast path: *.ext (most common) with SIMD - use pre-computed check
-    if (ctx.is_simple_star_ext) {
-        return simdSuffixMatch(string, ctx.simple_ext);
+    if (ctx.only_suffix_match) |suffix_matcher| {
+        return suffix_matcher.match(string);
     }
 
     return fnmatchFull(ctx.pattern, string);
-}
-
-// SIMD-optimized fnmatch (public API - for backward compatibility)
-pub fn fnmatch(pattern: []const u8, string: []const u8) bool {
-    // Fast path: exact match with SIMD for long strings (only if no wildcards)
-    if (pattern.len == string.len and !hasWildcardsSIMD(pattern)) {
-        if (pattern.len >= 32) {
-            const Vec32 = @Vector(32, u8);
-            var i: usize = 0;
-            while (i + 32 <= pattern.len) : (i += 32) {
-                const p_vec: Vec32 = pattern[i..][0..32].*;
-                const s_vec: Vec32 = string[i..][0..32].*;
-                const eq = p_vec == s_vec;
-                const mask = @as(u32, @bitCast(eq));
-                if (mask != 0xFFFFFFFF) return false;
-            }
-            return mem.eql(u8, pattern[i..], string[i..]);
-        }
-        return mem.eql(u8, pattern, string);
-    }
-
-    // Fast path: *.ext (most common) with SIMD
-    if (pattern.len >= 2 and pattern[0] == '*') {
-        if (!hasWildcardsSIMD(pattern[1..])) {
-            return simdSuffixMatch(string, pattern[1..]);
-        }
-    }
-
-    return fnmatchFull(pattern, string);
 }
 
 fn fnmatchFull(pattern: []const u8, string: []const u8) bool {

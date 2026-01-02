@@ -6,9 +6,8 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const glob = @import("glob.zig");
+const suffix_match = @import("suffix_match.zig");
 
-// Import existing functions
-const fnmatch = glob.fnmatch;
 const hasWildcardsSIMD = glob.hasWildcardsSIMD;
 const PatternContext = glob.PatternContext;
 const fnmatchWithContext = glob.fnmatchWithContext;
@@ -119,6 +118,33 @@ fn splitPathComponentsFast(path: []const u8, buffer: [][]const u8) [][]const u8 
         }
     }
     return buffer[0..idx];
+}
+
+/// Extract suffix from pattern for pre-filtering optimization
+/// Returns the suffix if pattern ends with *.ext (where ext has no wildcards)
+/// Only works for patterns where last component is exactly "*.ext" (e.g., "*.c", "drivers/**/*.c")
+/// Does NOT work for "test_*.zig" because the prefix "test_" would be ignored
+pub fn extractSuffixFromPattern(pattern: []const u8) struct { suffix: ?[]const u8 } {
+    // Find the last path component
+    const last_slash = mem.lastIndexOfScalar(u8, pattern, '/');
+    const last_component = if (last_slash) |pos| pattern[pos + 1 ..] else pattern;
+
+    // Check if last component is exactly *.ext pattern (star must be at position 0)
+    if (last_component.len < 2) return .{ .suffix = null };
+    if (last_component[0] != '*') return .{ .suffix = null };
+
+    // Handle ** - not a suffix pattern
+    if (last_component.len >= 2 and last_component[1] == '*') return .{ .suffix = null };
+
+    const after_star = last_component[1..];
+
+    // Check that suffix has no wildcards
+    if (hasWildcardsSIMD(after_star)) return .{ .suffix = null };
+
+    // Must have some suffix after the star
+    if (after_star.len == 0) return .{ .suffix = null };
+
+    return .{ .suffix = after_star };
 }
 
 /// Split path into components by / (heap-allocated, fallback for deep paths)
@@ -498,72 +524,12 @@ pub fn matchPaths(
         };
     }
 
-    // OPTIMIZATION #2: Suffix pattern fast path (*.ext only, not **/*.ext)
-    // Detect patterns like "*.txt" and use SIMD suffix matching
-    // Note: We don't optimize **/*.ext because it requires hidden file filtering
-    const is_simple_suffix = pattern.len > 2 and pattern[0] == '*' and pattern[1] != '*' and
-        mem.indexOf(u8, pattern[1..], "*") == null and
-        mem.indexOf(u8, pattern[1..], "?") == null and
-        mem.indexOf(u8, pattern[1..], "[") == null and
-        mem.indexOf(u8, pattern[1..], "/") == null; // No directory separators
+    // OPTIMIZATION #2: Extract suffix from pattern for pre-filtering
+    // For patterns like "*.c" or "drivers/**/*.c", we can pre-filter by suffix
+    // This dramatically reduces the number of paths that need expensive ** matching
+    const suffix_info = extractSuffixFromPattern(pattern);
 
-    if (is_simple_suffix) {
-        const suffix = pattern[1..];
-        const simdSuffixMatch = glob.simdSuffixMatch;
-
-        // Single pass: collect matches directly
-        var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
-        defer matches.deinit();
-
-        for (paths) |path| {
-            if (simdSuffixMatch(path, suffix)) {
-                try matches.append(path);
-            }
-        }
-
-        // Handle NOCHECK
-        if (matches.items.len == 0 and flags & GLOB_NOCHECK != 0) {
-            var result_paths = try allocator.alloc([]const u8, 1);
-            result_paths[0] = try allocator.dupe(u8, pattern);
-            return GlobResult{
-                .paths = result_paths,
-                .match_count = 1,
-                .allocator = allocator,
-                .owns_paths = true, // NOCHECK allocates the pattern
-            };
-        }
-
-        // Handle no matches
-        if (matches.items.len == 0) {
-            const empty: [][]const u8 = &[_][]const u8{};
-            return GlobResult{
-                .paths = empty,
-                .match_count = 0,
-                .allocator = allocator,
-                .owns_paths = false,
-            };
-        }
-
-        const result_paths = try matches.toOwnedSlice();
-
-        // Sort unless NOSORT
-        if (flags & GLOB_NOSORT == 0) {
-            mem.sort([]const u8, result_paths, {}, struct {
-                fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-                    return mem.order(u8, a, b) == .lt;
-                }
-            }.lessThan);
-        }
-
-        return GlobResult{
-            .paths = result_paths,
-            .match_count = result_paths.len,
-            .allocator = allocator,
-            .owns_paths = false, // References to input paths
-        };
-    }
-
-    // Parse pattern once
+    // Parse pattern once (needed for both suffix-only and complex patterns)
     var pattern_segments = try splitPatternByDoublestar(allocator, pattern);
     defer pattern_segments.deinit();
 
@@ -571,9 +537,56 @@ pub fn matchPaths(
     var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
     defer matches.deinit();
 
-    for (paths) |path| {
-        if (try matchSinglePath(&pattern_segments, path, flags)) {
-            try matches.append(path);
+    // Check if this is a simple suffix-only pattern (e.g., "*.c" with no directory components)
+    // Must have no path separators to be a pure suffix pattern
+    const is_simple_suffix_only = suffix_info.suffix != null and
+        mem.indexOfScalar(u8, pattern, '/') == null and
+        pattern_segments.segments.len == 1 and
+        !mem.eql(u8, pattern_segments.segments[0], "**");
+
+    if (is_simple_suffix_only) {
+        // Fast path: pure suffix matching with SIMD batching
+        const suffix = suffix_info.suffix.?;
+        if (suffix.len <= 4) {
+            try suffix_match.SimdBatchedSuffixMatch.init(suffix).matchPathsBatchedSIMD(paths, &matches);
+        } else {
+            const suffix_matcher = suffix_match.SuffixMatch.new(suffix);
+            for (paths) |path| {
+                if (suffix_matcher.match(path)) {
+                    try matches.append(path);
+                }
+            }
+        }
+    } else if (suffix_info.suffix) |suffix| {
+        // Hybrid path: pre-filter by suffix, then apply full pattern matching
+        // This is the optimization for patterns like "drivers/**/*.c"
+        if (suffix.len <= 4) {
+            // SIMD batch pre-filter
+            var pre_filtered = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+            defer pre_filtered.deinit();
+            try suffix_match.SimdBatchedSuffixMatch.init(suffix).matchPathsBatchedSIMD(paths, &pre_filtered);
+
+            // Apply full pattern to pre-filtered paths
+            for (pre_filtered.items) |path| {
+                if (try matchSinglePath(&pattern_segments, path, flags)) {
+                    try matches.append(path);
+                }
+            }
+        } else {
+            // Scalar suffix pre-filter for longer suffixes
+            const suffix_matcher = suffix_match.SuffixMatch.new(suffix);
+            for (paths) |path| {
+                if (suffix_matcher.match(path) and try matchSinglePath(&pattern_segments, path, flags)) {
+                    try matches.append(path);
+                }
+            }
+        }
+    } else {
+        // No suffix optimization possible, match all paths
+        for (paths) |path| {
+            if (try matchSinglePath(&pattern_segments, path, flags)) {
+                try matches.append(path);
+            }
         }
     }
 
