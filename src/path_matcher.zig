@@ -25,6 +25,11 @@ const PatternSegments = struct {
     contexts: []PatternContext, // Pre-computed contexts to avoid redundant hasWildcardsSIMD calls
     allocator: Allocator,
 
+    // Pre-computed metadata to avoid per-path checks
+    has_doublestar: bool,           // True if pattern contains **
+    original_pattern: []const u8,   // Original pattern string (for fast path without **)
+    pattern_context: PatternContext, // Pre-computed context for fast path
+
     pub fn deinit(self: *PatternSegments) void {
         self.allocator.free(self.segments);
         self.allocator.free(self.contexts);
@@ -57,6 +62,9 @@ fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8) !PatternS
             .segments = segments,
             .contexts = contexts,
             .allocator = allocator,
+            .has_doublestar = false,
+            .original_pattern = pattern,
+            .pattern_context = contexts[0],
         };
     }
 
@@ -100,6 +108,9 @@ fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8) !PatternS
         .segments = segments,
         .contexts = contexts,
         .allocator = allocator,
+        .has_doublestar = true,
+        .original_pattern = pattern,
+        .pattern_context = PatternContext.init(pattern), // Pre-compute even though not used for ** patterns
     };
 }
 
@@ -291,62 +302,17 @@ fn matchPathSegments(
 }
 
 /// Match a single path against pattern (with ** support)
+/// Note: paths must be normalized (no consecutive slashes like //)
 fn matchSinglePath(
     pattern_segments: *const PatternSegments,
     path: []const u8,
     flags: u32,
 ) !bool {
-
-    // Check if pattern contains **
-    var has_doublestar = false;
-    for (pattern_segments.segments) |segment| {
-        if (mem.eql(u8, segment, "**")) {
-            has_doublestar = true;
-            break;
-        }
-    }
-
-    // Fast path: no ** in pattern, just reconstruct and use fnmatch
+    // Fast path: no ** in pattern, use pre-computed pattern and context
     // This is faster than component-by-component matching for simple patterns
-    if (!has_doublestar) {
-        // Reconstruct pattern from segments
-        var pattern_buf: [4096]u8 = undefined;
-        var pattern_len: usize = 0;
-
-        for (pattern_segments.segments, 0..) |segment, i| {
-            if (i > 0 and pattern_len < pattern_buf.len) {
-                pattern_buf[pattern_len] = '/';
-                pattern_len += 1;
-            }
-            const copy_len = @min(segment.len, pattern_buf.len - pattern_len);
-            @memcpy(pattern_buf[pattern_len..][0..copy_len], segment[0..copy_len]);
-            pattern_len += copy_len;
-        }
-
-        // Normalize path by removing consecutive slashes for comparison
-        var normalized_path_buf: [4096]u8 = undefined;
-        var norm_len: usize = 0;
-        var prev_was_slash = false;
-
-        for (path) |c| {
-            if (c == '/') {
-                if (!prev_was_slash and norm_len < normalized_path_buf.len) {
-                    normalized_path_buf[norm_len] = c;
-                    norm_len += 1;
-                }
-                prev_was_slash = true;
-            } else {
-                if (norm_len < normalized_path_buf.len) {
-                    normalized_path_buf[norm_len] = c;
-                    norm_len += 1;
-                }
-                prev_was_slash = false;
-            }
-        }
-
-        // Use PatternContext to avoid redundant hasWildcardsSIMD calls
-        const pattern_ctx = PatternContext.init(pattern_buf[0..pattern_len]);
-        return fnmatchWithContext(&pattern_ctx, normalized_path_buf[0..norm_len]);
+    if (!pattern_segments.has_doublestar) {
+        // Use pre-computed pattern context directly with the normalized path
+        return fnmatchWithContext(&pattern_segments.pattern_context, path);
     }
 
     // Slow path: pattern contains **, do component-by-component matching
@@ -396,6 +362,10 @@ fn matchSinglePath(
 /// - GLOB_PERIOD: Allow wildcards to match files starting with '.'
 /// - GLOB_NOESCAPE: Treat backslashes as literal (not escape chars)
 ///
+/// Requirements:
+/// - Input paths MUST be normalized (no consecutive slashes like //)
+/// - Paths from filesystem operations are typically already normalized
+///
 /// Returns: GlobResult containing matched paths (must call .deinit())
 /// Errors: OutOfMemory
 ///
@@ -433,9 +403,9 @@ pub fn matchPaths(
 
     // OPTIMIZATION #1: Literal pattern fast path (no wildcards)
     // If pattern contains no wildcards, use direct string equality
-    // Need to normalize paths to handle consecutive slashes (dir//file.txt == dir/file.txt)
+    // Paths must be normalized (no consecutive slashes)
     if (!hasWildcardsSIMD(pattern)) {
-        // Normalize pattern first
+        // Normalize pattern (patterns from users may have // in them)
         var norm_pattern_buf: [4096]u8 = undefined;
         const norm_pattern = blk: {
             var len: usize = 0;
@@ -458,35 +428,12 @@ pub fn matchPaths(
             break :blk norm_pattern_buf[0..len];
         };
 
-        // Single pass: collect matches directly
+        // Single pass: collect matches directly (no path normalization needed)
         var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
         defer matches.deinit();
 
-        var norm_path_buf: [4096]u8 = undefined;
         for (paths) |path| {
-            // Normalize path
-            const norm_path = blk: {
-                var len: usize = 0;
-                var prev_slash = false;
-                for (path) |c| {
-                    if (c == '/') {
-                        if (!prev_slash and len < norm_path_buf.len) {
-                            norm_path_buf[len] = c;
-                            len += 1;
-                        }
-                        prev_slash = true;
-                    } else {
-                        if (len < norm_path_buf.len) {
-                            norm_path_buf[len] = c;
-                            len += 1;
-                        }
-                        prev_slash = false;
-                    }
-                }
-                break :blk norm_path_buf[0..len];
-            };
-
-            if (mem.eql(u8, norm_path, norm_pattern)) {
+            if (mem.eql(u8, path, norm_pattern)) {
                 try matches.append(path);
             }
         }

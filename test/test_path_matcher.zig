@@ -256,8 +256,9 @@ test "matchPaths - consecutive slashes in path" {
     var result = try matchPaths(testing.allocator, "dir/file.txt", &paths, 0);
     defer result.deinit();
 
-    // Both should match (after normalization)
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    // Only normalized paths match (paths must be pre-normalized)
+    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqualStrings("dir/file.txt", result.paths[0]);
 }
 
 // Test real-world patterns

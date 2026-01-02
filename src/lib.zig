@@ -83,6 +83,10 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !Glo
 /// - GLOB_NOCHECK: Return pattern itself if no matches
 /// - GLOB_PERIOD: Allow wildcards to match hidden files (starting with '.')
 /// - GLOB_NOESCAPE: Treat backslashes as literal characters
+///
+/// Requirements:
+/// - Input paths MUST be normalized (no consecutive slashes like //)
+/// - Paths from filesystem operations are typically already normalized
 pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags: u32) !GlobResult {
     const path_matcher = @import("path_matcher.zig");
     return path_matcher.matchPaths(allocator, pattern, paths, flags);
