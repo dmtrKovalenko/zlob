@@ -429,3 +429,75 @@ test "matchPaths - user example 3: **/*.txt" {
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
 }
+
+// ============================================================================
+// GLOB_PERIOD with matchPaths - Test recursive patterns
+// ============================================================================
+
+test "matchPaths - GLOB_PERIOD should NOT match hidden files by default" {
+    const paths = [_][]const u8{
+        "dir1/file1.txt",
+        "dir1/.hidden.txt",
+        ".hidden_dir/file2.txt",
+        "dir2/subdir/file3.txt",
+        "dir2/subdir/.dotfile",
+    };
+
+    var result = try matchPaths(testing.allocator, "**/*.txt", &paths, 0);
+    defer result.deinit();
+
+    // Should match dir1/file1.txt and dir2/subdir/file3.txt
+    // Should NOT match dir1/.hidden.txt or .hidden_dir/file2.txt
+    var has_hidden = false;
+    for (result.paths) |path| {
+        const basename = if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx|
+            path[idx + 1 ..]
+        else
+            path;
+
+        if (basename.len > 0 and basename[0] == '.') {
+            has_hidden = true;
+        }
+
+        if (std.mem.indexOf(u8, path, "/.") != null) {
+            has_hidden = true;
+        }
+    }
+
+    try testing.expect(!has_hidden);
+    try testing.expectEqual(@as(usize, 2), result.match_count); // 2 non-hidden .txt files
+}
+
+test "matchPaths - GLOB_PERIOD matches hidden files with flag" {
+    const paths = [_][]const u8{
+        "dir1/file1.txt",
+        "dir1/.hidden.txt",
+        ".hidden_dir/file2.txt",
+        "dir2/subdir/file3.txt",
+        "dir2/subdir/.dotfile",
+    };
+
+    var result = try matchPaths(testing.allocator, "**/*.txt", &paths, GLOB_PERIOD);
+    defer result.deinit();
+
+    // Should match all .txt files including hidden ones
+    var hidden_count: usize = 0;
+    for (result.paths) |path| {
+        const basename = if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx|
+            path[idx + 1 ..]
+        else
+            path;
+
+        if (basename.len > 0 and basename[0] == '.') {
+            hidden_count += 1;
+        }
+
+        // Files inside .hidden_dir
+        if (std.mem.indexOf(u8, path, ".hidden_dir") != null) {
+            hidden_count += 1;
+        }
+    }
+
+    try testing.expect(hidden_count >= 1); // Should match hidden .txt files
+    try testing.expectEqual(@as(usize, 4), result.match_count); // All 4 .txt files including hidden
+}

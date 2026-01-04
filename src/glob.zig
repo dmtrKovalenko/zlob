@@ -1083,8 +1083,14 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     // Pre-allocate capacity for recursive patterns (typically thousands of matches)
     all_results.ensureTotalCapacity(2048) catch {}; // Best effort
 
-    // Recursively collect all matching paths
-    try globRecursiveHelperCollect(allocator, &rec_pattern, start_dir, flags, &all_results, 0, &info);
+    // HOTPATH OPTIMIZATION: For deep recursive patterns with no dir_components (e.g., "drivers/**/*.c"),
+    // use Zig's std.fs.Dir.walk() which is faster and avoids mem.sliceTo overhead
+    if (dir_component_count == 0) {
+        try globRecursiveWithZigWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info);
+    } else {
+        // Recursively collect all matching paths (old C-based approach for complex patterns)
+        try globRecursiveHelperCollect(allocator, &rec_pattern, start_dir, flags, &all_results, 0, &info);
+    }
 
     // No matches found - return null (consistent with glibc)
     if (all_results.items.len == 0) {
@@ -1157,7 +1163,100 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: c
     }
 }
 
-fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: c_int, results: *ResultsList, depth: usize, info: *const PatternInfo) !void {
+// once we need to actually recurse the directory tree we suppose that we will have a lot of
+// matches, so having zig's std.fs.Dir.walk() is faster becuase it does all the smart opimziations
+// of the stack mangament *AND* even it does a bunch of overhead on top of C it produces string
+// slices which is way faster than repeating mem.sliceTo on every file patten
+inline fn globRecursiveWithZigWalk(
+    allocator: std.mem.Allocator,
+    rec_pattern: *const RecursivePattern,
+    start_dir: []const u8,
+    flags: c_int,
+    results: *ResultsList,
+    info: *const PatternInfo,
+) !void {
+    // Pattern context for file matching
+    const pattern_ctx = PatternContext.init(rec_pattern.file_pattern);
+
+    // Open the starting directory using Zig's std.fs
+    var dir = std.fs.cwd().openDir(start_dir, .{ .iterate = true }) catch {
+        // If we can't open the directory, fall back to error
+        return error.Aborted;
+    };
+    defer dir.close();
+
+    // Create a walker - this is the magic that makes it fast!
+    var walker = dir.walk(allocator) catch return error.OutOfMemory;
+    defer walker.deinit();
+
+    // Walk all entries recursively
+    while (walker.next() catch null) |entry| {
+        // entry.path is already a []const u8 - NO mem.sliceTo needed!
+        // entry.basename is the filename without directory path
+
+        const is_dir = entry.kind == .directory;
+
+        // Skip non-directories if directories_only is set
+        if (info.directories_only and !is_dir) continue;
+
+        // Match both files and directories (unless filtered by directories_only above)
+        if (entry.kind == .file or is_dir) {
+            // GLOB_PERIOD: Check if path contains hidden components
+            // If GLOB_PERIOD is NOT set, skip files whose path contains hidden directories
+            if ((flags & GLOB_PERIOD) == 0) {
+                // Check if any path component starts with '.'
+                // entry.path can be like ".hidden_dir/file.txt" or "dir/.hidden/file.txt"
+                if (mem.indexOf(u8, entry.path, "/.") != null) {
+                    continue; // Path contains /. (hidden directory)
+                }
+                // Also check if path itself starts with '.' (hidden directory at root)
+                if (entry.path.len > 0 and entry.path[0] == '.') {
+                    // But allow patterns that explicitly match hidden dirs
+                    if (!pattern_ctx.starts_with_dot) {
+                        continue;
+                    }
+                }
+            }
+
+            // GLOB_PERIOD: Skip hidden files unless explicitly allowed
+            // Note: shouldSkipFile handles GLOB_PERIOD logic for basename
+            if (shouldSkipFile(entry.basename, &pattern_ctx, flags)) continue;
+
+            // Fast path: use optimized suffix matching for *.ext patterns
+            const matches = if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+                batched_suffix_match.matchSuffix(entry.basename)
+            else
+                fnmatchWithContext(&pattern_ctx, entry.basename);
+
+            if (matches) {
+                // Build full path: start_dir + "/" + entry.path
+                const full_path_len = start_dir.len + 1 + entry.path.len;
+                const path_buf_slice = allocator.allocSentinel(u8, full_path_len, 0) catch return error.OutOfMemory;
+
+                // Copy start_dir
+                @memcpy(path_buf_slice[0..start_dir.len], start_dir);
+                path_buf_slice[start_dir.len] = '/';
+
+                // Copy entry.path
+                @memcpy(path_buf_slice[start_dir.len + 1 ..][0..entry.path.len], entry.path);
+
+                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
+
+                // Append '/' if GLOB_MARK and it's a directory
+                if (maybeAppendSlash(allocator, path, full_path_len, is_dir, flags) catch {
+                    allocator.free(path_buf_slice);
+                    return error.OutOfMemory;
+                }) |new_path| {
+                    path = new_path;
+                }
+
+                results.append(path) catch return error.OutOfMemory;
+            }
+        }
+    }
+}
+
+inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: c_int, results: *ResultsList, depth: usize, info: *const PatternInfo) !void {
     // Limit recursion depth
     if (depth > 100) return;
 

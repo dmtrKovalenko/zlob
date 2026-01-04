@@ -675,3 +675,156 @@ test "GLOB_TILDE with recursive glob" {
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pglob.gl_pathc >= 1);
 }
+
+// ============================================================================
+// GLOB_PERIOD with recursive patterns - Test both directory walking and matchPaths
+// ============================================================================
+
+test "GLOB_PERIOD - recursive glob should not match hidden files by default" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var test_dir: [4096:0]u8 = undefined;
+    @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
+    test_dir[test_dir_str.len] = 0;
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    // Test with ** recursive pattern - should NOT match hidden files without GLOB_PERIOD
+    const pattern = try allocator.dupeZ(u8, "**/*");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) glob.globfree(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+
+    // Should NOT match any hidden files or files inside hidden directories
+    for (0..pglob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+
+        // Check that path doesn't contain /.hidden anywhere
+        if (std.mem.indexOf(u8, path, "/.hidden") != null) {
+            std.debug.print("ERROR: Path contains /.hidden: {s}\n", .{path});
+        }
+        try testing.expect(std.mem.indexOf(u8, path, "/.hidden") == null);
+
+        // Check basename doesn't start with '.'
+        const basename = if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx|
+            path[idx + 1 ..]
+        else
+            path;
+
+        if (basename.len > 0 and basename[0] == '.') {
+            std.debug.print("ERROR: Matched hidden file without GLOB_PERIOD: {s}\n", .{path});
+        }
+        try testing.expect(basename.len == 0 or basename[0] != '.');
+    }
+}
+
+test "GLOB_PERIOD - recursive glob matches hidden files with flag" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var test_dir: [4096:0]u8 = undefined;
+    @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
+    test_dir[test_dir_str.len] = 0;
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const GLOB_PERIOD: c_int = 0x0080;
+
+    // Test with ** recursive pattern WITH GLOB_PERIOD - should match hidden files
+    const pattern = try allocator.dupeZ(u8, "**/*");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, GLOB_PERIOD, null, &pglob);
+    defer if (result == 0) glob.globfree(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+
+    // Count hidden files/directories
+    var hidden_file_count: usize = 0;
+    var hidden_in_path_count: usize = 0;
+
+    for (0..pglob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+
+        // Check if path contains .hidden_dir
+        if (std.mem.indexOf(u8, path, ".hidden_dir") != null) {
+            hidden_in_path_count += 1;
+        }
+
+        // Check basename starts with '.'
+        const basename = if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx|
+            path[idx + 1 ..]
+        else
+            path;
+
+        if (basename.len > 0 and basename[0] == '.') {
+            hidden_file_count += 1;
+        }
+    }
+
+    // Should match .hidden_file, .hidden_dir, and file5.txt inside .hidden_dir
+    try testing.expect(hidden_file_count >= 1); // At least .hidden_file and .hidden_dir
+    try testing.expect(hidden_in_path_count >= 1); // At least .hidden_dir/file5.txt
+}
+
+test "GLOB_PERIOD - explicit dot pattern still matches without flag in recursive glob" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var test_dir: [4096:0]u8 = undefined;
+    @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
+    test_dir[test_dir_str.len] = 0;
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    // Pattern explicitly starts with . - should match even without GLOB_PERIOD
+    const pattern = try allocator.dupeZ(u8, "**/.hidden*");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) glob.globfree(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+
+    // Should match .hidden_file and .hidden_dir because pattern explicitly starts with '.'
+    try testing.expect(pglob.gl_pathc >= 1);
+
+    for (0..pglob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+        try testing.expect(std.mem.indexOf(u8, path, ".hidden") != null);
+    }
+}
