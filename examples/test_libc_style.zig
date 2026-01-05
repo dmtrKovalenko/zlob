@@ -1,5 +1,5 @@
 const std = @import("std");
-const glob_impl = @import("glob");
+const glob_impl = @import("c_lib");
 
 const Timer = std.time.Timer;
 
@@ -56,7 +56,7 @@ pub fn main() !void {
                 var pglob: glob_impl.glob_t = undefined;
                 const result = glob_impl.glob_c(allocator, tc.pattern.ptr, 0, null, &pglob);
                 if (result == 0) {
-                    glob_impl.globfree(allocator, &pglob);
+                    glob_impl.globfreeZ(allocator, &pglob);
                 }
             }
 
@@ -89,7 +89,7 @@ pub fn main() !void {
         const our_count = if (our_result == 0) our_pglob.gl_pathc else 0;
 
         if (libc_result == 0) globfree(&libc_pglob);
-        if (our_result == 0) glob_impl.globfree(allocator, &our_pglob);
+        if (our_result == 0) glob_impl.globfreeZ(allocator, &our_pglob);
 
         const match = if (libc_count == our_count) "✓" else "✗";
         std.debug.print("{s} Pattern '{s}': libc={d}, ours={d}\n", .{ match, pattern, libc_count, our_count });

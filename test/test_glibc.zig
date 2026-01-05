@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const glob = @import("glob");
+const glob = @import("c_lib");
 const c = std.c;
 
 // Helper to create test directory structure
@@ -106,7 +106,7 @@ test "recursive glob - **/*.c finds all C files" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(testing.allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     // Should find 8 .c files:
@@ -139,7 +139,7 @@ test "recursive glob - dir1/**/*.c finds C files in dir1" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(testing.allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     // Should find 3 .c files: dir1/file1.c, dir1/subdir1/file1.c, dir1/subdir1/file2.c
@@ -170,7 +170,7 @@ test "recursive glob - **/*.h finds all header files" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(testing.allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     // Should find 2 .h files: dir1/file2.h, dir3/file1.h
@@ -201,7 +201,7 @@ test "recursive glob - dir2/**/*.c finds files in dir2 subdirectories" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(testing.allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     // Should find 3 .c files: dir2/file1.c, dir2/subdir1/file1.c, dir2/subdir1/deep/file1.c, dir2/subdir1/deep/file2.c
@@ -232,7 +232,7 @@ test "recursive glob - **/*.txt finds all text files" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(testing.allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     // Should find 2 .txt files: file2.txt, dir1/subdir2/file1.txt
@@ -301,7 +301,7 @@ test "recursive glob - GLOB_APPEND correctly accumulates results" {
     const pattern2 = try allocator.dupeZ(u8, "**/*.h");
     defer allocator.free(pattern2);
     const result2 = glob.glob_c(testing.allocator, pattern2.ptr, glob.GLOB_APPEND, null, &pglob);
-    defer glob.globfree(testing.allocator, &pglob);
+    defer glob.globfreeZ(testing.allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result2);
     // Should have 8 .c files + 2 .h files = 10 total
@@ -332,7 +332,7 @@ test "recursive glob - empty pattern component" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(testing.allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(testing.allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
 
     // Should handle gracefully, either finding directories or returning NOMATCH
     try testing.expect(result == 0 or result == glob.GLOB_NOMATCH);
@@ -402,4 +402,196 @@ test "analyzePattern - multiple wildcards no simple extension" {
     try testing.expectEqualStrings("**/test_*.c", info.wildcard_suffix);
     try testing.expectEqual(true, info.has_recursive);
     try testing.expectEqual(@as(?[]const u8, null), info.simple_extension);
+}
+
+// Tests for matchPaths C API (zero-copy filtering)
+
+test "glob_match_paths - basic filtering" {
+    const paths = [_][*:0]const u8{
+        "foo.txt",
+        "bar.c",
+        "baz.txt",
+        "test.h",
+    };
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_match_paths("*.txt", &paths, paths.len, 0, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 2), pglob.gl_pathc);
+
+    // Verify matches (order not guaranteed, so check for presence)
+    const path0 = std.mem.sliceTo(pglob.gl_pathv[0], 0);
+    const path1 = std.mem.sliceTo(pglob.gl_pathv[1], 0);
+
+    const has_foo = std.mem.eql(u8, path0, "foo.txt") or std.mem.eql(u8, path1, "foo.txt");
+    const has_baz = std.mem.eql(u8, path0, "baz.txt") or std.mem.eql(u8, path1, "baz.txt");
+    try testing.expect(has_foo);
+    try testing.expect(has_baz);
+
+    // Verify lengths are correct (both should be 7)
+    try testing.expectEqual(@as(usize, 7), pglob.gl_pathlen[0]);
+    try testing.expectEqual(@as(usize, 7), pglob.gl_pathlen[1]);
+}
+
+test "glob_match_paths - zero-copy semantics" {
+    const paths = [_][*:0]const u8{
+        "test.txt",
+        "main.c",
+    };
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_match_paths("*.txt", &paths, paths.len, 0, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+
+    // Verify pointer references original memory (zero-copy!)
+    try testing.expectEqual(paths[0], @as([*:0]const u8, @ptrCast(pglob.gl_pathv[0])));
+}
+
+test "glob_match_paths - no matches returns GLOB_NOMATCH" {
+    const paths = [_][*:0]const u8{
+        "foo.txt",
+        "bar.txt",
+    };
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_match_paths("*.c", &paths, paths.len, 0, &pglob);
+
+    try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
+}
+
+test "glob_match_paths - complex pattern" {
+    const paths = [_][*:0]const u8{
+        "src/main.c",
+        "src/test.h",
+        "test/unit_test.c",
+        "docs/readme.md",
+    };
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_match_paths("*/*.c", &paths, paths.len, 0, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 2), pglob.gl_pathc);
+}
+
+test "glob_match_paths_slice - basic filtering" {
+    const path_strings = [_][]const u8{
+        "foo.txt",
+        "bar.c",
+        "baz.txt",
+        "test.h",
+    };
+
+    // Create slice array
+    var path_slices: [4]glob.zlob_slice_t = undefined;
+    for (path_strings, 0..) |str, i| {
+        path_slices[i] = glob.zlob_slice_t{
+            .ptr = str.ptr,
+            .len = str.len,
+        };
+    }
+
+    const pattern = glob.zlob_slice_t{
+        .ptr = "*.txt".ptr,
+        .len = 5,
+    };
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_match_paths_slice(&pattern, &path_slices, path_slices.len, 0, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 2), pglob.gl_pathc);
+
+    // Verify matches (order not guaranteed, so check for presence)
+    const path0 = pglob.gl_pathv[0][0..pglob.gl_pathlen[0]];
+    const path1 = pglob.gl_pathv[1][0..pglob.gl_pathlen[1]];
+
+    const has_foo = std.mem.eql(u8, path0, "foo.txt") or std.mem.eql(u8, path1, "foo.txt");
+    const has_baz = std.mem.eql(u8, path0, "baz.txt") or std.mem.eql(u8, path1, "baz.txt");
+    try testing.expect(has_foo);
+    try testing.expect(has_baz);
+}
+
+test "glob_match_paths_slice - zero-copy semantics" {
+    const path_strings = [_][]const u8{
+        "test.txt",
+        "main.c",
+    };
+
+    var path_slices: [2]glob.zlob_slice_t = undefined;
+    for (path_strings, 0..) |str, i| {
+        path_slices[i] = glob.zlob_slice_t{
+            .ptr = str.ptr,
+            .len = str.len,
+        };
+    }
+
+    const pattern = glob.zlob_slice_t{
+        .ptr = "*.txt".ptr,
+        .len = 5,
+    };
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_match_paths_slice(&pattern, &path_slices, path_slices.len, 0, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+
+    // Verify pointer references original memory (zero-copy!)
+    try testing.expectEqual(path_strings[0].ptr, @as([*]const u8, @ptrCast(pglob.gl_pathv[0])));
+}
+
+test "glob_match_paths_slice - recursive pattern" {
+    const path_strings = [_][]const u8{
+        "src/main.c",
+        "src/test/unit.c",
+        "docs/readme.md",
+        "lib/helpers.c",
+    };
+
+    var path_slices: [4]glob.zlob_slice_t = undefined;
+    for (path_strings, 0..) |str, i| {
+        path_slices[i] = glob.zlob_slice_t{
+            .ptr = str.ptr,
+            .len = str.len,
+        };
+    }
+
+    const pattern = glob.zlob_slice_t{
+        .ptr = "**/*.c".ptr,
+        .len = 6,
+    };
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_match_paths_slice(&pattern, &path_slices, path_slices.len, 0, &pglob);
+    defer if (result == 0) glob.globfreeZ(testing.allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 3), pglob.gl_pathc);
+}
+
+test "globfreeZ - only frees arrays not strings" {
+    const paths = [_][*:0]const u8{
+        "test.txt",
+        "main.c",
+    };
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_match_paths("*.txt", &paths, paths.len, 0, &pglob);
+    try testing.expectEqual(@as(c_int, 0), result);
+
+    // Free should work without issues (doesn't try to free caller's memory)
+    glob.globfreeZ(testing.allocator, &pglob);
+
+    // Verify glob_t was reset
+    try testing.expectEqual(@as(usize, 0), pglob.gl_pathc);
+    try testing.expectEqual(@as(?[*][*c]u8, null), pglob.gl_pathv);
 }

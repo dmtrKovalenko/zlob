@@ -1,5 +1,5 @@
 const std = @import("std");
-const glob = @import("glob");
+const glob = @import("c_lib");
 
 const TestCase = struct {
     name: []const u8,
@@ -68,7 +68,7 @@ pub fn main() !void {
             const result = glob.glob_c(allocator, tc.pattern.ptr, 0, null, &pglob);
             if (result == 0) {
                 std.debug.print("  Matches: {d}\n", .{pglob.gl_pathc});
-                glob.globfree(allocator, &pglob);
+                glob.globfreeZ(allocator, &pglob);
             } else {
                 std.debug.print("  Matches: 0 (error code: {d})\n", .{result});
             }
@@ -85,7 +85,7 @@ pub fn main() !void {
             const result = glob.glob_c(allocator, tc.pattern.ptr, 0, null, &pglob);
             if (result == 0) {
                 matches_this_test = pglob.gl_pathc;
-                glob.globfree(allocator, &pglob);
+                glob.globfreeZ(allocator, &pglob);
             }
         }
 

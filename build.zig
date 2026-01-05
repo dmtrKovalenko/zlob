@@ -49,6 +49,29 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    // C-compatible module (for use within Zig programs)
+    const c_lib_mod = b.addModule("c_lib", .{
+        .root_source_file = b.path("src/c_lib.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+
+    // C-compatible shared library (libzlob.so/.dylib/.dll)
+    // Provides POSIX glob() and globfree() functions with C header
+    const c_lib = b.addLibrary(.{
+        .name = "zlob",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_lib.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    // Install C header
+    c_lib.installHeader(b.path("include/zlob.h"), "zlob.h");
+    b.installArtifact(c_lib);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -146,6 +169,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "simdglob", .module = mod },
                     .{ .name = "glob", .module = glob_mod },
+                    .{ .name = "c_lib", .module = c_lib_mod },
                 },
             }),
         });
@@ -276,7 +300,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "glob", .module = glob_mod },
+                .{ .name = "c_lib", .module = c_lib_mod },
             },
         }),
     });
@@ -296,7 +320,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "glob", .module = glob_mod },
+                .{ .name = "c_lib", .module = c_lib_mod },
             },
         }),
     });
@@ -316,7 +340,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "glob", .module = glob_mod },
+                .{ .name = "c_lib", .module = c_lib_mod },
             },
         }),
     });
@@ -336,7 +360,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "glob", .module = glob_mod },
+                .{ .name = "c_lib", .module = c_lib_mod },
             },
         }),
     });

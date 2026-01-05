@@ -4,24 +4,25 @@
 //! SIMD optimizations for improved performance on pattern matching operations.
 //!
 //! Based on the OpenBSD glob implementation with modern SIMD enhancements.
+//!
+//! This is the pure Zig API. For C-compatible API, see c_lib.zig which provides
+//! POSIX glob() and globfree() functions with a C header (include/zlob.h).
 
 const std = @import("std");
 
-// Re-export the glob module (contains all implementation)
+// Re-export the glob module (contains all Zig implementation)
 pub const glob = @import("glob.zig");
 
 // Re-export common types and functions for convenience
 pub const Glob = glob.Glob;
-pub const GlobResult = glob.GlobResult;
+pub const GlobResults = glob.GlobResults;
 pub const GlobError = glob.GlobError;
 
 // Re-export SIMD functions for benchmarking
 pub const simdFindChar = glob.simdFindChar;
 pub const hasWildcardsSIMD = glob.hasWildcardsSIMD;
-pub const simdSuffixMatch = glob.simdSuffixMatch;
-pub const fnmatch = glob.fnmatch;
 
-// Re-export flags
+// Re-export glob flags
 pub const GLOB_APPEND = glob.GLOB_APPEND;
 pub const GLOB_DOOFFS = glob.GLOB_DOOFFS;
 pub const GLOB_ERR = glob.GLOB_ERR;
@@ -47,7 +48,7 @@ pub const GLOB_TILDE_CHECK = glob.GLOB_TILDE_CHECK;
 ///     std.debug.print("Found: {s}\n", .{path});
 /// }
 /// ```
-pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !GlobResult {
+pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !GlobResults {
     return glob.globMatch(allocator, pattern, flags);
 }
 
@@ -87,7 +88,7 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !Glo
 /// Requirements:
 /// - Input paths MUST be normalized (no consecutive slashes like //)
 /// - Paths from filesystem operations are typically already normalized
-pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags: u32) !GlobResult {
+pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags: u32) !GlobResults {
     const path_matcher = @import("path_matcher.zig");
     return path_matcher.matchPaths(allocator, pattern, paths, flags);
 }

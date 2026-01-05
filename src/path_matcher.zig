@@ -13,7 +13,7 @@ const PatternContext = glob.PatternContext;
 const fnmatchWithContext = glob.fnmatchWithContext;
 
 // Re-export types and flags
-pub const GlobResult = glob.GlobResult;
+pub const GlobResults = glob.GlobResults;
 pub const GLOB_NOSORT = glob.GLOB_NOSORT;
 pub const GLOB_PERIOD = glob.GLOB_PERIOD;
 pub const GLOB_NOCHECK = glob.GLOB_NOCHECK;
@@ -379,13 +379,13 @@ pub fn matchPaths(
     pattern: []const u8,
     paths: []const []const u8,
     flags: u32,
-) !GlobResult {
+) !GlobResults {
     // Handle empty input
     if (paths.len == 0) {
         if (flags & GLOB_NOCHECK != 0) {
             var result_paths = try allocator.alloc([]const u8, 1);
             result_paths[0] = try allocator.dupe(u8, pattern);
-            return GlobResult{
+            return GlobResults{
                 .paths = result_paths,
                 .match_count = 1,
                 .allocator = allocator,
@@ -393,7 +393,7 @@ pub fn matchPaths(
             };
         }
         const empty: [][]const u8 = &[_][]const u8{};
-        return GlobResult{
+        return GlobResults{
             .paths = empty,
             .match_count = 0,
             .allocator = allocator,
@@ -442,7 +442,7 @@ pub fn matchPaths(
         if (matches.items.len == 0 and flags & GLOB_NOCHECK != 0) {
             var result_paths = try allocator.alloc([]const u8, 1);
             result_paths[0] = try allocator.dupe(u8, pattern);
-            return GlobResult{
+            return GlobResults{
                 .paths = result_paths,
                 .match_count = 1,
                 .allocator = allocator,
@@ -453,7 +453,7 @@ pub fn matchPaths(
         // Handle no matches
         if (matches.items.len == 0) {
             const empty: [][]const u8 = &[_][]const u8{};
-            return GlobResult{
+            return GlobResults{
                 .paths = empty,
                 .match_count = 0,
                 .allocator = allocator,
@@ -463,7 +463,7 @@ pub fn matchPaths(
 
         // Transfer ownership to result
         const result_paths = try matches.toOwnedSlice();
-        return GlobResult{
+        return GlobResults{
             .paths = result_paths,
             .match_count = result_paths.len,
             .allocator = allocator,
@@ -541,7 +541,7 @@ pub fn matchPaths(
     if (matches.items.len == 0 and flags & GLOB_NOCHECK != 0) {
         var result_paths = try allocator.alloc([]const u8, 1);
         result_paths[0] = try allocator.dupe(u8, pattern);
-        return GlobResult{
+        return GlobResults{
             .paths = result_paths,
             .match_count = 1,
             .allocator = allocator,
@@ -552,7 +552,7 @@ pub fn matchPaths(
     // Handle no matches
     if (matches.items.len == 0) {
         const empty: [][]const u8 = &[_][]const u8{};
-        return GlobResult{
+        return GlobResults{
             .paths = empty,
             .match_count = 0,
             .allocator = allocator,
@@ -572,7 +572,7 @@ pub fn matchPaths(
         }.lessThan);
     }
 
-    return GlobResult{
+    return GlobResults{
         .paths = result_paths,
         .match_count = result_paths.len,
         .allocator = allocator,

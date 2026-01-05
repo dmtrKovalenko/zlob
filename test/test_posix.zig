@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const glob = @import("glob");
+const glob = @import("c_lib");
 const c = std.c;
 
 // Test structure helper
@@ -84,7 +84,7 @@ test "GLOB_MARK - appends slash to directories" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pglob.gl_pathc >= 3); // At least 3 directories
@@ -127,7 +127,7 @@ test "GLOB_MARK - does not append slash to files" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pglob.gl_pathc >= 1);
@@ -163,7 +163,7 @@ test "GLOB_MARK - works with recursive glob" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expect(result == 0 or result == glob.GLOB_NOMATCH);
     if (result == 0) {
@@ -205,7 +205,7 @@ test "GLOB_DOOFFS - reserves offset slots at beginning" {
     pglob.gl_offs = 3; // Request 3 offset slots
 
     const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_DOOFFS, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pglob.gl_pathc >= 1);
@@ -256,7 +256,7 @@ test "GLOB_DOOFFS - works with GLOB_APPEND" {
     const pattern2 = try allocator.dupeZ(u8, "*.c");
     defer allocator.free(pattern2);
     const result2 = glob.glob_c(allocator, pattern2.ptr, glob.GLOB_DOOFFS | glob.GLOB_APPEND, null, &pglob);
-    defer glob.globfree(allocator, &pglob);
+    defer glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result2);
     try testing.expect(pglob.gl_pathc > first_count);
@@ -297,7 +297,7 @@ test "GLOB_PERIOD - matches hidden files with wildcard" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, GLOB_PERIOD, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -338,7 +338,7 @@ test "GLOB_PERIOD - without flag does not match hidden files" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -373,7 +373,7 @@ test "GLOB_PERIOD - explicit dot still matches" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -411,7 +411,7 @@ test "GLOB_TILDE - expands tilde to home directory" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_TILDE, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -443,7 +443,7 @@ test "GLOB_TILDE - expands ~username to user home" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_TILDE, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -460,7 +460,7 @@ test "GLOB_TILDE - without flag treats tilde as literal" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     // Without GLOB_TILDE, should try to find literal ~ directory
     // Most likely GLOB_NOMATCH or GLOB_ABORTED
@@ -479,7 +479,7 @@ test "GLOB_TILDE_CHECK - errors on nonexistent username" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_TILDE | glob.GLOB_TILDE_CHECK, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     // Should return GLOB_NOMATCH for nonexistent user
     try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
@@ -493,7 +493,7 @@ test "GLOB_TILDE_CHECK - without flag returns tilde literal on unknown user" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_TILDE | glob.GLOB_NOCHECK, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     // Without GLOB_TILDE_CHECK, should fall back to literal tilde
     try testing.expectEqual(@as(c_int, 0), result);
@@ -596,7 +596,7 @@ test "GLOB_NOMAGIC - succeeds for literal that exists" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, GLOB_NOMAGIC, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -632,7 +632,7 @@ test "GLOB_MARK and GLOB_PERIOD together" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK | GLOB_PERIOD, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -670,7 +670,7 @@ test "GLOB_TILDE with recursive glob" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_TILDE, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pglob.gl_pathc >= 1);
@@ -705,7 +705,7 @@ test "GLOB_PERIOD - recursive glob should not match hidden files by default" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -759,7 +759,7 @@ test "GLOB_PERIOD - recursive glob matches hidden files with flag" {
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, GLOB_PERIOD, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -816,7 +816,7 @@ test "GLOB_PERIOD - explicit dot pattern still matches without flag in recursive
 
     var pglob: glob.glob_t = undefined;
     const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfree(allocator, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -827,4 +827,282 @@ test "GLOB_PERIOD - explicit dot pattern still matches without flag in recursive
         const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
         try testing.expect(std.mem.indexOf(u8, path, ".hidden") != null);
     }
+}
+
+// ============================================================================
+// Literal path tests (no wildcards) - testing globLiteralPath function
+// ============================================================================
+
+test "literal path - file exists" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "file1.txt");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    try testing.expectEqualStrings("file1.txt", std.mem.sliceTo(pglob.gl_pathv[0], 0));
+    try testing.expectEqual(@as(usize, 9), pglob.gl_pathlen[0]);
+}
+
+test "literal path - directory exists" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "dir1");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    try testing.expectEqualStrings("dir1", std.mem.sliceTo(pglob.gl_pathv[0], 0));
+}
+
+test "literal path - GLOB_ONLYDIR with directory" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "dir1");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_ONLYDIR, null, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    try testing.expectEqualStrings("dir1", std.mem.sliceTo(pglob.gl_pathv[0], 0));
+}
+
+test "literal path - GLOB_ONLYDIR with file (should fail)" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "file1.txt");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_ONLYDIR, null, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
+}
+
+test "literal path - GLOB_MARK with directory" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "dir1");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK, null, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    const path = std.mem.sliceTo(pglob.gl_pathv[0], 0);
+    try testing.expectEqualStrings("dir1/", path);
+    try testing.expectEqual(@as(usize, 5), pglob.gl_pathlen[0]);
+}
+
+test "literal path - GLOB_MARK with file (no slash)" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "file1.txt");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK, null, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    const path = std.mem.sliceTo(pglob.gl_pathv[0], 0);
+    try testing.expectEqualStrings("file1.txt", path);
+}
+
+test "literal path - ./ prefix normalization" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "./file1.txt");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    // Should normalize away the "./" prefix
+    try testing.expectEqualStrings("file1.txt", std.mem.sliceTo(pglob.gl_pathv[0], 0));
+}
+
+test "literal path - GLOB_NOCHECK returns pattern when not found" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_NOCHECK, null, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    // Should return the pattern itself
+    try testing.expectEqualStrings("nonexistent.txt", std.mem.sliceTo(pglob.gl_pathv[0], 0));
+}
+
+test "literal path - not found without GLOB_NOCHECK" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
+}
+
+test "literal path - GLOB_MARK and GLOB_ONLYDIR together" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "dir1");
+    defer allocator.free(pattern);
+
+    var pglob: glob.glob_t = undefined;
+    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK | glob.GLOB_ONLYDIR, null, &pglob);
+    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    const path = std.mem.sliceTo(pglob.gl_pathv[0], 0);
+    try testing.expectEqualStrings("dir1/", path);
+    try testing.expectEqual(@as(usize, 5), pglob.gl_pathlen[0]);
 }

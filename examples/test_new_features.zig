@@ -1,5 +1,5 @@
 const std = @import("std");
-const glob = @import("glob");
+const glob = @import("c_lib");
 
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
@@ -16,7 +16,7 @@ pub fn main() !void {
             const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
             std.debug.print("    {s}\n", .{path});
         }
-        glob.globfree(allocator, &pglob);
+        glob.globfreeZ(allocator, &pglob);
     } else {
         std.debug.print("  FAILED with code: {d}\n", .{result});
     }
@@ -31,7 +31,7 @@ pub fn main() !void {
             const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
             std.debug.print("    {s}\n", .{path});
         }
-        glob.globfree(allocator, &pglob);
+        glob.globfreeZ(allocator, &pglob);
     } else {
         std.debug.print("  FAILED with code: {d}\n", .{result});
     }
@@ -49,7 +49,7 @@ pub fn main() !void {
         if (pglob.gl_pathc > 15) {
             std.debug.print("    ... and {d} more files\n", .{pglob.gl_pathc - 15});
         }
-        glob.globfree(allocator, &pglob);
+        glob.globfreeZ(allocator, &pglob);
     } else {
         std.debug.print("  FAILED with code: {d}\n", .{result});
     }
@@ -64,7 +64,7 @@ pub fn main() !void {
             const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
             std.debug.print("    {s}\n", .{path});
         }
-        glob.globfree(allocator, &pglob);
+        glob.globfreeZ(allocator, &pglob);
     } else {
         std.debug.print("  FAILED with code: {d}\n", .{result});
     }
@@ -79,7 +79,7 @@ pub fn main() !void {
             const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
             std.debug.print("    {s}\n", .{path});
         }
-        glob.globfree(allocator, &pglob);
+        glob.globfreeZ(allocator, &pglob);
     } else {
         std.debug.print("  FAILED with code: {d}\n", .{result});
     }

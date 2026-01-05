@@ -1,5 +1,5 @@
 const std = @import("std");
-const glob = @import("glob");
+const glob = @import("c_lib");
 
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
@@ -17,7 +17,7 @@ pub fn main() !void {
         // Use a pattern that matches many files
         const result = glob.glob_c(allocator, "drivers/*.c", 0, null, &pglob);
         if (result == 0) {
-            glob.globfree(allocator, &pglob);
+            glob.globfreeZ(allocator, &pglob);
         }
     }
 
