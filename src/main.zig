@@ -2,20 +2,16 @@ const std = @import("std");
 const simdglob = @import("simdglob");
 
 pub fn main() !void {
-    // Use GPA as backing allocator for arena
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    // Use arena allocator for efficient bulk deallocation
     var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Get command line arguments
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
-    // Skip program name
     _ = args.skip();
 
     const pattern = args.next() orelse {
@@ -33,7 +29,6 @@ pub fn main() !void {
         return;
     };
 
-    // Parse flags
     var flags: u32 = 0;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--mark")) {
@@ -48,12 +43,10 @@ pub fn main() !void {
         }
     }
 
-    // Perform glob matching
     const start = std.time.nanoTimestamp();
     var match_result = try simdglob.match(allocator, pattern, flags);
     const end = std.time.nanoTimestamp();
 
-    // Print results
     std.debug.print("Pattern: {s}\n", .{pattern});
 
     if (match_result) |*result| {

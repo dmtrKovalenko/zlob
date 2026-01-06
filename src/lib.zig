@@ -57,14 +57,12 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !?Gl
     const opt_result = try glob.glob(allocator, pattern_z.ptr, @intCast(flags), null, &pglob);
 
     if (opt_result) |_| {
-        // Matches found
         var paths = try allocator.alloc([]const u8, pglob.gl_pathc);
         errdefer allocator.free(paths);
 
         var i: usize = 0;
         while (i < pglob.gl_pathc) : (i += 1) {
             const c_path = pglob.gl_pathv[i];
-            // Zero-copy: wrap the C pointer as a Zig slice using cached length
             const path_len = pglob.gl_pathlen[i];
             paths[i] = c_path[0..path_len];
         }
@@ -73,12 +71,10 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !?Gl
             .paths = paths,
             .match_count = pglob.gl_pathc,
             .allocator = allocator,
-            .pglob = pglob, // Store full glob_t for proper cleanup
+            .pglob = pglob,
         };
     } else {
-        // No matches (null return)
         if (flags & GLOB_NOCHECK != 0) {
-            // Return the pattern itself
             var paths = try allocator.alloc([]const u8, 1);
             errdefer allocator.free(paths);
             paths[0] = try allocator.dupe(u8, pattern);

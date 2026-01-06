@@ -32,7 +32,6 @@ comptime {
     );
 }
 
-/// Returns the platform-optimal SIMD batch sizes selected at compile time
 pub fn getSimdConfig() struct { u16_batch_size: usize, u32_batch_size: usize } {
     return .{
         .u16_batch_size = OptimalVecSize16,
@@ -127,8 +126,6 @@ pub const SuffixMatch = struct {
     }
 };
 
-/// Comptime-specialized suffix matching - no runtime branching
-/// Each function is monomorphized for a specific suffix length
 inline fn matchSuffixLen1(name: []const u8, suffix_byte: u8) bool {
     if (name.len < 1) return false;
     return name[name.len - 1] == suffix_byte;
@@ -155,8 +152,6 @@ inline fn matchSuffixLen4(name: []const u8, suffix_u32: u32) bool {
     return tail == suffix_u32;
 }
 
-/// Direct integer comparison approach for suffix matching (1-4 bytes)
-/// Uses unaligned loads and direct equality comparison
 inline fn matchSuffixDirect(name: []const u8, suffix: []const u8, suffix_u16: u16, suffix_u32: u32) bool {
     if (name.len < suffix.len) return false;
 
@@ -181,8 +176,6 @@ inline fn matchSuffixDirect(name: []const u8, suffix: []const u8, suffix_u16: u1
     };
 }
 
-/// XOR-based comparison approach for suffix matching (1-4 bytes)
-/// Uses XOR operations to detect differences
 inline fn matchSuffixXor(name: []const u8, suffix: []const u8) bool {
     if (name.len < suffix.len) return false;
 
@@ -208,11 +201,9 @@ pub const SimdBatchedSuffixMatch = struct {
     suffix_u32: u32, // Pre-computed u32 representation for SIMD
     simple_ext_len: u8, // Length of the extension
 
-    suffix_u16: u16, // Pre-computed u16 for 2-byte suffixes (e.g., ".c")
-    suffix_byte: u8, // Third byte for 3-byte suffixes
+    suffix_u16: u16,
+    suffix_byte: u8,
 
-    /// Initialize SIMD context for a *.ext pattern
-    /// Returns a context with pre-computed vectors and masks for fast suffix matching
     pub fn init(ext: []const u8) SimdBatchedSuffixMatch {
         std.debug.assert(ext.len > 0 and ext.len <= 4);
 
@@ -263,7 +254,6 @@ pub const SimdBatchedSuffixMatch = struct {
         paths: []const []const u8,
         matches: *std.array_list.AlignedManaged([]const u8, null),
     ) !void {
-        // Use comptime-specialized suffix matching - no runtime branching
         for (paths) |path| {
             const is_match = switch (self.simple_ext_len) {
                 1 => matchSuffixLen1(path, @truncate(self.suffix_u32)),
@@ -279,7 +269,6 @@ pub const SimdBatchedSuffixMatch = struct {
     }
 };
 
-// Generic SIMD vectorized batch processing with compile-time batch size
 fn simdBatchProcessGeneric(
     comptime BatchSize: usize,
     comptime matchFn: fn ([BatchSize][]const u8, *const SimdBatchedSuffixMatch) callconv(.@"inline") @Vector(BatchSize, bool),
@@ -352,9 +341,7 @@ fn simdBatchProcessGeneric(
         }
     }
 
-    // Process remaining batch items
     if (batch_count > 0) {
-        // Initialize unused entries to empty slices to avoid undefined behavior
         for (batch_count..BatchSize) |i| {
             batch_names[i] = "";
         }
@@ -402,7 +389,6 @@ fn simdBatchProcessGeneric(
     }
 }
 
-/// Generic SIMD batch processing for path arrays with compile-time batch size
 fn matchPathsBatchGeneric(
     comptime BatchSize: usize,
     comptime matchFn: fn ([BatchSize][]const u8, *const SimdBatchedSuffixMatch) callconv(.@"inline") @Vector(BatchSize, bool),

@@ -69,10 +69,8 @@ pub export fn glob_match_paths(
 ) c_int {
     const allocator = std.heap.c_allocator;
 
-    // Convert to Zig slices (zero-copy view)
     const pattern_slice = mem.sliceTo(pattern, 0);
 
-    // Use stack allocation for common case to avoid heap allocation
     const STACK_LIMIT = 256;
     var stack_buf: [STACK_LIMIT][]const u8 = undefined;
     const zig_paths_storage = if (path_count <= STACK_LIMIT)
@@ -96,7 +94,6 @@ pub export fn glob_match_paths(
         return GLOB_NOMATCH;
     }
 
-    // Allocate result arrays (pointers only!)
     const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return GLOB_NOSPACE;
     errdefer allocator.free(pathv_buf);
 
@@ -105,14 +102,12 @@ pub export fn glob_match_paths(
         return GLOB_NOSPACE;
     };
 
-    // Point to original memory (zero-copy!)
     for (results.paths, 0..) |path, i| {
-        pathv_buf[i] = @ptrCast(@constCast(path.ptr)); // Point to caller's memory
+        pathv_buf[i] = @ptrCast(@constCast(path.ptr));
         pathlen_buf[i] = path.len;
     }
     pathv_buf[results.match_count] = null;
 
-    // Populate glob_t
     pglob.gl_pathc = results.match_count;
     pglob.gl_pathv = @ptrCast(pathv_buf.ptr);
     pglob.gl_offs = 0;
@@ -152,7 +147,6 @@ pub export fn glob_match_paths_slice(
         return GLOB_NOMATCH;
     }
 
-    // Allocate result arrays (pointers only, NOT string copies!)
     const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return GLOB_NOSPACE;
     errdefer allocator.free(pathv_buf);
 
@@ -161,14 +155,12 @@ pub export fn glob_match_paths_slice(
         return GLOB_NOSPACE;
     };
 
-    // Point to original memory (zero-copy!)
     for (results.paths, 0..) |path, i| {
-        pathv_buf[i] = @ptrCast(@constCast(path.ptr)); // Point to caller's memory
+        pathv_buf[i] = @ptrCast(@constCast(path.ptr));
         pathlen_buf[i] = path.len;
     }
     pathv_buf[results.match_count] = null;
 
-    // Populate glob_t
     pglob.gl_pathc = results.match_count;
     pglob.gl_pathv = @ptrCast(pathv_buf.ptr);
     pglob.gl_offs = 0;
