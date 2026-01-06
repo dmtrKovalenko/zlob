@@ -74,11 +74,14 @@ typedef struct {
 #define GLOB_NOMATCH    3  /* No matches found */
 
 /**
- * glob - Find pathnames matching a pattern
+ * glob - Find pathnames matching a pattern (POSIX-compliant)
  *
  * @param pattern   The glob pattern to match (e.g., "*.txt", "src/test_*.c")
  * @param flags     Bitwise OR of GLOB_* flags
- * @param errfunc   Error callback function (currently ignored, pass NULL)
+ * @param errfunc   Error callback function: int (*errfunc)(const char *epath, int eerrno)
+ *                  Called when a directory read error occurs. If it returns non-zero
+ *                  or GLOB_ERR is set, glob() will abort and return GLOB_ABORTED.
+ *                  Pass NULL to ignore errors and continue matching.
  * @param pglob     Pointer to glob_t structure to receive results
  *
  * @return 0 on success, or one of GLOB_NOSPACE, GLOB_ABORTED, GLOB_NOMATCH
@@ -107,7 +110,9 @@ typedef struct {
  *   The strings in gl_pathv and the gl_pathv array itself are allocated by glob()
  *   and must be freed by globfree().
  */
-int glob(const char *pattern, int flags, void *errfunc, glob_t *pglob);
+int glob(const char *restrict pattern, int flags,
+         int (*errfunc)(const char *epath, int eerrno),
+         glob_t *restrict pglob);
 
 /**
  * globfree - Free memory allocated by glob()

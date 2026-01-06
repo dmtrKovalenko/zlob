@@ -166,6 +166,7 @@ pub fn build(b: *std.Build) void {
         "test/test_posix.zig",
         "test/test_rust_glob.zig",
         "test/test_path_matcher.zig",
+        "test/test_errfunc.zig",
     };
 
     for (test_files) |test_file| {
@@ -248,7 +249,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "simdglob", .module = mod },
+                .{ .name = "c_lib", .module = c_lib_mod },
             },
         }),
     });

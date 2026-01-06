@@ -10,21 +10,14 @@
 
 const std = @import("std");
 
-// Re-export the glob module (contains all Zig implementation)
 pub const glob = @import("glob");
-
 pub const GlobResults = glob.GlobResults;
 pub const GlobError = glob.GlobError;
 pub const glob_t = glob.glob_t;
-
-// Re-export utility functions
 pub const analyzePattern = glob.analyzePattern;
-
-// Re-export SIMD functions for benchmarking
 pub const simdFindChar = glob.simdFindChar;
 pub const hasWildcardsSIMD = glob.hasWildcardsSIMD;
 
-// Re-export glob flags
 pub const GLOB_APPEND = glob.GLOB_APPEND;
 pub const GLOB_DOOFFS = glob.GLOB_DOOFFS;
 pub const GLOB_ERR = glob.GLOB_ERR;
@@ -39,48 +32,64 @@ pub const GLOB_BRACE = glob.GLOB_BRACE;
 pub const GLOB_PERIOD = glob.GLOB_PERIOD;
 pub const GLOB_ONLYDIR = glob.GLOB_ONLYDIR;
 pub const GLOB_TILDE_CHECK = glob.GLOB_TILDE_CHECK;
-
-// Re-export error codes
 pub const GLOB_NOSPACE = glob.GLOB_NOSPACE;
 pub const GLOB_ABORTED = glob.GLOB_ABORTED;
 pub const GLOB_NOMATCH = glob.GLOB_NOMATCH;
 
-/// Simple glob function for Zig users (recommended API).
-///
-/// Match pattern against filesystem paths in the given directory.
-/// Returns an ArrayList of matching paths, or null if no matches.
-/// Caller owns the returned ArrayList and all strings in it.
+/// Perform file system walking and collect matching results to GlobResults
 ///
 /// Example:
 /// ```zig
-/// // Basic usage - returns null if no matches
-/// if (try simdglob.globZ(allocator, ".", "*.txt", 0)) |*result| {
-///     defer {
-///         for (result.items) |p| allocator.free(p);
-///         result.deinit();
+/// if (try glob.match(allocator, "**/*.zig", 0)) |*result| {
+///     defer result.deinit();
+///     for (result.paths) |path| {
+///         std.debug.print("{s}\n", .{path});
 ///     }
-///     for (result.items) |p| {
-///         std.debug.print("Found: {s}\n", .{p});
-///     }
+/// } else {
+///     std.debug.print("No matches found\n", .{});
 /// }
 /// ```
-pub fn globZ(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, flags: c_int) !?std.array_list.AlignedManaged([]const u8, null) {
-    return glob.globZ(allocator, base_path, pattern, flags);
-}
+pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !?GlobResults {
+    const pattern_z = try allocator.dupeZ(u8, pattern);
+    defer allocator.free(pattern_z);
 
+    var pglob: glob_t = undefined;
+    const opt_result = try glob.glob(allocator, pattern_z.ptr, @intCast(flags), null, &pglob);
 
-/// Perform glob matching on filesystem (legacy API)
-///
-/// Example:
-/// ```zig
-/// const result = try simdglob.match(allocator, "*.txt", 0);
-/// defer result.deinit();
-/// for (result.paths) |path| {
-///     std.debug.print("Found: {s}\n", .{path});
-/// }
-/// ```
-pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !GlobResults {
-    return glob.globMatch(allocator, pattern, flags);
+    if (opt_result) |_| {
+        // Matches found
+        var paths = try allocator.alloc([]const u8, pglob.gl_pathc);
+        errdefer allocator.free(paths);
+
+        var i: usize = 0;
+        while (i < pglob.gl_pathc) : (i += 1) {
+            const c_path = pglob.gl_pathv[i];
+            // Zero-copy: wrap the C pointer as a Zig slice using cached length
+            const path_len = pglob.gl_pathlen[i];
+            paths[i] = c_path[0..path_len];
+        }
+
+        return GlobResults{
+            .paths = paths,
+            .match_count = pglob.gl_pathc,
+            .allocator = allocator,
+            .pglob = pglob, // Store full glob_t for proper cleanup
+        };
+    } else {
+        // No matches (null return)
+        if (flags & GLOB_NOCHECK != 0) {
+            // Return the pattern itself
+            var paths = try allocator.alloc([]const u8, 1);
+            errdefer allocator.free(paths);
+            paths[0] = try allocator.dupe(u8, pattern);
+            return GlobResults{
+                .paths = paths,
+                .match_count = 1,
+                .allocator = allocator,
+            };
+        }
+        return null;
+    }
 }
 
 /// Match glob pattern against array of paths with full ** recursive support

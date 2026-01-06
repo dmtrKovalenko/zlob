@@ -50,23 +50,24 @@ pub fn main() !void {
 
     // Perform glob matching
     const start = std.time.nanoTimestamp();
-    var result = simdglob.match(allocator, pattern, flags) catch |err| {
-        std.debug.print("Error: {}\n", .{err});
-        return;
-    };
-    defer result.deinit();
+    var match_result = try simdglob.match(allocator, pattern, flags);
     const end = std.time.nanoTimestamp();
 
     // Print results
     std.debug.print("Pattern: {s}\n", .{pattern});
-    std.debug.print("Matches: {d}\n", .{result.match_count});
-    std.debug.print("Time: {d:.2}ms\n\n", .{@as(f64, @floatFromInt(end - start)) / 1_000_000.0});
 
-    if (result.match_count == 0) {
-        std.debug.print("No matches found.\n", .{});
-    } else {
+    if (match_result) |*result| {
+        defer result.deinit();
+
+        std.debug.print("Matches: {d}\n", .{result.match_count});
+        std.debug.print("Time: {d:.2}ms\n\n", .{@as(f64, @floatFromInt(end - start)) / 1_000_000.0});
+
         for (result.paths) |path| {
             std.debug.print("{s}\n", .{path});
         }
+    } else {
+        std.debug.print("Matches: 0\n", .{});
+        std.debug.print("Time: {d:.2}ms\n\n", .{@as(f64, @floatFromInt(end - start)) / 1_000_000.0});
+        std.debug.print("No matches found.\n", .{});
     }
 }

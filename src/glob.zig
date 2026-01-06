@@ -98,6 +98,8 @@ pub const GLOB_NOSPACE = 1;
 pub const GLOB_ABORTED = 2;
 pub const GLOB_NOMATCH = 3;
 
+pub const glob_errfunc_t = ?*const fn (epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int;
+
 // Re-export path_matcher for c_lib to use
 pub fn internalMatchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags: u32) !GlobResults {
     const path_matcher = @import("path_matcher.zig");
@@ -483,16 +485,16 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
     // Collect all matching paths
     var result_paths = ResultsList.init(allocator);
     defer result_paths.deinit();
-
-    // Start recursive expansion from current directory
-    expandWildcardComponents(allocator, ".", components[0..component_count], 0, &result_paths, directories_only) catch {
+    errdefer {
         // Clean up any allocated paths on error
         for (result_paths.items) |path| {
             const path_slice = mem.sliceTo(path, 0);
             allocator.free(path_slice);
         }
-        return error.OutOfMemory;
-    };
+    }
+
+    // Start recursive expansion from current directory
+    try expandWildcardComponents(allocator, ".", components[0..component_count], 0, &result_paths, directories_only);
 
     // Handle no matches
     if (result_paths.items.len == 0) {
@@ -543,7 +545,7 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
 }
 
 // Optimized version that uses pattern info to start from literal prefix
-fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: c_int, pglob: *glob_t, directories_only: bool) !?void {
+fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, directories_only: bool) !?void {
     // Split pattern by '/' into components (use wildcard_suffix if we have prefix)
     var components: [64][]const u8 = undefined;
     var component_count: usize = 0;
@@ -567,6 +569,13 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
 
     var result_paths = ResultsList.init(allocator);
     defer result_paths.deinit();
+    errdefer {
+        // Clean up any allocated paths on error
+        for (result_paths.items) |path| {
+            const path_slice = mem.sliceTo(path, 0);
+            allocator.free(path_slice);
+        }
+    }
 
     const estimated_capacity: usize = if (info.has_recursive)
         1024 // Recursive patterns can match many files
@@ -582,14 +591,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     else
         ".";
 
-    expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only) catch {
-        // Clean up any allocated paths on error
-        for (result_paths.items) |path| {
-            const path_slice = mem.sliceTo(path, 0);
-            allocator.free(path_slice);
-        }
-        return error.OutOfMemory;
-    };
+    try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc);
 
     // Handle no matches
     if (result_paths.items.len == 0) {
@@ -647,6 +649,8 @@ fn expandWildcardComponents(
     component_idx: usize,
     results: *ResultsList,
     directories_only: bool,
+    flags: c_int,
+    errfunc: glob_errfunc_t,
 ) !void {
     if (component_idx > 65536) {
         @branchHint(.unlikely);
@@ -674,7 +678,21 @@ fn expandWildcardComponents(
         @memcpy(dirname_z[0..current_dir.len], current_dir);
         dirname_z[current_dir.len] = 0;
 
-        const dir = c.opendir(&dirname_z) orelse return error.Aborted;
+        const dir = c.opendir(&dirname_z) orelse {
+            // Directory open error - call errfunc if provided
+            if (errfunc) |efunc| {
+                const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
+                if (efunc(&dirname_z, eerrno) != 0) {
+                    return error.Aborted;
+                }
+            }
+            // If GLOB_ERR is set, abort on error
+            if ((flags & GLOB_ERR) != 0) {
+                return error.Aborted;
+            }
+            // Otherwise, silently skip this directory
+            return;
+        };
         defer _ = c.closedir(dir);
 
         while (c.readdir(dir)) |entry_raw| {
@@ -701,7 +719,7 @@ fn expandWildcardComponents(
                 if (new_path.len >= 4096) continue;
 
                 // Recurse with next component
-                try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only);
+                try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc);
             }
         }
     } else {
@@ -725,12 +743,12 @@ fn expandWildcardComponents(
             if (is_final and directories_only and !std.c.S.ISDIR(stat_buf.mode)) return;
 
             // Path exists and is valid, recurse
-            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only);
+            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc);
         }
     }
 }
 
-fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, pglob: *glob_t) !?void {
+fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t) !?void {
     // Check for trailing slash (indicates "directories only")
     var effective_pattern = pattern;
     var effective_flags = flags;
@@ -782,7 +800,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, p
 
     // Fast path: simple pattern with literal prefix (e.g., "src/foo/*.txt")
     if (info.simple_extension != null and info.literal_prefix.len > 0) {
-        return globInDirFiltered(allocator, info.wildcard_suffix, info.literal_prefix, effective_flags, pglob, info.directories_only);
+        return globInDirFiltered(allocator, info.wildcard_suffix, info.literal_prefix, effective_flags, errfunc, pglob, info.directories_only);
     }
 
     // Check for ** recursive glob FIRST before parsing dirname
@@ -819,7 +837,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, p
             }
         }
 
-        return globRecursive(allocator, pattern_from_doublestar, dirname, effective_flags, pglob, info.directories_only);
+        return globRecursive(allocator, pattern_from_doublestar, dirname, effective_flags, errfunc, pglob, info.directories_only);
     }
 
     // Check if pattern has wildcards in directory components (before last slash)
@@ -849,7 +867,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, p
     // Use recursive wildcard expansion for complex patterns
     // But skip if pattern has ** (needs special recursive handling)
     if (has_wildcard_in_dir and !info.has_recursive) {
-        return globWithWildcardDirsOptimized(allocator, effective_pattern, &info, effective_flags, pglob, info.directories_only);
+        return globWithWildcardDirsOptimized(allocator, effective_pattern, &info, effective_flags, errfunc, pglob, info.directories_only);
     }
 
     // Parse directory and pattern (fast path for simple patterns)
@@ -876,14 +894,17 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, p
 
     // Check for recursive glob **
     if (mem.indexOf(u8, filename_pattern, "**")) |_| {
-        return globRecursive(allocator, filename_pattern, dirname, effective_flags, pglob, info.directories_only);
+        return globRecursive(allocator, filename_pattern, dirname, effective_flags, errfunc, pglob, info.directories_only);
     }
 
-    return globInDirFiltered(allocator, filename_pattern, dirname, effective_flags, pglob, info.directories_only);
+    return globInDirFiltered(allocator, filename_pattern, dirname, effective_flags, errfunc, pglob, info.directories_only);
 }
 
 // Helper to expand tilde (~) in patterns
-fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int) ![:0]const u8 {
+// Returns:
+//   - The expanded pattern (allocated if expanded, original if no tilde)
+//   - null if GLOB_TILDE_CHECK is set and expansion fails (indicates no match)
+fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int) !?[:0]const u8 {
     if (pattern.len == 0 or pattern[0] != '~') {
         return pattern; // No tilde, return as-is
     }
@@ -904,7 +925,7 @@ fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int
         if (username.len >= 256) {
             // Username too long
             if (flags & GLOB_TILDE_CHECK != 0) {
-                return error.NoMatch;
+                return null; // Indicate no match
             }
             break :blk null;
         }
@@ -915,7 +936,7 @@ fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int
         if (pw_entry == null) {
             // User not found
             if (flags & GLOB_TILDE_CHECK != 0) {
-                return error.NoMatch;
+                return null; // Indicate no match
             }
             break :blk null;
         }
@@ -924,7 +945,7 @@ fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int
         const home_cstr = pw_entry.*.pw_dir;
         if (home_cstr == null) {
             if (flags & GLOB_TILDE_CHECK != 0) {
-                return error.NoMatch;
+                return null; // Indicate no match
             }
             break :blk null;
         }
@@ -945,9 +966,7 @@ fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int
 }
 
 /// This is the root logic function for globbing
-pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: ?*const anyopaque, pglob: *glob_t) !?void {
-    _ = errfunc;
-
+pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t) !?void {
     if (flags & GLOB_APPEND == 0) {
         pglob.gl_pathc = 0;
         pglob.gl_pathv = null;
@@ -972,10 +991,11 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
     };
 
     if (flags & GLOB_TILDE != 0) {
-        expanded_pattern = expandTilde(allocator, pattern_slice, flags) catch |err| {
-            if (err == error.NoMatch) return null;
-            return error.OutOfMemory;
-        };
+        expanded_pattern = try expandTilde(allocator, pattern_slice, flags);
+        if (expanded_pattern == null) {
+            // GLOB_TILDE_CHECK is set and tilde expansion failed - no match
+            return null;
+        }
         pattern_slice = expanded_pattern.?;
     }
 
@@ -996,7 +1016,7 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
         var first = true;
         for (expanded.items) |exp_pattern| {
             const exp_slice = mem.sliceTo(exp_pattern, 0);
-            _ = try globSingle(allocator, exp_slice, if (first) flags else flags | GLOB_APPEND, pglob);
+            _ = try globSingle(allocator, exp_slice, if (first) flags else flags | GLOB_APPEND, errfunc, pglob);
             first = false;
         }
 
@@ -1006,7 +1026,7 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
         return;
     }
 
-    return try globSingle(allocator, pattern_slice, flags, pglob);
+    return try globSingle(allocator, pattern_slice, flags, errfunc, pglob);
 }
 
 // Pattern components for recursive glob
@@ -1016,12 +1036,12 @@ const RecursivePattern = struct {
 };
 
 // Recursive glob implementation for ** patterns
-fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, pglob: *glob_t, directories_only: bool) !?void {
+fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, directories_only: bool) !?void {
     // Extract pattern info for optimization (will set directories_only from GLOB_ONLYDIR flag)
     const info = analyzePattern(pattern, flags);
 
     // Split pattern at **
-    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInDirFiltered(allocator, pattern, dirname, flags, pglob, directories_only);
+    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInDirFiltered(allocator, pattern, dirname, flags, errfunc, pglob, directories_only);
 
     // Get the pattern after **
     var after_double_star = pattern[double_star_pos + 2 ..];
@@ -1090,10 +1110,10 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     // HOTPATH OPTIMIZATION: For deep recursive patterns with no dir_components (e.g., "drivers/**/*.c"),
     // use Zig's std.fs.Dir.walk() which is faster and avoids mem.sliceTo overhead
     if (dir_component_count == 0) {
-        try globRecursiveWithZigWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info);
+        try globRecursiveWithZigWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc);
     } else {
         // Recursively collect all matching paths (old C-based approach for complex patterns)
-        try globRecursiveHelperCollect(allocator, &rec_pattern, start_dir, flags, &all_results, 0, &info);
+        try globRecursiveHelperCollect(allocator, &rec_pattern, start_dir, flags, &all_results, 0, &info, errfunc);
     }
 
     // No matches found - return null (consistent with glibc)
@@ -1191,7 +1211,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: c
 
 // once we need to actually recurse the directory tree we suppose that we will have a lot of
 // matches, so having zig's std.fs.Dir.walk() is faster becuase it does all the smart opimziations
-// of the stack mangament *AND* even it does a bunch of overhead on top of C it produces string
+// of the stack mangement *AND* even it does a bunch of overhead on top of C it produces string
 // slices which is way faster than repeating mem.sliceTo on every file patten
 inline fn globRecursiveWithZigWalk(
     allocator: std.mem.Allocator,
@@ -1200,14 +1220,38 @@ inline fn globRecursiveWithZigWalk(
     flags: c_int,
     results: *ResultsList,
     info: *const PatternInfo,
+    errfunc: glob_errfunc_t,
 ) !void {
     // Pattern context for file matching
     const pattern_ctx = PatternContext.init(rec_pattern.file_pattern);
 
     // Open the starting directory using Zig's std.fs
-    var dir = std.fs.cwd().openDir(start_dir, .{ .iterate = true }) catch {
-        // If we can't open the directory, fall back to error
-        return error.Aborted;
+    var dir = std.fs.cwd().openDir(start_dir, .{ .iterate = true }) catch |err| {
+        // If we can't open the directory, call errfunc if provided
+        if (errfunc) |efunc| {
+            // Convert start_dir to null-terminated string for errfunc
+            var path_buf: [4096:0]u8 = undefined;
+            if (start_dir.len >= 4096) return error.Aborted;
+            @memcpy(path_buf[0..start_dir.len], start_dir);
+            path_buf[start_dir.len] = 0;
+
+            const eerrno: c_int = switch (err) {
+                error.AccessDenied => @intFromEnum(std.posix.E.ACCES),
+                error.FileNotFound => @intFromEnum(std.posix.E.NOENT),
+                error.NotDir => @intFromEnum(std.posix.E.NOTDIR),
+                else => @intFromEnum(std.posix.E.IO),
+            };
+
+            if (efunc(&path_buf, eerrno) != 0) {
+                return error.Aborted;
+            }
+        }
+        // If GLOB_ERR is set, abort on error
+        if ((flags & GLOB_ERR) != 0) {
+            return error.Aborted;
+        }
+        // Otherwise, silently skip this directory
+        return;
     };
     defer dir.close();
 
@@ -1282,7 +1326,7 @@ inline fn globRecursiveWithZigWalk(
     }
 }
 
-inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: c_int, results: *ResultsList, depth: usize, info: *const PatternInfo) !void {
+inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: c_int, results: *ResultsList, depth: usize, info: *const PatternInfo, errfunc: glob_errfunc_t) !void {
     // Limit recursion depth
     if (depth > 100) return;
 
@@ -1300,7 +1344,7 @@ inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: 
     // Match files in current directory if we have no more directory components
     if (should_match_here and rec_pattern.dir_components.len == 0) {
         // Call globInDirImpl directly to collect matches into our results list
-        try globInDirImplCollect(allocator, rec_pattern.file_pattern, dirname, flags, results, info.directories_only);
+        try globInDirImplCollect(allocator, rec_pattern.file_pattern, dirname, flags, results, info.directories_only, errfunc);
         // Continue recursing even if no matches in this directory
     }
 
@@ -1309,7 +1353,21 @@ inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: 
     @memcpy(dirname_z[0..dirname.len], dirname);
     dirname_z[dirname.len] = 0;
 
-    const dir = c.opendir(&dirname_z) orelse return;
+    const dir = c.opendir(&dirname_z) orelse {
+        // Directory open error - call errfunc if provided
+        if (errfunc) |efunc| {
+            const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
+            if (efunc(&dirname_z, eerrno) != 0) {
+                return error.Aborted;
+            }
+        }
+        // If GLOB_ERR is set, abort on error
+        if ((flags & GLOB_ERR) != 0) {
+            return error.Aborted;
+        }
+        // Otherwise, silently skip this directory
+        return;
+    };
     defer _ = c.closedir(dir);
 
     // Recursively search subdirectories
@@ -1384,12 +1442,12 @@ inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: 
             if (!canMatchPattern(subdir, depth + 1, info)) continue;
 
             // Recurse into subdirectory
-            try globRecursiveHelperCollect(allocator, &next_rec_pattern, subdir, flags, results, depth + 1, info);
+            try globRecursiveHelperCollect(allocator, &next_rec_pattern, subdir, flags, results, depth + 1, info, errfunc);
         }
     }
 }
 
-fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, results: *ResultsList, directories_only: bool) !void {
+fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, results: *ResultsList, directories_only: bool, errfunc: glob_errfunc_t) !void {
     const pattern_ctx = PatternContext.init(pattern);
 
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
@@ -1398,7 +1456,21 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, dirna
     @memcpy(dirname_z[0..dirname.len], dirname);
     dirname_z[dirname.len] = 0;
 
-    const dir = c.opendir(&dirname_z) orelse return error.Aborted;
+    const dir = c.opendir(&dirname_z) orelse {
+        // Directory open error - call errfunc if provided
+        if (errfunc) |efunc| {
+            const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
+            if (efunc(&dirname_z, eerrno) != 0) {
+                return error.Aborted;
+            }
+        }
+        // If GLOB_ERR is set, abort on error
+        if ((flags & GLOB_ERR) != 0) {
+            return error.Aborted;
+        }
+        // Otherwise, silently skip this directory
+        return;
+    };
     defer _ = c.closedir(dir);
 
     // Process directory entries with optimized suffix matching when available
@@ -1518,7 +1590,7 @@ pub inline fn maybeAppendSlash(allocator: std.mem.Allocator, path: [*c]u8, path_
     return @ptrCast(new_slice.ptr);
 }
 
-fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, pglob: *glob_t, directories_only: bool) !?void {
+fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, directories_only: bool) !?void {
     const pattern_ctx = PatternContext.init(pattern);
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
 
@@ -1526,7 +1598,21 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
     @memcpy(dirname_z[0..dirname.len], dirname);
     dirname_z[dirname.len] = 0;
 
-    const dir = c.opendir(&dirname_z) orelse return error.Aborted;
+    const dir = c.opendir(&dirname_z) orelse {
+        // Directory open error - call errfunc if provided
+        if (errfunc) |efunc| {
+            const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
+            if (efunc(&dirname_z, eerrno) != 0) {
+                return error.Aborted;
+            }
+        }
+        // If GLOB_ERR is set, abort on error
+        if ((flags & GLOB_ERR) != 0) {
+            return error.Aborted;
+        }
+        // Otherwise, silently skip this directory and return no matches
+        return null;
+    };
     defer _ = c.closedir(dir);
 
     var names = ResultsList.init(allocator);
@@ -1915,16 +2001,9 @@ pub fn globfreeInternal(allocator: std.mem.Allocator, pglob: *glob_t) void {
     pglob.gl_flags = ZLOB_FLAGS_SHARED_STRINGS;
 }
 
-// ============================================================================
-// Zig-friendly Public API
-// ============================================================================
-
-/// Error set for glob operations
 pub const GlobError = error{
     OutOfMemory,
-    NoMatch,
     Aborted,
-    InvalidPattern,
 };
 
 /// Result of a glob operation containing matched paths
@@ -1964,132 +2043,3 @@ pub const GlobResults = struct {
         return result;
     }
 };
-
-// ============================================================================
-// Simple Zig API - Recommended for Zig users
-// ============================================================================
-
-/// Simple glob function for Zig users.
-///
-/// Match pattern against filesystem paths in the given directory.
-/// Returns an ArrayList of matching paths, or null if no matches.
-/// Caller owns the returned ArrayList and all strings in it.
-///
-/// Example:
-/// ```zig
-/// // Basic usage - returns null if no matches
-/// if (try glob.globZ(allocator, ".", "*.zig", 0)) |*result| {
-///     defer {
-///         for (result.items) |path| allocator.free(path);
-///         result.deinit();
-///     }
-///     for (result.items) |path| {
-///         std.debug.print("Found: {s}\n", .{path});
-///     }
-/// }
-///
-/// // Recursive search
-/// if (try glob.globZ(allocator, "src", "**/*.zig", 0)) |*result| {
-///     defer {
-///         for (result.items) |path| allocator.free(path);
-///         result.deinit();
-///     }
-///     std.debug.print("Found {} files\n", .{result.items.len});
-/// }
-/// ```
-pub fn globZ(allocator: Allocator, base_path: []const u8, pattern: []const u8, flags: c_int) !?std.array_list.AlignedManaged([]const u8, null) {
-    // Combine base_path and pattern
-    const full_pattern = if (base_path.len > 0 and !mem.eql(u8, base_path, "."))
-        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_path, pattern })
-    else
-        try allocator.dupe(u8, pattern);
-    defer allocator.free(full_pattern);
-
-    // Use globMatch which handles all memory management correctly
-    var glob_result = globMatch(allocator, full_pattern, @intCast(flags)) catch |err| {
-        if (err == error.NoMatch) return null;
-        return err;
-    };
-    defer glob_result.deinit();
-
-    // Convert GlobResults to ArrayList with owned strings
-    var result = std.array_list.AlignedManaged([]const u8, null).init(allocator);
-    errdefer {
-        for (result.items) |path| allocator.free(path);
-        result.deinit();
-    }
-
-    try result.ensureTotalCapacity(glob_result.match_count);
-
-    for (glob_result.paths) |path| {
-        const owned_path = try allocator.dupe(u8, path);
-        result.appendAssumeCapacity(owned_path);
-    }
-
-    return result;
-}
-
-// ============================================================================
-// Lower-level API - For C compatibility and advanced usage
-// ============================================================================
-
-/// Main glob function - matches pattern against filesystem (lower-level API)
-///
-/// NOTE: For idiomatic Zig code, prefer globZ() instead.
-///
-/// This function uses C-style integer flags for compatibility.
-///
-/// Example:
-/// ```zig
-/// const result = try glob.globMatch(allocator, "**/*.zig", 0);
-/// defer result.deinit();
-/// for (result.paths) |path| {
-///     std.debug.print("{s}\n", .{path});
-/// }
-/// ```
-pub fn globMatch(allocator: Allocator, pattern: []const u8, flags: u32) !GlobResults {
-    const pattern_z = try allocator.dupeZ(u8, pattern);
-    defer allocator.free(pattern_z);
-
-    var pglob: glob_t = undefined;
-    if (glob(allocator, pattern_z.ptr, @intCast(flags), null, &pglob)) |opt_result| {
-        if (opt_result) |_| {
-
-            // TODO figure out if we can have a better zig primitives mode at the build time 
-            // to avoid this additional loop per every execution becuase this is very annoying
-            var paths = try allocator.alloc([]const u8, pglob.gl_pathc);
-            errdefer allocator.free(paths);
-
-            var i: usize = 0;
-            while (i < pglob.gl_pathc) : (i += 1) {
-                const c_path = pglob.gl_pathv[i];
-                // Zero-copy: wrap the C pointer as a Zig slice using cached length
-                const path_len = pglob.gl_pathlen[i];
-                paths[i] = c_path[0..path_len];
-            }
-
-            return GlobResults{
-                .paths = paths,
-                .match_count = pglob.gl_pathc,
-                .allocator = allocator,
-                .pglob = pglob, // Store full glob_t for proper cleanup
-            };
-        } else {
-            // No matches (null return)
-            if (flags & GLOB_NOCHECK != 0) {
-                // Return the pattern itself
-                var paths = try allocator.alloc([]const u8, 1);
-                errdefer allocator.free(paths);
-                paths[0] = try allocator.dupe(u8, pattern);
-                return GlobResults{
-                    .paths = paths,
-                    .match_count = 1,
-                    .allocator = allocator,
-                };
-            }
-            return error.NoMatch;
-        }
-    } else |err| {
-        return err;
-    }
-}

@@ -1,5 +1,5 @@
 const std = @import("std");
-const simdglob = @import("simdglob");
+const c_lib = @import("c_lib");
 
 const Timer = std.time.Timer;
 
@@ -30,17 +30,16 @@ fn benchmarkLibcGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
     return end - start;
 }
 
-fn benchmarkSimdGlob(allocator: std.mem.Allocator, pattern: []const u8, iterations: usize) !u64 {
+fn benchmarkZlobGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
     var timer = try Timer.start();
     const start = timer.lap();
 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        if (try simdglob.globZ(allocator, ".", pattern, 0)) |*result| {
-            defer {
-                for (result.items) |p| allocator.free(p);
-                result.deinit();
-            }
+        var glob_buf: c_lib.glob_t = undefined;
+        const result = c_lib.glob(pattern, 0, null, &glob_buf);
+        if (result == 0) {
+            c_lib.globfree(&glob_buf);
         }
     }
 
@@ -72,7 +71,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    std.debug.print("=== SIMD Glob vs libc glob() Benchmark ===\n\n", .{});
+    std.debug.print("=== zlob vs libc glob() Benchmark ===\n\n", .{});
     std.debug.print("Directory: {s}\n", .{path});
     std.debug.print("Pattern: {s}\n", .{pattern});
     std.debug.print("Iterations: {d}\n", .{iterations});
@@ -90,16 +89,15 @@ pub fn main() !void {
         globfree(&glob_buf);
     }
 
-    var simd_count: usize = 0;
-    if (try simdglob.globZ(allocator, ".", pattern, 0)) |*simd_result| {
-        defer {
-            for (simd_result.items) |p| allocator.free(p);
-            simd_result.deinit();
-        }
-        simd_count = simd_result.items.len;
+    var zlob_count: usize = 0;
+    var zlob_buf: c_lib.glob_t = undefined;
+    const zlob_result = c_lib.glob(pattern_z.ptr, 0, null, &zlob_buf);
+    if (zlob_result == 0) {
+        zlob_count = zlob_buf.gl_pathc;
+        c_lib.globfree(&zlob_buf);
     }
 
-    std.debug.print("Match count: libc={d}, SIMD={d}\n\n", .{ libc_count, simd_count });
+    std.debug.print("Match count: libc={d}, zlob={d}\n\n", .{ libc_count, zlob_count });
 
     // Benchmark libc glob
     const libc_time = try benchmarkLibcGlob(pattern_z.ptr, iterations);
@@ -107,14 +105,14 @@ pub fn main() !void {
     const libc_avg_us = @as(f64, @floatFromInt(libc_avg_ns)) / 1000.0;
     const libc_total_ms = @as(f64, @floatFromInt(libc_time)) / 1_000_000.0;
 
-    // Benchmark SIMD glob
-    const simd_time = try benchmarkSimdGlob(allocator, pattern, iterations);
-    const simd_avg_ns = simd_time / iterations;
-    const simd_avg_us = @as(f64, @floatFromInt(simd_avg_ns)) / 1000.0;
-    const simd_total_ms = @as(f64, @floatFromInt(simd_time)) / 1_000_000.0;
+    // Benchmark zlob glob
+    const zlob_time = try benchmarkZlobGlob(pattern_z.ptr, iterations);
+    const zlob_avg_ns = zlob_time / iterations;
+    const zlob_avg_us = @as(f64, @floatFromInt(zlob_avg_ns)) / 1000.0;
+    const zlob_total_ms = @as(f64, @floatFromInt(zlob_time)) / 1_000_000.0;
 
     // Calculate speedup
-    const speedup = @as(f64, @floatFromInt(libc_time)) / @as(f64, @floatFromInt(simd_time));
+    const speedup = @as(f64, @floatFromInt(libc_time)) / @as(f64, @floatFromInt(zlob_time));
 
     std.debug.print("=== Results ===\n", .{});
     std.debug.print("libc glob:\n", .{});
@@ -122,13 +120,13 @@ pub fn main() !void {
     std.debug.print("  Total:   {d:.2}ms for {d} iterations\n", .{ libc_total_ms, iterations });
     std.debug.print("\n", .{});
 
-    std.debug.print("SIMD glob:\n", .{});
-    std.debug.print("  Average: {d:.2}μs per call\n", .{simd_avg_us});
-    std.debug.print("  Total:   {d:.2}ms for {d} iterations\n", .{ simd_total_ms, iterations });
+    std.debug.print("zlob glob:\n", .{});
+    std.debug.print("  Average: {d:.2}μs per call\n", .{zlob_avg_us});
+    std.debug.print("  Total:   {d:.2}ms for {d} iterations\n", .{ zlob_total_ms, iterations });
     std.debug.print("\n", .{});
 
     if (speedup > 1.0) {
-        std.debug.print("Result: SIMD is {d:.2}x FASTER\n", .{speedup});
+        std.debug.print("Result: zlob is {d:.2}x FASTER\n", .{speedup});
     } else {
         std.debug.print("Result: libc is {d:.2}x faster\n", .{1.0 / speedup});
     }

@@ -26,7 +26,7 @@ const ZLOB_FLAGS_SHARED_STRINGS = glob_impl.ZLOB_FLAGS_SHARED_STRINGS;
 ///
 /// This is the standard C-compatible glob function that uses c_allocator.
 /// For Zig code with custom allocators, use the Zig API in lib.zig instead.
-pub export fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: ?*anyopaque, pglob: *glob_t) c_int {
+pub export fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: glob_impl.glob_errfunc_t, pglob: *glob_t) c_int {
     const allocator = std.heap.c_allocator;
 
     if (glob_impl.glob(allocator, pattern, flags, errfunc, pglob)) |opt_result| {
