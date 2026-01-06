@@ -31,18 +31,17 @@ fn benchmarkLibcGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
 }
 
 fn benchmarkSimdGlob(allocator: std.mem.Allocator, pattern: []const u8, iterations: usize) !u64 {
-    // Reuse Glob instance across iterations for better performance
-    var g = simdglob.Glob.init(allocator, 0);
-    defer g.deinit();
-
     var timer = try Timer.start();
     const start = timer.lap();
 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        var result = try g.glob_match(pattern);
-        result.deinit();
-        // Glob automatically resets itself after returning result
+        if (try simdglob.globZ(allocator, ".", pattern, 0)) |*result| {
+            defer {
+                for (result.items) |p| allocator.free(p);
+                result.deinit();
+            }
+        }
     }
 
     const end = timer.read();
@@ -92,12 +91,12 @@ pub fn main() !void {
     }
 
     var simd_count: usize = 0;
-    if (simdglob.match(allocator, pattern, 0)) |simd_result| {
-        simd_count = simd_result.match_count;
-        var mut_result = simd_result;
-        mut_result.deinit();
-    } else |err| {
-        if (err != error.NoMatch) return err;
+    if (try simdglob.globZ(allocator, ".", pattern, 0)) |*simd_result| {
+        defer {
+            for (simd_result.items) |p| allocator.free(p);
+            simd_result.deinit();
+        }
+        simd_count = simd_result.items.len;
     }
 
     std.debug.print("Match count: libc={d}, SIMD={d}\n\n", .{ libc_count, simd_count });

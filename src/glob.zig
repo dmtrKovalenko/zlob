@@ -18,7 +18,8 @@ pub const glob_t = extern struct {
     gl_flags: c_int, // Internal flags (not exposed in C header)
 };
 
-pub const GL_FLAGS_OWNS_STRINGS: c_int = 1 << 0; // If set, globfree() must free the strings
+pub const ZLOB_FLAGS_SHARED_STRINGS: c_int = 0;
+pub const ZLOB_FLAGS_OWNS_STRINGS: c_int = 1 << 0; // If set, globfree() must free the strings
 
 /// Check if a literal path exists and populate glob_t with it
 /// Uses std.fs to avoid strlen() overhead - we get the length from the input slice
@@ -68,7 +69,7 @@ fn globLiteralPath(allocator: Allocator, path: []const u8, flags: c_int, pglob: 
     pglob.gl_pathc = 1;
     pglob.gl_pathv = result;
     pglob.gl_pathlen = pathlen_buf.ptr;
-    pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+    pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
 
     return true;
 }
@@ -96,6 +97,12 @@ pub const GLOB_TILDE_CHECK = 1 << 14; // 0x4000 - Like GLOB_TILDE but return err
 pub const GLOB_NOSPACE = 1;
 pub const GLOB_ABORTED = 2;
 pub const GLOB_NOMATCH = 3;
+
+// Re-export path_matcher for c_lib to use
+pub fn internalMatchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags: u32) !GlobResults {
+    const path_matcher = @import("path_matcher.zig");
+    return path_matcher.matchPaths(allocator, pattern, paths, flags);
+}
 
 // Use Zig's cross-platform dirent structure
 pub const dirent = std.c.dirent;
@@ -505,7 +512,7 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
             pglob.gl_pathc = 1;
             pglob.gl_pathv = result;
             pglob.gl_pathlen = pathlen_buf.ptr;
-            pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+            pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
             return;
         }
         return null;
@@ -532,7 +539,7 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
     pglob.gl_pathc = result_paths.items.len;
     pglob.gl_pathv = result;
     pglob.gl_pathlen = pathlen_buf.ptr;
-    pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+    pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
 }
 
 // Optimized version that uses pattern info to start from literal prefix
@@ -602,7 +609,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
             pglob.gl_pathc = 1;
             pglob.gl_pathv = result;
             pglob.gl_pathlen = pathlen_buf.ptr;
-            pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+            pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
             return;
         }
         return null;
@@ -629,7 +636,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     pglob.gl_pathc = result_paths.items.len;
     pglob.gl_pathv = result;
     pglob.gl_pathlen = pathlen_buf.ptr;
-    pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+    pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
 }
 
 // Recursive helper to expand wildcard components level by level
@@ -764,7 +771,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, p
             pglob.gl_pathc = 1;
             pglob.gl_pathv = result;
             pglob.gl_pathlen = pathlen_buf.ptr;
-            pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+            pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
             return;
         }
 
@@ -1155,7 +1162,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: c
         pglob.gl_pathc = total_count;
         pglob.gl_pathv = result;
         pglob.gl_pathlen = pathlen_buf.ptr;
-        pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+        pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
     } else {
         // Fresh allocation
         const pathv_buf = allocator.alloc([*c]u8, offs + results.items.len + 1) catch return error.OutOfMemory;
@@ -1178,7 +1185,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: c
         pglob.gl_pathc = results.items.len;
         pglob.gl_pathv = result;
         pglob.gl_pathlen = pathlen_buf.ptr;
-        pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+        pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
     }
 }
 
@@ -1591,7 +1598,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
             pglob.gl_pathc = 1;
             pglob.gl_pathv = result;
             pglob.gl_pathlen = pathlen_buf.ptr;
-            pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+            pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
             return;
         }
         return null;
@@ -1654,7 +1661,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         pglob.gl_pathc = total_count;
         pglob.gl_pathv = result;
         pglob.gl_pathlen = pathlen_buf.ptr;
-        pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+        pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
     } else {
         // No APPEND or first call - allocate fresh result array
         const offs = if (flags & GLOB_DOOFFS != 0) pglob.gl_offs else 0;
@@ -1681,7 +1688,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         pglob.gl_pathc = names.items.len;
         pglob.gl_pathv = result;
         pglob.gl_pathlen = pathlen_buf.ptr;
-        pglob.gl_flags = GL_FLAGS_OWNS_STRINGS;
+        pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
     }
 }
 
@@ -1880,7 +1887,7 @@ pub fn globfreeInternal(allocator: std.mem.Allocator, pglob: *glob_t) void {
         const offs = pglob.gl_offs;
 
         // Check if we own the strings (flag set by glob() vs glob_match_paths())
-        const owns_strings = (pglob.gl_flags & GL_FLAGS_OWNS_STRINGS) != 0;
+        const owns_strings = (pglob.gl_flags & ZLOB_FLAGS_OWNS_STRINGS) != 0;
 
         if (owns_strings) {
             // Free actual path strings (starting from offset)
@@ -1905,7 +1912,7 @@ pub fn globfreeInternal(allocator: std.mem.Allocator, pglob: *glob_t) void {
     }
     pglob.gl_pathv = null;
     pglob.gl_pathc = 0;
-    pglob.gl_flags = 0;
+    pglob.gl_flags = ZLOB_FLAGS_SHARED_STRINGS;
 }
 
 // ============================================================================
@@ -1958,89 +1965,79 @@ pub const GlobResults = struct {
     }
 };
 
-/// Stateful glob matcher with configurable flags
-pub const Glob = struct {
-    allocator: Allocator,
-    flags: u32,
-    match_count: usize,
+// ============================================================================
+// Simple Zig API - Recommended for Zig users
+// ============================================================================
 
-    pub fn init(allocator: Allocator, flags: u32) Glob {
-        return .{
-            .allocator = allocator,
-            .flags = flags,
-            .match_count = 0,
-        };
-    }
-
-    pub fn deinit(self: *Glob) void {
-        _ = self;
-    }
-
-    pub fn reset(self: *Glob) void {
-        self.match_count = 0;
-    }
-
-    /// Perform glob matching on filesystem
-    pub fn glob_match(self: *Glob, pattern: []const u8) !GlobResults {
-        const pattern_z = try self.allocator.dupeZ(u8, pattern);
-        defer self.allocator.free(pattern_z);
-
-        var pglob: glob_t = undefined;
-        if (glob(self.allocator, pattern_z.ptr, @intCast(self.flags), null, &pglob)) |opt_result| {
-            if (opt_result) |_| {
-                // Success with matches - zero-copy: wrap C pointers directly without duplication
-                var paths = try self.allocator.alloc([]const u8, pglob.gl_pathc);
-                errdefer self.allocator.free(paths);
-
-                var i: usize = 0;
-                while (i < pglob.gl_pathc) : (i += 1) {
-                    const c_path = pglob.gl_pathv[i];
-                    // Use cached length from gl_pathlen instead of strlen
-                    const path_len = pglob.gl_pathlen[i];
-                    paths[i] = c_path[0..path_len];
-                }
-
-                self.match_count = pglob.gl_pathc;
-                return GlobResults{
-                    .paths = paths,
-                    .match_count = pglob.gl_pathc,
-                    .allocator = self.allocator,
-                    .pglob = pglob,
-                };
-            } else {
-                // No matches (null return)
-                if (self.flags & GLOB_NOCHECK != 0) {
-                    var paths = try self.allocator.alloc([]const u8, 1);
-                    errdefer self.allocator.free(paths);
-                    paths[0] = try self.allocator.dupe(u8, pattern);
-                    self.match_count = 1;
-                    return GlobResults{
-                        .paths = paths,
-                        .match_count = 1,
-                        .allocator = self.allocator,
-                    };
-                }
-                return error.NoMatch;
-            }
-        } else |err| {
-            return err;
-        }
-    }
-
-    /// Match glob pattern against array of paths with full ** recursive support
-    /// This is an instance method version of the standalone matchPaths function
-    pub fn matchPaths(self: *Glob, pattern: []const u8, paths: []const []const u8) !GlobResults {
-        const path_matcher = @import("path_matcher.zig");
-        const result = try path_matcher.matchPaths(self.allocator, pattern, paths, self.flags);
-        self.match_count = result.match_count;
-        return result;
-    }
-};
-
-/// Main glob function - matches pattern against filesystem (public API)
+/// Simple glob function for Zig users.
 ///
-/// This is the primary entry point for glob matching. It takes a pattern and
-/// returns all matching filesystem paths.
+/// Match pattern against filesystem paths in the given directory.
+/// Returns an ArrayList of matching paths, or null if no matches.
+/// Caller owns the returned ArrayList and all strings in it.
+///
+/// Example:
+/// ```zig
+/// // Basic usage - returns null if no matches
+/// if (try glob.globZ(allocator, ".", "*.zig", 0)) |*result| {
+///     defer {
+///         for (result.items) |path| allocator.free(path);
+///         result.deinit();
+///     }
+///     for (result.items) |path| {
+///         std.debug.print("Found: {s}\n", .{path});
+///     }
+/// }
+///
+/// // Recursive search
+/// if (try glob.globZ(allocator, "src", "**/*.zig", 0)) |*result| {
+///     defer {
+///         for (result.items) |path| allocator.free(path);
+///         result.deinit();
+///     }
+///     std.debug.print("Found {} files\n", .{result.items.len});
+/// }
+/// ```
+pub fn globZ(allocator: Allocator, base_path: []const u8, pattern: []const u8, flags: c_int) !?std.array_list.AlignedManaged([]const u8, null) {
+    // Combine base_path and pattern
+    const full_pattern = if (base_path.len > 0 and !mem.eql(u8, base_path, "."))
+        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_path, pattern })
+    else
+        try allocator.dupe(u8, pattern);
+    defer allocator.free(full_pattern);
+
+    // Use globMatch which handles all memory management correctly
+    var glob_result = globMatch(allocator, full_pattern, @intCast(flags)) catch |err| {
+        if (err == error.NoMatch) return null;
+        return err;
+    };
+    defer glob_result.deinit();
+
+    // Convert GlobResults to ArrayList with owned strings
+    var result = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+    errdefer {
+        for (result.items) |path| allocator.free(path);
+        result.deinit();
+    }
+
+    try result.ensureTotalCapacity(glob_result.match_count);
+
+    for (glob_result.paths) |path| {
+        const owned_path = try allocator.dupe(u8, path);
+        result.appendAssumeCapacity(owned_path);
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Lower-level API - For C compatibility and advanced usage
+// ============================================================================
+
+/// Main glob function - matches pattern against filesystem (lower-level API)
+///
+/// NOTE: For idiomatic Zig code, prefer globZ() instead.
+///
+/// This function uses C-style integer flags for compatibility.
 ///
 /// Example:
 /// ```zig
@@ -2057,9 +2054,9 @@ pub fn globMatch(allocator: Allocator, pattern: []const u8, flags: u32) !GlobRes
     var pglob: glob_t = undefined;
     if (glob(allocator, pattern_z.ptr, @intCast(flags), null, &pglob)) |opt_result| {
         if (opt_result) |_| {
-            // Success with matches - zero-copy: wrap C pointers directly without duplication
-            // DON'T call globfree yet - we're taking ownership of the C memory
 
+            // TODO figure out if we can have a better zig primitives mode at the build time 
+            // to avoid this additional loop per every execution becuase this is very annoying
             var paths = try allocator.alloc([]const u8, pglob.gl_pathc);
             errdefer allocator.free(paths);
 

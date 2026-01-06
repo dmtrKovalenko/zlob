@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
-const glob = @import("c_lib");
+const glob = @import("glob");
+const c_lib = @import("c_lib");
 const c = std.c;
 
 // Test structure helper
@@ -83,8 +84,8 @@ test "GLOB_MARK - appends slash to directories" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pglob.gl_pathc >= 3); // At least 3 directories
@@ -126,8 +127,8 @@ test "GLOB_MARK - does not append slash to files" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pglob.gl_pathc >= 1);
@@ -162,8 +163,8 @@ test "GLOB_MARK - works with recursive glob" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expect(result == 0 or result == glob.GLOB_NOMATCH);
     if (result == 0) {
@@ -204,8 +205,8 @@ test "GLOB_DOOFFS - reserves offset slots at beginning" {
     var pglob: glob.glob_t = undefined;
     pglob.gl_offs = 3; // Request 3 offset slots
 
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_DOOFFS, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_DOOFFS, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pglob.gl_pathc >= 1);
@@ -248,15 +249,15 @@ test "GLOB_DOOFFS - works with GLOB_APPEND" {
     // First glob
     const pattern1 = try allocator.dupeZ(u8, "*.txt");
     defer allocator.free(pattern1);
-    const result1 = glob.glob_c(allocator, pattern1.ptr, glob.GLOB_DOOFFS, null, &pglob);
+    const result1 = c_lib.glob(pattern1.ptr, glob.GLOB_DOOFFS, null, &pglob);
     try testing.expectEqual(@as(c_int, 0), result1);
     const first_count = pglob.gl_pathc;
 
     // Second glob with APPEND
     const pattern2 = try allocator.dupeZ(u8, "*.c");
     defer allocator.free(pattern2);
-    const result2 = glob.glob_c(allocator, pattern2.ptr, glob.GLOB_DOOFFS | glob.GLOB_APPEND, null, &pglob);
-    defer glob.globfreeZ(allocator, &pglob);
+    const result2 = c_lib.glob(pattern2.ptr, glob.GLOB_DOOFFS | glob.GLOB_APPEND, null, &pglob);
+    defer c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result2);
     try testing.expect(pglob.gl_pathc > first_count);
@@ -296,8 +297,8 @@ test "GLOB_PERIOD - matches hidden files with wildcard" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, GLOB_PERIOD, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, GLOB_PERIOD, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -337,8 +338,8 @@ test "GLOB_PERIOD - without flag does not match hidden files" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -372,8 +373,8 @@ test "GLOB_PERIOD - explicit dot still matches" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -410,8 +411,8 @@ test "GLOB_TILDE - expands tilde to home directory" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_TILDE, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_TILDE, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -442,8 +443,8 @@ test "GLOB_TILDE - expands ~username to user home" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_TILDE, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_TILDE, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -459,8 +460,8 @@ test "GLOB_TILDE - without flag treats tilde as literal" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     // Without GLOB_TILDE, should try to find literal ~ directory
     // Most likely GLOB_NOMATCH or GLOB_ABORTED
@@ -478,8 +479,8 @@ test "GLOB_TILDE_CHECK - errors on nonexistent username" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_TILDE | glob.GLOB_TILDE_CHECK, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_TILDE | glob.GLOB_TILDE_CHECK, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     // Should return GLOB_NOMATCH for nonexistent user
     try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
@@ -492,8 +493,8 @@ test "GLOB_TILDE_CHECK - without flag returns tilde literal on unknown user" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_TILDE | glob.GLOB_NOCHECK, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_TILDE | glob.GLOB_NOCHECK, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     // Without GLOB_TILDE_CHECK, should fall back to literal tilde
     try testing.expectEqual(@as(c_int, 0), result);
@@ -533,7 +534,7 @@ test "GLOB_NOMAGIC - returns NOMATCH for literal with no match" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, GLOB_NOMAGIC, null, &pglob);
+    const result = c_lib.glob(pattern.ptr, GLOB_NOMAGIC, null, &pglob);
 
     try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
 }
@@ -564,7 +565,7 @@ test "GLOB_NOMAGIC - returns NOMATCH for wildcard pattern with no match" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, GLOB_NOMAGIC, null, &pglob);
+    const result = c_lib.glob(pattern.ptr, GLOB_NOMAGIC, null, &pglob);
 
     // Has metacharacters, so still returns NOMATCH
     try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
@@ -595,8 +596,8 @@ test "GLOB_NOMAGIC - succeeds for literal that exists" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, GLOB_NOMAGIC, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, GLOB_NOMAGIC, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -631,8 +632,8 @@ test "GLOB_MARK and GLOB_PERIOD together" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK | GLOB_PERIOD, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK | GLOB_PERIOD, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -669,8 +670,8 @@ test "GLOB_TILDE with recursive glob" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_TILDE, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_TILDE, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pglob.gl_pathc >= 1);
@@ -704,8 +705,8 @@ test "GLOB_PERIOD - recursive glob should not match hidden files by default" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -758,8 +759,8 @@ test "GLOB_PERIOD - recursive glob matches hidden files with flag" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, GLOB_PERIOD, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, GLOB_PERIOD, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -815,8 +816,8 @@ test "GLOB_PERIOD - explicit dot pattern still matches without flag in recursive
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -852,8 +853,8 @@ test "literal path - file exists" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -880,8 +881,8 @@ test "literal path - directory exists" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -907,8 +908,8 @@ test "literal path - GLOB_ONLYDIR with directory" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_ONLYDIR, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_ONLYDIR, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -934,8 +935,8 @@ test "literal path - GLOB_ONLYDIR with file (should fail)" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_ONLYDIR, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_ONLYDIR, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
 }
@@ -959,8 +960,8 @@ test "literal path - GLOB_MARK with directory" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -988,8 +989,8 @@ test "literal path - GLOB_MARK with file (no slash)" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -1016,8 +1017,8 @@ test "literal path - ./ prefix normalization" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -1044,8 +1045,8 @@ test "literal path - GLOB_NOCHECK returns pattern when not found" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_NOCHECK, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_NOCHECK, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
@@ -1072,8 +1073,8 @@ test "literal path - not found without GLOB_NOCHECK" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
 }
@@ -1097,8 +1098,8 @@ test "literal path - GLOB_MARK and GLOB_ONLYDIR together" {
     defer allocator.free(pattern);
 
     var pglob: glob.glob_t = undefined;
-    const result = glob.glob_c(allocator, pattern.ptr, glob.GLOB_MARK | glob.GLOB_ONLYDIR, null, &pglob);
-    defer if (result == 0) glob.globfreeZ(allocator, &pglob);
+    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK | glob.GLOB_ONLYDIR, null, &pglob);
+    defer if (result == 0) c_lib.globfree(&pglob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);

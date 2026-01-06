@@ -11,12 +11,14 @@
 const std = @import("std");
 
 // Re-export the glob module (contains all Zig implementation)
-pub const glob = @import("glob.zig");
+pub const glob = @import("glob");
 
-// Re-export common types and functions for convenience
-pub const Glob = glob.Glob;
 pub const GlobResults = glob.GlobResults;
 pub const GlobError = glob.GlobError;
+pub const glob_t = glob.glob_t;
+
+// Re-export utility functions
+pub const analyzePattern = glob.analyzePattern;
 
 // Re-export SIMD functions for benchmarking
 pub const simdFindChar = glob.simdFindChar;
@@ -38,7 +40,36 @@ pub const GLOB_PERIOD = glob.GLOB_PERIOD;
 pub const GLOB_ONLYDIR = glob.GLOB_ONLYDIR;
 pub const GLOB_TILDE_CHECK = glob.GLOB_TILDE_CHECK;
 
-/// Perform glob matching on filesystem
+// Re-export error codes
+pub const GLOB_NOSPACE = glob.GLOB_NOSPACE;
+pub const GLOB_ABORTED = glob.GLOB_ABORTED;
+pub const GLOB_NOMATCH = glob.GLOB_NOMATCH;
+
+/// Simple glob function for Zig users (recommended API).
+///
+/// Match pattern against filesystem paths in the given directory.
+/// Returns an ArrayList of matching paths, or null if no matches.
+/// Caller owns the returned ArrayList and all strings in it.
+///
+/// Example:
+/// ```zig
+/// // Basic usage - returns null if no matches
+/// if (try simdglob.globZ(allocator, ".", "*.txt", 0)) |*result| {
+///     defer {
+///         for (result.items) |p| allocator.free(p);
+///         result.deinit();
+///     }
+///     for (result.items) |p| {
+///         std.debug.print("Found: {s}\n", .{p});
+///     }
+/// }
+/// ```
+pub fn globZ(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, flags: c_int) !?std.array_list.AlignedManaged([]const u8, null) {
+    return glob.globZ(allocator, base_path, pattern, flags);
+}
+
+
+/// Perform glob matching on filesystem (legacy API)
 ///
 /// Example:
 /// ```zig
@@ -89,8 +120,7 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !Glo
 /// - Input paths MUST be normalized (no consecutive slashes like //)
 /// - Paths from filesystem operations are typically already normalized
 pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags: u32) !GlobResults {
-    const path_matcher = @import("path_matcher.zig");
-    return path_matcher.matchPaths(allocator, pattern, paths, flags);
+    return glob.internalMatchPaths(allocator, pattern, paths, flags);
 }
 
 test {

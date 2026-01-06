@@ -67,25 +67,23 @@ const TestDir = struct {
         try std.posix.chdir(self.path);
         defer std.posix.chdir(old_cwd) catch {};
 
-        var g = glob.Glob.init(allocator, 0);
-        defer g.deinit();
-
-        // Handle NoMatch by returning empty array (Rust glob behavior)
-        var result = g.glob_match(pattern) catch |err| {
-            if (err == error.NoMatch) {
-                return try allocator.alloc([]const u8, 0);
+        // Use new globZ API - returns ArrayList or null
+        if (try simdglob.globZ(allocator, ".", pattern, 0)) |*result| {
+            defer {
+                for (result.items) |p| allocator.free(p);
+                result.deinit();
             }
-            return err;
-        };
-        defer result.deinit();
 
-        // Copy paths to return (must copy because result will be freed)
-        const paths = try allocator.alloc([]const u8, result.paths.len);
-        for (result.paths, 0..) |path, i| {
-            paths[i] = try allocator.dupe(u8, path);
+            // Copy paths to return (globZ already owns the strings, we need separate copies)
+            const paths = try allocator.alloc([]const u8, result.items.len);
+            for (result.items, 0..) |path, i| {
+                paths[i] = try allocator.dupe(u8, path);
+            }
+            return paths;
+        } else {
+            // No matches - return empty array (Rust glob behavior)
+            return try allocator.alloc([]const u8, 0);
         }
-
-        return paths;
     }
 
     fn expectPaths(actual: [][]const u8, expected: []const []const u8) !void {

@@ -140,22 +140,6 @@ test "SIMD - newline character" {
     try testing.expect(result.? == 5);
 }
 
-// Data structure tests
-
-test "Glob - init and deinit" {
-    var g = glob.Glob.init(testing.allocator, 0);
-    defer g.deinit();
-
-    try testing.expect(g.match_count == 0);
-    try testing.expect(g.flags == 0);
-}
-
-test "Glob - init with flags" {
-    var g = glob.Glob.init(testing.allocator, glob.GLOB_MARK | glob.GLOB_NOSORT);
-    defer g.deinit();
-
-    try testing.expect(g.flags == (glob.GLOB_MARK | glob.GLOB_NOSORT));
-}
 
 // matchPaths() API Tests
 // These tests verify the in-memory path matching API with recursive ** support

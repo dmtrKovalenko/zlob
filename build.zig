@@ -28,6 +28,13 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
+    // glob module (for direct access to glob implementation in tests)
+    const glob_mod = b.addModule("glob", .{
+        .root_source_file = b.path("src/glob.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+
     const mod = b.addModule("simdglob", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
@@ -40,20 +47,19 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
         .link_libc = true,
+        .imports = &.{
+            .{ .name = "glob", .module = glob_mod },
+        },
     });
 
-    // glob module (for direct access to glob implementation)
-    const glob_mod = b.addModule("glob", .{
-        .root_source_file = b.path("src/glob.zig"),
-        .target = target,
-        .link_libc = true,
-    });
-
-    // C-compatible module (for use within Zig programs)
+    // C-compatible module (for C exports, depends on glob)
     const c_lib_mod = b.addModule("c_lib", .{
         .root_source_file = b.path("src/c_lib.zig"),
         .target = target,
         .link_libc = true,
+        .imports = &.{
+            .{ .name = "glob", .module = glob_mod },
+        },
     });
 
     // C-compatible shared library (libzlob.so/.dylib/.dll)
@@ -66,6 +72,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{
+                .{ .name = "glob", .module = glob_mod },
+            },
         }),
     });
     // Install C header
@@ -231,26 +240,6 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(bench_recursive);
 
-    // MatchFiles example executable
-    const matchfiles_example = b.addExecutable(.{
-        .name = "matchfiles",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/matchfiles.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "simdglob", .module = mod },
-            },
-        }),
-    });
-    b.installArtifact(matchfiles_example);
-
-    // MatchFiles example run step
-    const matchfiles_cmd = b.addRunArtifact(matchfiles_example);
-    matchfiles_cmd.step.dependOn(b.getInstallStep());
-    const matchfiles_step = b.step("matchfiles", "Run matchFiles() API examples");
-    matchfiles_step.dependOn(&matchfiles_cmd.step);
-
     // libc comparison benchmark executable
     const compare_libc = b.addExecutable(.{
         .name = "compare_libc",
@@ -272,46 +261,6 @@ pub fn build(b: *std.Build) void {
     const compare_libc_step = b.step("compare-libc", "Compare SIMD glob vs libc glob()");
     compare_libc_step.dependOn(&compare_libc_cmd.step);
 
-    // Profiling executable
-    const profile = b.addExecutable(.{
-        .name = "profile",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/profile.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "simdglob", .module = mod },
-            },
-        }),
-    });
-    b.installArtifact(profile);
-
-    // Profiling run step
-    const profile_cmd = b.addRunArtifact(profile);
-    profile_cmd.step.dependOn(b.getInstallStep());
-    const profile_step = b.step("profile", "Profile simdglob performance bottlenecks");
-    profile_step.dependOn(&profile_cmd.step);
-
-    // C-style glob benchmark
-    const test_libc_style = b.addExecutable(.{
-        .name = "test_libc_style",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/test_libc_style.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "c_lib", .module = c_lib_mod },
-            },
-        }),
-    });
-    test_libc_style.linkLibC();
-    b.installArtifact(test_libc_style);
-
-    const test_libc_style_cmd = b.addRunArtifact(test_libc_style);
-    test_libc_style_cmd.step.dependOn(b.getInstallStep());
-    const test_libc_style_step = b.step("test-libc-style", "Test C-style glob vs libc");
-    test_libc_style_step.dependOn(&test_libc_style_cmd.step);
-
     // Perf test for C-style glob
     const perf_test_libc = b.addExecutable(.{
         .name = "perf_test_libc",
@@ -320,6 +269,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "simdglob", .module = mod },
                 .{ .name = "c_lib", .module = c_lib_mod },
             },
         }),
@@ -332,26 +282,6 @@ pub fn build(b: *std.Build) void {
     const perf_test_libc_step = b.step("perf-test-libc", "Perf profiling for C-style glob");
     perf_test_libc_step.dependOn(&perf_test_libc_cmd.step);
 
-    // Test new features (brace expansion, recursive glob)
-    const test_new_features = b.addExecutable(.{
-        .name = "test_new_features",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/test_new_features.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "c_lib", .module = c_lib_mod },
-            },
-        }),
-    });
-    test_new_features.linkLibC();
-    b.installArtifact(test_new_features);
-
-    const test_new_features_cmd = b.addRunArtifact(test_new_features);
-    test_new_features_cmd.step.dependOn(b.getInstallStep());
-    const test_new_features_step = b.step("test-new-features", "Test brace expansion and recursive glob");
-    test_new_features_step.dependOn(&test_new_features_cmd.step);
-
     // Profile big repo with glob_libc
     const profile_big_repo = b.addExecutable(.{
         .name = "profile_big_repo",
@@ -360,6 +290,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "simdglob", .module = mod },
                 .{ .name = "c_lib", .module = c_lib_mod },
             },
         }),
