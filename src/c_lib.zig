@@ -12,10 +12,29 @@ pub const zlob_slice_t = extern struct {
     len: usize,
 };
 
+// Re-export glob flags for tests
+pub const GLOB_ERR = glob_impl.GLOB_ERR;
+pub const GLOB_MARK = glob_impl.GLOB_MARK;
+pub const GLOB_NOSORT = glob_impl.GLOB_NOSORT;
+pub const GLOB_DOOFFS = glob_impl.GLOB_DOOFFS;
+pub const GLOB_NOCHECK = glob_impl.GLOB_NOCHECK;
+pub const GLOB_APPEND = glob_impl.GLOB_APPEND;
+pub const GLOB_NOESCAPE = glob_impl.GLOB_NOESCAPE;
+pub const GLOB_PERIOD = glob_impl.GLOB_PERIOD;
+pub const GLOB_MAGCHAR = glob_impl.GLOB_MAGCHAR;
+pub const GLOB_ALTDIRFUNC = glob_impl.GLOB_ALTDIRFUNC;
+pub const GLOB_BRACE = glob_impl.GLOB_BRACE;
+pub const GLOB_NOMAGIC = glob_impl.GLOB_NOMAGIC;
+pub const GLOB_TILDE = glob_impl.GLOB_TILDE;
+pub const GLOB_ONLYDIR = glob_impl.GLOB_ONLYDIR;
+pub const GLOB_TILDE_CHECK = glob_impl.GLOB_TILDE_CHECK;
+
+// Re-export error codes for tests
+pub const GLOB_NOSPACE = glob_impl.GLOB_NOSPACE;
+pub const GLOB_ABORTED = glob_impl.GLOB_ABORTED;
+pub const GLOB_NOMATCH = glob_impl.GLOB_NOMATCH;
+
 // Internal constants
-const GLOB_NOMATCH = glob_impl.GLOB_NOMATCH;
-const GLOB_NOSPACE = glob_impl.GLOB_NOSPACE;
-const GLOB_ABORTED = glob_impl.GLOB_ABORTED;
 const ZLOB_FLAGS_SHARED_STRINGS = glob_impl.ZLOB_FLAGS_SHARED_STRINGS;
 
 // ============================================================================
@@ -39,6 +58,7 @@ pub export fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: glob_impl.glob
         return switch (err) {
             error.OutOfMemory => GLOB_NOSPACE,
             error.Aborted => GLOB_ABORTED,
+            else => GLOB_ABORTED,
         };
     }
 }

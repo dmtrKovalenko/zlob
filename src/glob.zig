@@ -466,7 +466,7 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
 
     try expandWildcardComponents(allocator, ".", components[0..component_count], 0, &result_paths, directories_only);
 
-    
+
     if (result_paths.items.len == 0) {
         if (flags & GLOB_NOCHECK != 0) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
@@ -490,28 +490,71 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
         return null;
     }
 
-    
+
     if (flags & GLOB_NOSORT == 0) {
         qsort(@ptrCast(result_paths.items.ptr), result_paths.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
-    
-    const pathv_buf = allocator.alloc([*c]u8, result_paths.items.len + 1) catch return error.OutOfMemory;
-    const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+    // Handle GLOB_APPEND flag - merge with existing results
+    if (flags & GLOB_APPEND != 0 and pglob.gl_pathv != null and pglob.gl_pathc > 0) {
+        const old_count = pglob.gl_pathc;
+        const new_count = result_paths.items.len;
+        const total_count = old_count + new_count;
 
-    const pathlen_buf = allocator.alloc(usize, result_paths.items.len) catch return error.OutOfMemory;
+        const pathv_buf = allocator.alloc([*c]u8, total_count + 1) catch return error.OutOfMemory;
+        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
-    var i: usize = 0;
-    while (i < result_paths.items.len) : (i += 1) {
-        result[i] = result_paths.items[i];
-        pathlen_buf[i] = mem.len(result_paths.items[i]);
+        // Copy old results
+        var i: usize = 0;
+        while (i < old_count) : (i += 1) {
+            result[i] = pglob.gl_pathv[i];
+        }
+
+        // Append new results
+        var j: usize = 0;
+        while (j < new_count) : (j += 1) {
+            result[old_count + j] = result_paths.items[j];
+        }
+        result[total_count] = null;
+
+        const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
+        var li: usize = 0;
+        while (li < old_count) : (li += 1) {
+            pathlen_buf[li] = pglob.gl_pathlen[li];
+        }
+        var lj: usize = 0;
+        while (lj < new_count) : (lj += 1) {
+            pathlen_buf[old_count + lj] = mem.len(result_paths.items[lj]);
+        }
+
+        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pglob.gl_pathv))[0 .. old_count + 1];
+        allocator.free(old_pathv_slice);
+        const old_pathlen_slice = pglob.gl_pathlen[0..old_count];
+        allocator.free(old_pathlen_slice);
+
+        pglob.gl_pathc = total_count;
+        pglob.gl_pathv = result;
+        pglob.gl_pathlen = pathlen_buf.ptr;
+        pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+    } else {
+        // No APPEND or first call
+        const pathv_buf = allocator.alloc([*c]u8, result_paths.items.len + 1) catch return error.OutOfMemory;
+        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+
+        const pathlen_buf = allocator.alloc(usize, result_paths.items.len) catch return error.OutOfMemory;
+
+        var i: usize = 0;
+        while (i < result_paths.items.len) : (i += 1) {
+            result[i] = result_paths.items[i];
+            pathlen_buf[i] = mem.len(result_paths.items[i]);
+        }
+        result[result_paths.items.len] = null;
+
+        pglob.gl_pathc = result_paths.items.len;
+        pglob.gl_pathv = result;
+        pglob.gl_pathlen = pathlen_buf.ptr;
+        pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
     }
-    result[result_paths.items.len] = null;
-
-    pglob.gl_pathc = result_paths.items.len;
-    pglob.gl_pathv = result;
-    pglob.gl_pathlen = pathlen_buf.ptr;
-    pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
 }
 
 // Optimized version that uses pattern info to start from literal prefix
@@ -560,7 +603,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
 
     try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc);
 
-    
+
     if (result_paths.items.len == 0) {
         if (flags & GLOB_NOCHECK != 0) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
@@ -584,28 +627,71 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         return null;
     }
 
-    
+
     if (flags & GLOB_NOSORT == 0) {
         qsort(@ptrCast(result_paths.items.ptr), result_paths.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
-    
-    const pathv_buf = allocator.alloc([*c]u8, result_paths.items.len + 1) catch return error.OutOfMemory;
-    const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+    // Handle GLOB_APPEND flag - merge with existing results
+    if (flags & GLOB_APPEND != 0 and pglob.gl_pathv != null and pglob.gl_pathc > 0) {
+        const old_count = pglob.gl_pathc;
+        const new_count = result_paths.items.len;
+        const total_count = old_count + new_count;
 
-    const pathlen_buf = allocator.alloc(usize, result_paths.items.len) catch return error.OutOfMemory;
+        const pathv_buf = allocator.alloc([*c]u8, total_count + 1) catch return error.OutOfMemory;
+        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
-    var i: usize = 0;
-    while (i < result_paths.items.len) : (i += 1) {
-        result[i] = result_paths.items[i];
-        pathlen_buf[i] = mem.len(result_paths.items[i]);
+        // Copy old results
+        var i: usize = 0;
+        while (i < old_count) : (i += 1) {
+            result[i] = pglob.gl_pathv[i];
+        }
+
+        // Append new results
+        var j: usize = 0;
+        while (j < new_count) : (j += 1) {
+            result[old_count + j] = result_paths.items[j];
+        }
+        result[total_count] = null;
+
+        const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
+        var li: usize = 0;
+        while (li < old_count) : (li += 1) {
+            pathlen_buf[li] = pglob.gl_pathlen[li];
+        }
+        var lj: usize = 0;
+        while (lj < new_count) : (lj += 1) {
+            pathlen_buf[old_count + lj] = mem.len(result_paths.items[lj]);
+        }
+
+        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pglob.gl_pathv))[0 .. old_count + 1];
+        allocator.free(old_pathv_slice);
+        const old_pathlen_slice = pglob.gl_pathlen[0..old_count];
+        allocator.free(old_pathlen_slice);
+
+        pglob.gl_pathc = total_count;
+        pglob.gl_pathv = result;
+        pglob.gl_pathlen = pathlen_buf.ptr;
+        pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+    } else {
+        // No APPEND or first call
+        const pathv_buf = allocator.alloc([*c]u8, result_paths.items.len + 1) catch return error.OutOfMemory;
+        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+
+        const pathlen_buf = allocator.alloc(usize, result_paths.items.len) catch return error.OutOfMemory;
+
+        var i: usize = 0;
+        while (i < result_paths.items.len) : (i += 1) {
+            result[i] = result_paths.items[i];
+            pathlen_buf[i] = mem.len(result_paths.items[i]);
+        }
+        result[result_paths.items.len] = null;
+
+        pglob.gl_pathc = result_paths.items.len;
+        pglob.gl_pathv = result;
+        pglob.gl_pathlen = pathlen_buf.ptr;
+        pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
     }
-    result[result_paths.items.len] = null;
-
-    pglob.gl_pathc = result_paths.items.len;
-    pglob.gl_pathv = result;
-    pglob.gl_pathlen = pathlen_buf.ptr;
-    pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
 }
 
 // Recursive helper to expand wildcard components level by level
@@ -945,32 +1031,296 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
     }
 
     if (flags & GLOB_BRACE != 0) {
-        var expanded = ResultsList.init(allocator);
-        defer {
-            for (expanded.items) |item| {
-                const item_mem = mem.sliceTo(item, 0);
-                allocator.free(item_mem);
-            }
-            expanded.deinit();
+        const brace_optimizer = @import("brace_optimizer.zig");
+
+        // OPTIMIZATION: Check if we can use single-pass optimized matching
+        // For patterns like "path/*.{a,b,c}" where the directory structure is identical
+        if (brace_optimizer.canOptimizeBracePattern(pattern_slice)) {
+            var opt_pattern = brace_optimizer.decomposeBracePattern(allocator, pattern_slice) catch {
+                // If decomposition fails, expand and glob each pattern independently
+                return try globBraceExpand(allocator, pattern_slice, flags, errfunc, pglob);
+            };
+            defer opt_pattern.deinit();
+
+            // Use optimized single-pass glob with batch matching
+            return try globWithBraceOptimized(allocator, &opt_pattern, flags, errfunc, pglob);
         }
 
-        try expandBraces(allocator, pattern_slice, &expanded);
-
-        // Glob each expanded pattern
-        var first = true;
-        for (expanded.items) |exp_pattern| {
-            const exp_slice = mem.sliceTo(exp_pattern, 0);
-            _ = try globSingle(allocator, exp_slice, if (first) flags else flags | GLOB_APPEND, errfunc, pglob);
-            first = false;
-        }
-
-        if (pglob.gl_pathc == 0) {
-            return null;
-        }
-        return;
+        // For complex patterns (like {a,b}/*/*.c), expand and glob each independently
+        // This avoids internal GLOB_APPEND manipulation
+        return try globBraceExpand(allocator, pattern_slice, flags, errfunc, pglob);
     }
 
     return try globSingle(allocator, pattern_slice, flags, errfunc, pglob);
+}
+
+// Expand brace patterns and glob each independently (no GLOB_APPEND manipulation)
+fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t) !?void {
+    var expanded = ResultsList.init(allocator);
+    defer {
+        for (expanded.items) |item| {
+            const item_mem = mem.sliceTo(item, 0);
+            allocator.free(item_mem);
+        }
+        expanded.deinit();
+    }
+
+    try expandBraces(allocator, pattern, &expanded);
+
+    // Collect all results from all expanded patterns
+    var all_results = ResultsList.init(allocator);
+    defer all_results.deinit();
+
+    // Glob each expanded pattern independently (NO GLOB_APPEND)
+    for (expanded.items) |exp_pattern| {
+        const exp_slice = mem.sliceTo(exp_pattern, 0);
+
+        // Create a temporary pglob for this pattern
+        var temp_pglob: glob_t = undefined;
+        temp_pglob.gl_pathc = 0;
+        temp_pglob.gl_pathv = null;
+        temp_pglob.gl_offs = 0;
+
+        _ = try globSingle(allocator, exp_slice, flags & ~@as(c_int, GLOB_APPEND), errfunc, &temp_pglob);
+
+        // Collect results from temp_pglob
+        if (temp_pglob.gl_pathc > 0) {
+            for (0..temp_pglob.gl_pathc) |i| {
+                try all_results.append(temp_pglob.gl_pathv[i]);
+            }
+            // Don't free the paths yet, we're transferring ownership
+            // Free the pathv array and pathlen array, but not the paths themselves
+            if (temp_pglob.gl_flags & ZLOB_FLAGS_OWNS_STRINGS != 0) {
+                allocator.free(@as([*]const [*c]u8, @ptrCast(temp_pglob.gl_pathv))[0..temp_pglob.gl_pathc + 1]);
+                allocator.free(@as([*]const usize, @ptrCast(temp_pglob.gl_pathlen))[0..temp_pglob.gl_pathc]);
+            }
+        }
+    }
+
+    if (all_results.items.len == 0) {
+        if (flags & GLOB_NOCHECK != 0) {
+            const pat_copy = try allocator.allocSentinel(u8, pattern.len, 0);
+            @memcpy(pat_copy[0..pattern.len], pattern);
+            const path: [*c]u8 = @ptrCast(pat_copy.ptr);
+
+            const pathv_buf = try allocator.alloc([*c]u8, 2);
+            const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+            result[0] = path;
+            result[1] = null;
+
+            const pathlen_buf = try allocator.alloc(usize, 1);
+            pathlen_buf[0] = pattern.len;
+
+            pglob.gl_pathc = 1;
+            pglob.gl_pathv = result;
+            pglob.gl_pathlen = pathlen_buf.ptr;
+            pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+            return;
+        }
+        return null;
+    }
+
+    // Sort results if needed
+    if (flags & GLOB_NOSORT == 0) {
+        qsort(@ptrCast(all_results.items.ptr), all_results.items.len, @sizeOf([*c]u8), c_cmp_strs);
+    }
+
+    // Build final result
+    const pathv_buf = try allocator.alloc([*c]u8, all_results.items.len + 1);
+    const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+
+    const pathlen_buf = try allocator.alloc(usize, all_results.items.len);
+
+    for (all_results.items, 0..) |path, i| {
+        result[i] = path;
+        pathlen_buf[i] = mem.len(path);
+    }
+    result[all_results.items.len] = null;
+
+    pglob.gl_pathc = all_results.items.len;
+    pglob.gl_pathv = result;
+    pglob.gl_pathlen = pathlen_buf.ptr;
+    pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+    return;
+}
+
+// Optimized single-pass glob with batch matching for brace patterns
+fn globWithBraceOptimized(allocator: std.mem.Allocator, opt_pattern: *const @import("brace_optimizer.zig").OptimizedBracePattern, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t) !?void {
+    // Walk directory structure ONCE using the common pattern
+    var result_paths = ResultsList.init(allocator);
+    defer result_paths.deinit();
+    errdefer {
+        for (result_paths.items) |path| {
+            const path_slice = mem.sliceTo(path, 0);
+            allocator.free(path_slice);
+        }
+    }
+
+    // Check if dir_pattern contains any wildcards at all
+    const has_wildcards = hasWildcardsSIMD(opt_pattern.dir_pattern);
+
+    if (has_wildcards) {
+        // Walk directories and batch-match against alternatives
+        try globWithAlternativesOptimized(allocator, opt_pattern.dir_pattern, opt_pattern.alternatives, flags, errfunc, &result_paths);
+    } else {
+
+        // Literal path - just check if it exists with any alternative
+        for (opt_pattern.alternatives) |alt| {
+            if (try globLiteralPath(allocator, alt, flags, pglob)) {
+                return;
+            }
+        }
+        return null;
+    }
+
+    if (result_paths.items.len == 0) {
+        if (flags & GLOB_NOCHECK != 0) {
+            // Return original pattern with first alternative
+            const first_alt = opt_pattern.alternatives[0];
+            const pat_copy = try allocator.allocSentinel(u8, first_alt.len, 0);
+            @memcpy(pat_copy[0..first_alt.len], first_alt);
+            const path: [*c]u8 = @ptrCast(pat_copy.ptr);
+
+            const pathv_buf = try allocator.alloc([*c]u8, 2);
+            const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+            result[0] = path;
+            result[1] = null;
+
+            const pathlen_buf = try allocator.alloc(usize, 1);
+            pathlen_buf[0] = first_alt.len;
+
+            pglob.gl_pathc = 1;
+            pglob.gl_pathv = result;
+            pglob.gl_pathlen = pathlen_buf.ptr;
+            pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+            return;
+        }
+        return null;
+    }
+
+    if (flags & GLOB_NOSORT == 0) {
+        qsort(@ptrCast(result_paths.items.ptr), result_paths.items.len, @sizeOf([*c]u8), c_cmp_strs);
+    }
+
+    const pathv_buf = try allocator.alloc([*c]u8, result_paths.items.len + 1);
+    const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+
+    const pathlen_buf = try allocator.alloc(usize, result_paths.items.len);
+
+    var i: usize = 0;
+    while (i < result_paths.items.len) : (i += 1) {
+        result[i] = result_paths.items[i];
+        pathlen_buf[i] = mem.len(result_paths.items[i]);
+    }
+    result[result_paths.items.len] = null;
+
+    pglob.gl_pathc = result_paths.items.len;
+    pglob.gl_pathv = result;
+    pglob.gl_pathlen = pathlen_buf.ptr;
+    pglob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+}
+
+// Walk directories once and batch-match filenames against alternatives
+fn globWithAlternativesOptimized(allocator: std.mem.Allocator, dir_pattern: []const u8, alternatives: []const []const u8, flags: c_int, errfunc: glob_errfunc_t, results: *ResultsList) !void {
+    var components: [64][]const u8 = undefined;
+    var component_count: usize = 0;
+
+    var start: usize = 0;
+    for (dir_pattern, 0..) |ch, idx| {
+        if (ch == '/') {
+            if (idx > start) {
+                components[component_count] = dir_pattern[start..idx];
+                component_count += 1;
+            }
+            start = idx + 1;
+        }
+    }
+    if (start < dir_pattern.len) {
+        components[component_count] = dir_pattern[start..];
+        component_count += 1;
+    }
+
+    try expandWithBatchMatching(allocator, ".", components[0..component_count], 0, alternatives, results, false, flags, errfunc);
+}
+
+// Recursive helper that batch-matches alternatives during traversal
+fn expandWithBatchMatching(
+    allocator: std.mem.Allocator,
+    current_dir: []const u8,
+    components: []const []const u8,
+    component_idx: usize,
+    alternatives: []const []const u8,
+    results: *ResultsList,
+    directories_only: bool,
+    flags: c_int,
+    errfunc: glob_errfunc_t,
+) !void {
+    const brace_optimizer = @import("brace_optimizer.zig");
+
+    if (component_idx >= components.len) {
+        return;
+    }
+
+    const pattern = components[component_idx];
+    const is_last = component_idx == components.len - 1;
+
+    // Open directory
+    const dir = std.fs.cwd().openDir(current_dir, .{ .iterate = true }) catch {
+        if (errfunc) |ef| {
+            var path_buf: [4096]u8 = undefined;
+            const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{current_dir}) catch return;
+            const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
+            const should_continue = ef(path_z.ptr, eerrno);
+            if (should_continue != 0) return error.Aborted;
+        }
+        return;
+    };
+    var dir_copy = dir;
+    defer dir_copy.close();
+
+    var iterator = dir_copy.iterate();
+
+    while (try iterator.next()) |entry| {
+        // For last component, use batch matching with alternatives
+        if (is_last) {
+            if (entry.kind != .file and !directories_only) continue;
+
+            // OPTIMIZATION: Batch-match filename against all alternatives
+            if (brace_optimizer.batchMatchAlternatives(entry.name, alternatives)) {
+                var path_buf: [4096]u8 = undefined;
+                const full_path = buildPathInBuffer(&path_buf, current_dir, entry.name);
+
+                const path_copy = try allocator.allocSentinel(u8, full_path.len, 0);
+                @memcpy(path_copy, full_path);
+                const str: [*c]u8 = @ptrCast(path_copy.ptr);
+                try results.append(str);
+            }
+        } else {
+            // For intermediate components, use normal matching and recurse
+            const pattern_ctx = PatternContext.init(pattern);
+            if (fnmatchWithContext(&pattern_ctx, entry.name)) {
+                if (entry.kind == .directory or entry.kind == .sym_link) {
+                    var next_dir_buf: [4096]u8 = undefined;
+                    const next_dir = buildPathInBuffer(&next_dir_buf, current_dir, entry.name);
+
+                    var next_dir_copy: [4096]u8 = undefined;
+                    @memcpy(next_dir_copy[0..next_dir.len], next_dir);
+
+                    try expandWithBatchMatching(
+                        allocator,
+                        next_dir_copy[0..next_dir.len],
+                        components,
+                        component_idx + 1,
+                        alternatives,
+                        results,
+                        directories_only,
+                        flags,
+                        errfunc,
+                    );
+                }
+            }
+        }
+    }
 }
 
 // Pattern components for recursive glob

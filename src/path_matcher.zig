@@ -18,6 +18,7 @@ pub const GLOB_NOSORT = glob.GLOB_NOSORT;
 pub const GLOB_PERIOD = glob.GLOB_PERIOD;
 pub const GLOB_NOCHECK = glob.GLOB_NOCHECK;
 pub const GLOB_NOESCAPE = glob.GLOB_NOESCAPE;
+pub const GLOB_BRACE = glob.GLOB_BRACE;
 
 const PatternSegments = struct {
     segments: [][]const u8,
@@ -166,6 +167,85 @@ fn splitPathComponents(allocator: Allocator, path: []const u8) !PathComponents {
         .components = components,
         .allocator = allocator,
     };
+}
+
+// Helper to find matching closing brace
+fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
+    var depth: usize = 1;
+    var i = start;
+    while (i < pattern.len) : (i += 1) {
+        if (pattern[i] == '{') {
+            depth += 1;
+        } else if (pattern[i] == '}') {
+            depth -= 1;
+            if (depth == 0) return i;
+        } else if (pattern[i] == '\\' and i + 1 < pattern.len) {
+            i += 1; // Skip escaped character
+        }
+    }
+    return null;
+}
+
+// Expand brace patterns like "{a,b,c}" into multiple patterns
+fn expandBraces(allocator: Allocator, pattern: []const u8, results: *std.array_list.AlignedManaged([]const u8, null)) !void {
+    // Find first unescaped opening brace
+    var brace_start: ?usize = null;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        if (pattern[i] == '\\' and i + 1 < pattern.len) {
+            i += 1; // Skip escaped character
+            continue;
+        }
+        if (pattern[i] == '{') {
+            brace_start = i;
+            break;
+        }
+    }
+
+    // No braces found, just copy the pattern
+    if (brace_start == null) {
+        const copy = try allocator.dupe(u8, pattern);
+        try results.append(copy);
+        return;
+    }
+
+    const brace_open = brace_start.?;
+    const brace_close = findClosingBrace(pattern, brace_open + 1) orelse {
+        // No matching closing brace, treat as literal
+        const copy = try allocator.dupe(u8, pattern);
+        try results.append(copy);
+        return;
+    };
+
+    const prefix = pattern[0..brace_open];
+    const suffix = pattern[brace_close + 1 ..];
+    const brace_content = pattern[brace_open + 1 .. brace_close];
+
+    // Split brace content by commas
+    var start: usize = 0;
+    var alternatives = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+    defer {
+        for (alternatives.items) |alt| {
+            allocator.free(alt);
+        }
+        alternatives.deinit();
+    }
+
+    i = 0;
+    while (i <= brace_content.len) : (i += 1) {
+        if (i == brace_content.len or brace_content[i] == ',') {
+            const alt = brace_content[start..i];
+
+            const new_str = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, alt, suffix });
+            try alternatives.append(new_str);
+            start = i + 1;
+        }
+    }
+
+    // Recursively expand each alternative
+    for (alternatives.items) |alt_pattern| {
+        try expandBraces(allocator, alt_pattern, results);
+    }
 }
 
 fn shouldSkipHidden(path_component: []const u8, pattern: []const u8, flags: u32) bool {
@@ -317,6 +397,79 @@ pub fn matchPaths(
     paths: []const []const u8,
     flags: u32,
 ) !GlobResults {
+    // Handle GLOB_BRACE expansion first
+    if (flags & GLOB_BRACE != 0) {
+        var expanded_patterns = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+        defer {
+            for (expanded_patterns.items) |p| {
+                allocator.free(p);
+            }
+            expanded_patterns.deinit();
+        }
+
+        try expandBraces(allocator, pattern, &expanded_patterns);
+
+        // Match each expanded pattern and combine results
+        var all_matches = std.StringHashMap(void).init(allocator);
+        defer all_matches.deinit();
+
+        for (expanded_patterns.items) |exp_pattern| {
+            // Recursively call matchPaths without GLOB_BRACE flag to avoid infinite recursion
+            var result = try matchPaths(allocator, exp_pattern, paths, flags & ~@as(u32, GLOB_BRACE));
+            defer result.deinit();
+
+            // Add matches to our set for deduplication
+            for (result.paths) |path| {
+                try all_matches.put(path, {});
+            }
+        }
+
+        // Convert set back to array
+        if (all_matches.count() == 0) {
+            if (flags & GLOB_NOCHECK != 0) {
+                var result_paths = try allocator.alloc([]const u8, 1);
+                result_paths[0] = try allocator.dupe(u8, pattern);
+                return GlobResults{
+                    .paths = result_paths,
+                    .match_count = 1,
+                    .allocator = allocator,
+                    .owns_paths = true,
+                };
+            }
+            const empty: [][]const u8 = &[_][]const u8{};
+            return GlobResults{
+                .paths = empty,
+                .match_count = 0,
+                .allocator = allocator,
+                .owns_paths = false,
+            };
+        }
+
+        var result_paths = try allocator.alloc([]const u8, all_matches.count());
+        var i: usize = 0;
+        var iter = all_matches.keyIterator();
+        while (iter.next()) |key| {
+            result_paths[i] = key.*;
+            i += 1;
+        }
+
+        // Sort if needed
+        if (flags & GLOB_NOSORT == 0) {
+            mem.sort([]const u8, result_paths, {}, struct {
+                fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                    return mem.order(u8, a, b) == .lt;
+                }
+            }.lessThan);
+        }
+
+        return GlobResults{
+            .paths = result_paths,
+            .match_count = result_paths.len,
+            .allocator = allocator,
+            .owns_paths = false,
+        };
+    }
+
     if (paths.len == 0) {
         if (flags & GLOB_NOCHECK != 0) {
             var result_paths = try allocator.alloc([]const u8, 1);

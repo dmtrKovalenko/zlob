@@ -59,10 +59,16 @@ pub fn main() !void {
         std.debug.print("  Description: {s}\n", .{tc.description});
         std.debug.print("  Iterations: {d}\n", .{tc.iterations});
 
+        // Determine flags based on pattern
+        const flags: c_int = if (std.mem.indexOf(u8, tc.pattern, "{") != null)
+            c_lib.GLOB_BRACE
+        else
+            0;
+
         // Warmup run to avoid cold cache
         {
             var pglob: glob_t = undefined;
-            const result = c_lib.glob(tc.pattern.ptr, 0, null, &pglob);
+            const result = c_lib.glob(tc.pattern.ptr, flags, null, &pglob);
             if (result == 0) {
                 std.debug.print("  Matches: {d}\n", .{pglob.gl_pathc});
                 c_lib.globfree(&pglob);
@@ -79,7 +85,7 @@ pub fn main() !void {
         var matches_this_test: usize = 0;
         while (i < tc.iterations) : (i += 1) {
             var pglob: glob_t = undefined;
-            const result = c_lib.glob(tc.pattern.ptr, 0, null, &pglob);
+            const result = c_lib.glob(tc.pattern.ptr, flags, null, &pglob);
             if (result == 0) {
                 matches_this_test = pglob.gl_pathc;
                 c_lib.globfree(&pglob);
