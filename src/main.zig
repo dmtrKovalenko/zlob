@@ -37,6 +37,8 @@ pub fn main() !void {
             flags |= simdglob.GLOB_NOSORT;
         } else if (std.mem.eql(u8, arg, "--noescape")) {
             flags |= simdglob.GLOB_NOESCAPE;
+        } else if (std.mem.eql(u8, arg, "--brace") or std.mem.eql(u8, arg, "-b")) {
+            flags |= simdglob.GLOB_BRACE;
         } else {
             std.debug.print("Unknown flag: {s}\n", .{arg});
             return;

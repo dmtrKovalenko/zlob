@@ -65,6 +65,8 @@ test "GLOB_BRACE - wildcard with brace extension" {
         "test.txt",
         "test.log",
         "test.md",
+        "test2.log",
+        "test3.md",
         "test.rs",
         "readme.txt",
     };
@@ -73,6 +75,41 @@ test "GLOB_BRACE - wildcard with brace extension" {
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
+}
+
+test "GLOB_BRACE - recursive" {
+    const files = [_][]const u8{
+        "1/2/3/test.txt",
+        "1/test.log",
+        "23/test.md",
+        "/123/23/test2.log",
+        "23/test3.md",
+        "123123/test.rs",
+        "a/b/c/d/e/README.md",
+        "a/b/c/d/e/readme.md",
+    };
+
+    var result = try simdglob.matchPaths(testing.allocator, "**/*.{md,log}", &files, simdglob.GLOB_BRACE);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 6), result.match_count);
+}
+
+test "GLOB_BRACE - wildcard extension" {
+    const files = [_][]const u8{
+        "test.txt",
+        "test.log",
+        "test.md",
+        "test2.log",
+        "test3.md",
+        "test.rs",
+        "readme.txt",
+    };
+
+    var result = try simdglob.matchPaths(testing.allocator, "*.{txt,log,md}", &files, simdglob.GLOB_BRACE);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 6), result.match_count);
 }
 
 test "GLOB_BRACE - two alternatives" {

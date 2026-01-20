@@ -118,7 +118,7 @@ test "GLOB_APPEND - append to empty results" {
     c_lib.globfree(&pglob);
 }
 
-test "GLOB_APPEND - preserve order without GLOB_NOSORT" {
+test "GLOB_APPEND - preserve order with sorting" {
     const allocator = testing.allocator;
 
     try std.fs.cwd().makePath("test_append_order");

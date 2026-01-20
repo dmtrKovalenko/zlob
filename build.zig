@@ -169,6 +169,7 @@ pub fn build(b: *std.Build) void {
         "test/test_rust_glob.zig",
         "test/test_path_matcher.zig",
         "test/test_errfunc.zig",
+        "src/brace_optimizer.zig"
     };
 
     for (test_files) |test_file| {
@@ -305,6 +306,26 @@ pub fn build(b: *std.Build) void {
     profile_big_repo_cmd.step.dependOn(b.getInstallStep());
     const profile_big_repo_step = b.step("profile-big-repo", "Profile glob_libc on Linux kernel repository");
     profile_big_repo_step.dependOn(&profile_big_repo_cmd.step);
+
+    const bench_brace = b.addExecutable(.{
+        .name = "bench_brace",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench_brace.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "simdglob", .module = mod },
+                .{ .name = "c_lib", .module = c_lib_mod },
+            },
+        }),
+    });
+    bench_brace.linkLibC();
+    b.installArtifact(bench_brace);
+
+    const bench_brace_cmd = b.addRunArtifact(bench_brace);
+    bench_brace_cmd.step.dependOn(b.getInstallStep());
+    const bench_brace_step = b.step("bench-brace", "Benchmark brace pattern optimizations");
+    bench_brace_step.dependOn(&bench_brace_cmd.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

@@ -1,9 +1,3 @@
-//! SIMD-optimized suffix matching for glob patterns
-//!
-//! This module provides platform-adaptive vectorized suffix matching for
-//! simple *.ext patterns, automatically selecting optimal vector sizes
-//! based on the CPU architecture (SSE/AVX2/AVX-512).
-
 const std = @import("std");
 const c = std.c;
 const mem = std.mem;
@@ -17,9 +11,6 @@ const buildFullPath = glob.buildFullPath;
 const maybeAppendSlash = glob.maybeAppendSlash;
 const shouldSkipFile = glob.shouldSkipFile;
 
-// Platform-optimal SIMD vector sizes (compile-time determined)
-// On SSE/NEON: typically 8 x u16 (16 bytes) or 4 x u32 (16 bytes)
-// On AVX-512: can be 32 x u16 (64 bytes) or 16 x u32 (64 bytes)
 pub const OptimalVecSize16 = std.simd.suggestVectorLength(u16) orelse 8;
 pub const OptimalVecSize32 = std.simd.suggestVectorLength(u32) orelse 4;
 
@@ -30,13 +21,6 @@ comptime {
         "SIMD suffix match config: u16 batch={d} ({d} bytes), u32 batch={d} ({d} bytes)",
         .{ OptimalVecSize16, OptimalVecSize16 * 2, OptimalVecSize32, OptimalVecSize32 * 4 },
     );
-}
-
-pub fn getSimdConfig() struct { u16_batch_size: usize, u32_batch_size: usize } {
-    return .{
-        .u16_batch_size = OptimalVecSize16,
-        .u32_batch_size = OptimalVecSize32,
-    };
 }
 
 pub fn check_simple_star_sufix(pattern: []const u8) struct { ?SimdBatchedSuffixMatch, ?SuffixMatch } {
@@ -75,7 +59,11 @@ pub const SuffixMatch = struct {
         if (actualSuffix.len <= 16) {
             @branchHint(.likely);
             if (actualSuffix.len < 4) {
-                const xor = (actualSuffix[0] ^ patternSuffix[0]) | (actualSuffix[actualSuffix.len - 1] ^ patternSuffix[actualSuffix.len - 1]) | (actualSuffix[actualSuffix.len / 2] ^ patternSuffix[actualSuffix.len / 2]);
+                const xor = 
+                    (actualSuffix[0] ^ patternSuffix[0]) 
+                    | (actualSuffix[actualSuffix.len - 1] ^ patternSuffix[actualSuffix.len - 1]) 
+                    | (actualSuffix[actualSuffix.len / 2] ^ patternSuffix[actualSuffix.len / 2]);
+
                 return xor == 0;
             }
             var x: u32 = 0;
@@ -301,8 +289,9 @@ fn simdBatchProcessGeneric(
                 for (0..BatchSize) |i| {
                     if (match_vec[i]) {
                         if (directories_only) {
-                            const entry_dtype = batch_entries[i].type;
-                            if (entry_dtype != glob.DT_DIR and entry_dtype != glob.DT_UNKNOWN) continue;
+                            const dtype = batch_entries[i].type;
+
+                            if (dtype != glob.DT_DIR and dtype != glob.DT_UNKNOWN) continue;
                         }
 
                         const name_to_add = batch_names[i];

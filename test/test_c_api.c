@@ -1,8 +1,3 @@
-/**
- * Minimal C API test for zlob library
- * Tests both glob() and glob_match_paths() functions
- */
-
 #include "zlob.h"
 #include <assert.h>
 #include <stdio.h>
@@ -168,7 +163,6 @@ int main(void) {
     PASS();
   }
 
-  // Verify gl_pathlen optimization
   printf("\ngl_pathlen Field\n");
   TEST("Verify gl_pathlen provides O(1) length access");
   {
@@ -190,6 +184,25 @@ int main(void) {
         FAIL("gl_pathlen doesn't match strlen");
       }
     }
+
+    printf("    All lengths correct (avoiding strlen overhead)\n");
+    globfree(&pglob);
+    PASS();
+  }
+
+  TEST("Braced patterns");
+  {
+    const char *paths[] = {"short.c", "long.c", "other.c"};
+    const size_t path_count = sizeof(paths) / sizeof(paths[0]);
+
+    glob_t pglob;
+    int result = glob_match_paths("{short, long}.c", paths, path_count, 0, &pglob);
+
+    if (result != 0)
+      FAIL("glob_match_paths() failed");
+
+    if pglob.gl_pathc != 2
+      FAIL("Expected 2 matches");
 
     printf("    All lengths correct (avoiding strlen overhead)\n");
     globfree(&pglob);

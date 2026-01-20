@@ -58,7 +58,6 @@ pub export fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: glob_impl.glob
         return switch (err) {
             error.OutOfMemory => GLOB_NOSPACE,
             error.Aborted => GLOB_ABORTED,
-            else => GLOB_ABORTED,
         };
     }
 }
