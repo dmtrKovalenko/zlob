@@ -155,10 +155,8 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    // A top level step for running all tests.
     const test_step = b.step("test", "Run tests");
 
-    // Test files in test/ directory
     const test_files = [_][]const u8{
         "test/test_basic.zig",
         "test/test_brace.zig",
@@ -169,7 +167,10 @@ pub fn build(b: *std.Build) void {
         "test/test_rust_glob.zig",
         "test/test_path_matcher.zig",
         "test/test_errfunc.zig",
-        "src/brace_optimizer.zig"
+        "test/test_gitignore.zig",
+        // files with inline tests
+        "src/brace_optimizer.zig",
+        "src/gitignore.zig",
     };
 
     for (test_files) |test_file| {

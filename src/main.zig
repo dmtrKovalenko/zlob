@@ -26,6 +26,7 @@ pub fn main() !void {
         std.debug.print("  --mark         - Append / to directories\n", .{});
         std.debug.print("  --nosort       - Don't sort results\n", .{});
         std.debug.print("  --noescape     - Don't treat \\ as escape character\n", .{});
+        std.debug.print("  --gitignore    - Filter results using .gitignore from cwd\n", .{});
         return;
     };
 
@@ -39,6 +40,8 @@ pub fn main() !void {
             flags |= simdglob.GLOB_NOESCAPE;
         } else if (std.mem.eql(u8, arg, "--brace") or std.mem.eql(u8, arg, "-b")) {
             flags |= simdglob.GLOB_BRACE;
+        } else if (std.mem.eql(u8, arg, "--gitignore") or std.mem.eql(u8, arg, "-g")) {
+            flags |= simdglob.GLOB_GITIGNORE;
         } else {
             std.debug.print("Unknown flag: {s}\n", .{arg});
             return;

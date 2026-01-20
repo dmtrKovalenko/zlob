@@ -28,6 +28,7 @@ pub const GLOB_NOMAGIC = glob_impl.GLOB_NOMAGIC;
 pub const GLOB_TILDE = glob_impl.GLOB_TILDE;
 pub const GLOB_ONLYDIR = glob_impl.GLOB_ONLYDIR;
 pub const GLOB_TILDE_CHECK = glob_impl.GLOB_TILDE_CHECK;
+pub const GLOB_GITIGNORE = glob_impl.GLOB_GITIGNORE;
 
 // Re-export error codes for tests
 pub const GLOB_NOSPACE = glob_impl.GLOB_NOSPACE;

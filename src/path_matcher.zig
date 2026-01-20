@@ -26,8 +26,8 @@ const PatternSegments = struct {
     allocator: Allocator,
 
     // Pre-computed metadata to avoid per-path checks
-    has_doublestar: bool,           // True if pattern contains **
-    original_pattern: []const u8,   // Original pattern string (for fast path without **)
+    has_doublestar: bool, // True if pattern contains **
+    original_pattern: []const u8, // Original pattern string (for fast path without **)
     pattern_context: PatternContext, // Pre-computed context for fast path
 
     pub fn deinit(self: *PatternSegments) void {
@@ -114,6 +114,79 @@ fn splitPathComponentsFast(path: []const u8, buffer: [][]const u8) [][]const u8 
         }
     }
     return buffer[0..idx];
+}
+
+/// Simple glob pattern matching with ** support - no allocation required.
+/// This is a lightweight alternative to matchSinglePath for cases where
+/// you don't need GLOB_PERIOD handling or pre-computed pattern contexts.
+///
+/// Supports:
+/// - `*` matches any characters except `/`
+/// - `?` matches exactly one character except `/`
+/// - `[abc]` matches one character from the set
+/// - `**` matches zero or more directories
+///
+/// Example patterns:
+/// - `**/*.c` - All .c files at any depth
+/// - `src/**/test_*.zig` - All test files under src/
+/// - `*.txt` - All .txt files in root
+pub fn matchGlobSimple(pattern: []const u8, path: []const u8) bool {
+    // Fast path: no ** in pattern
+    if (mem.indexOf(u8, pattern, "**") == null) {
+        return glob.fnmatchFull(pattern, path);
+    }
+
+    // Split pattern and path into segments using stack buffers
+    var pat_segments_buf: [32][]const u8 = undefined;
+    var path_segments_buf: [64][]const u8 = undefined;
+
+    const pat_segments = splitPathComponentsFast(pattern, &pat_segments_buf);
+    const path_segments = splitPathComponentsFast(path, &path_segments_buf);
+
+    return matchSegmentsSimple(pat_segments, path_segments, 0, 0);
+}
+
+/// Core recursive segment matching for ** patterns (no allocation, no GLOB_PERIOD)
+fn matchSegmentsSimple(
+    pattern_segments: []const []const u8,
+    path_segments: []const []const u8,
+    pat_idx: usize,
+    path_idx: usize,
+) bool {
+    // Base case: pattern exhausted
+    if (pat_idx >= pattern_segments.len) {
+        return path_idx >= path_segments.len;
+    }
+
+    const current_pattern = pattern_segments[pat_idx];
+
+    // Handle ** (matches zero or more path segments)
+    if (mem.eql(u8, current_pattern, "**")) {
+        // Try matching ** with zero segments
+        if (matchSegmentsSimple(pattern_segments, path_segments, pat_idx + 1, path_idx)) {
+            return true;
+        }
+        // Try matching ** with one or more segments
+        var skip: usize = 1;
+        while (path_idx + skip <= path_segments.len) : (skip += 1) {
+            if (matchSegmentsSimple(pattern_segments, path_segments, pat_idx + 1, path_idx + skip)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Regular segment - must match current path segment
+    if (path_idx >= path_segments.len) {
+        return false;
+    }
+
+    // Use fnmatchFull to match the segment
+    if (glob.fnmatchFull(current_pattern, path_segments[path_idx])) {
+        return matchSegmentsSimple(pattern_segments, path_segments, pat_idx + 1, path_idx + 1);
+    }
+
+    return false;
 }
 
 pub fn extractSuffixFromPattern(pattern: []const u8) struct { suffix: ?[]const u8 } {

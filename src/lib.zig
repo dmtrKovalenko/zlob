@@ -32,6 +32,7 @@ pub const GLOB_BRACE = glob.GLOB_BRACE;
 pub const GLOB_PERIOD = glob.GLOB_PERIOD;
 pub const GLOB_ONLYDIR = glob.GLOB_ONLYDIR;
 pub const GLOB_TILDE_CHECK = glob.GLOB_TILDE_CHECK;
+pub const GLOB_GITIGNORE = glob.GLOB_GITIGNORE;
 pub const GLOB_NOSPACE = glob.GLOB_NOSPACE;
 pub const GLOB_ABORTED = glob.GLOB_ABORTED;
 pub const GLOB_NOMATCH = glob.GLOB_NOMATCH;

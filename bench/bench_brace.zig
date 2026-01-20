@@ -53,7 +53,7 @@ fn getRepoPath(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 fn runBenchmark(tc: TestCase, warmup_iterations: usize) !BenchmarkResult {
-    const flags: c_int = c_lib.GLOB_BRACE;
+    const flags: c_int = c_lib.GLOB_BRACE | c_lib.GLOB_GITIGNORE | c_lib.GLOB_NOSORT;
 
     // Warmup runs to avoid cold cache effects
     var matches: usize = 0;
