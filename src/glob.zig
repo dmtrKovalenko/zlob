@@ -543,7 +543,7 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
 }
 
 // Optimized version that uses pattern info to start from literal prefix
-fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, directories_only: bool, gitignore_filter: ?*const GitIgnore) !?void {
+fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, directories_only: bool, gitignore_filter: ?*GitIgnore) !?void {
     // Note: gitignore filtering is not fully implemented in this path
     // The main recursive and filtered paths handle gitignore
     _ = gitignore_filter;
@@ -785,7 +785,7 @@ fn expandWildcardComponents(
     }
 }
 
-fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, gitignore_filter: ?*const GitIgnore) !?void {
+fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, gitignore_filter: ?*GitIgnore) !?void {
     var effective_pattern = pattern;
     var effective_flags = flags;
 
@@ -1033,7 +1033,7 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
     if (flags & GLOB_GITIGNORE != 0) {
         gitignore_instance = GitIgnore.loadFromCwd(allocator) catch null;
     }
-    const gitignore_ptr: ?*const GitIgnore = if (gitignore_instance) |*gi| gi else null;
+    const gitignore_ptr: ?*GitIgnore = if (gitignore_instance) |*gi| gi else null;
 
     if (flags & GLOB_TILDE != 0) {
         expanded_pattern = try expandTilde(allocator, pattern_slice, flags);
@@ -1073,7 +1073,7 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
 }
 
 // Expand brace patterns and glob each independently (no GLOB_APPEND manipulation)
-fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, gitignore_filter: ?*const GitIgnore) !?void {
+fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, gitignore_filter: ?*GitIgnore) !?void {
     var expanded = ResultsList.init(allocator);
     defer {
         for (expanded.items) |item| {
@@ -1173,7 +1173,7 @@ const RecursivePattern = struct {
     /// Pre-computed pattern contexts for file alternatives (key optimization!)
     file_pattern_contexts: ?[]const PatternContext = null,
     /// Optional gitignore filter (for GLOB_GITIGNORE flag)
-    gitignore_filter: ?*const GitIgnore = null,
+    gitignore_filter: ?*GitIgnore = null,
 };
 
 /// Match filename against pre-computed pattern contexts (avoids redundant PatternContext.init calls)
@@ -1189,7 +1189,7 @@ inline fn matchWithAlternativesPrecomputed(name: []const u8, contexts: []const P
 }
 
 /// Unified brace pattern glob - walks the tree ONCE regardless of where braces appear
-fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*const GitIgnore) !?void {
+fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*GitIgnore) !?void {
     const info = analyzePattern(pattern, flags);
 
     // Split pattern at **
@@ -1698,7 +1698,7 @@ fn walkWithGitignore(
     flags: c_int,
     results: *ResultsList,
     info: *const PatternInfo,
-    gi: *const GitIgnore,
+    gi: *GitIgnore,
 ) !void {
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
@@ -1922,7 +1922,7 @@ inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: 
     }
 }
 
-fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_alternatives: ?[]const []const u8, file_pattern_contexts: ?[]const PatternContext, dirname: []const u8, flags: c_int, results: *ResultsList, directories_only: bool, errfunc: glob_errfunc_t, gitignore_filter: ?*const GitIgnore) !void {
+fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_alternatives: ?[]const []const u8, file_pattern_contexts: ?[]const PatternContext, dirname: []const u8, flags: c_int, results: *ResultsList, directories_only: bool, errfunc: glob_errfunc_t, gitignore_filter: ?*GitIgnore) !void {
     const pattern_ctx = PatternContext.init(pattern);
 
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
@@ -2078,7 +2078,7 @@ pub inline fn maybeAppendSlash(allocator: std.mem.Allocator, path: [*c]u8, path_
     return @ptrCast(new_slice.ptr);
 }
 
-fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, directories_only: bool, gitignore_filter: ?*const GitIgnore) !?void {
+fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, errfunc: glob_errfunc_t, pglob: *glob_t, directories_only: bool, gitignore_filter: ?*GitIgnore) !?void {
     const pattern_ctx = PatternContext.init(pattern);
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
 

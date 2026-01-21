@@ -1,5 +1,152 @@
 const std = @import("std");
 const simdglob = @import("simdglob");
+const posix = std.posix;
+const fs = std.fs;
+const Io = std.Io;
+
+const version = "0.1.0";
+
+const Options = struct {
+    pattern: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+    show_all: bool = false,
+    mark_dirs: bool = false,
+    no_sort: bool = false,
+    no_escape: bool = false,
+    brace: bool = false,
+    gitignore: bool = false,
+    hidden: bool = false,
+    dirs_only: bool = false,
+    show_help: bool = false,
+    show_version: bool = false,
+    limit: usize = 100,
+};
+
+const BufferedWriter = struct {
+    file_writer: fs.File.Writer,
+
+    fn init(handle: posix.fd_t, buf: []u8) BufferedWriter {
+        const file = fs.File{ .handle = handle };
+        return .{ .file_writer = file.writer(buf) };
+    }
+
+    fn writer(self: *BufferedWriter) *Io.Writer {
+        return &self.file_writer.interface;
+    }
+
+    fn flush(self: *BufferedWriter) void {
+        self.file_writer.interface.flush() catch {};
+    }
+};
+
+fn printVersion(w: *Io.Writer) void {
+    w.print("simdglob {s}\n", .{version}) catch {};
+}
+
+fn printHelp(w: *Io.Writer, program_name: []const u8) void {
+    w.print(
+        \\{s} - A fast SIMD-accelerated glob pattern matcher
+        \\
+        \\USAGE:
+        \\    {s} [OPTIONS] <PATTERN> [PATH]
+        \\
+        \\ARGS:
+        \\    <PATTERN>    Glob pattern to match (e.g., '**/*.zig', 'src/*.c')
+        \\    [PATH]       Directory to search (default: current directory)
+        \\
+        \\OPTIONS:
+        \\    -a, --all            Show all results (default: first 100)
+        \\    -n, --limit <NUM>    Limit results to NUM entries (default: 100)
+        \\    -g, --gitignore      Respect .gitignore rules
+        \\    -H, --hidden         Include hidden files (match files starting with '.')
+        \\    -d, --dirs-only      Only match directories
+        \\    -m, --mark           Append '/' to directory names
+        \\    -b, --brace          Enable brace expansion (e.g., '*.{{c,h}}')
+        \\    -E, --no-escape      Treat backslash as literal character
+        \\    -U, --unsorted       Don't sort results
+        \\    -h, --help           Print help information
+        \\    -V, --version        Print version information
+        \\
+        \\PATTERN SYNTAX:
+        \\    *            Match any sequence of characters (except '/')
+        \\    **           Match any sequence including '/' (recursive)
+        \\    ?            Match any single character
+        \\    [abc]        Match any character in the set
+        \\    [a-z]        Match any character in the range
+        \\    [!abc]       Match any character NOT in the set
+        \\    {{a,b,c}}      Match any of the comma-separated patterns (requires -b)
+        \\
+        \\EXAMPLES:
+        \\    {s} '**/*.zig'              Find all .zig files recursively
+        \\    {s} '*.txt' /path/to/dir    Find .txt files in specified directory
+        \\    {s} -g '**/*.ts'            Find .ts files, respecting .gitignore
+        \\    {s} -a '**/*'               List all files (no limit)
+        \\    {s} -n 50 '**/*.c'          Show first 50 .c files
+        \\    {s} -b 'src/*.{{c,h}}'       Find .c and .h files in src/
+        \\
+    , .{ program_name, program_name, program_name, program_name, program_name, program_name, program_name, program_name }) catch {};
+}
+
+fn parseArgs(allocator: std.mem.Allocator, stderr: *Io.Writer) !Options {
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+
+    var opts = Options{};
+    const program_name = args.next() orelse "simdglob";
+    _ = program_name;
+
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "-")) {
+            if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+                opts.show_help = true;
+            } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
+                opts.show_version = true;
+            } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--all")) {
+                opts.show_all = true;
+            } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--limit")) {
+                const limit_str = args.next() orelse {
+                    return error.MissingArgument;
+                };
+                opts.limit = std.fmt.parseInt(usize, limit_str, 10) catch {
+                    return error.InvalidNumber;
+                };
+            } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--mark")) {
+                opts.mark_dirs = true;
+            } else if (std.mem.eql(u8, arg, "-U") or std.mem.eql(u8, arg, "--unsorted")) {
+                opts.no_sort = true;
+            } else if (std.mem.eql(u8, arg, "-E") or std.mem.eql(u8, arg, "--no-escape")) {
+                opts.no_escape = true;
+            } else if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--brace")) {
+                opts.brace = true;
+            } else if (std.mem.eql(u8, arg, "-g") or std.mem.eql(u8, arg, "--gitignore")) {
+                opts.gitignore = true;
+            } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--hidden")) {
+                opts.hidden = true;
+            } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dirs-only")) {
+                opts.dirs_only = true;
+            } else {
+                stderr.print("error: unknown option '{s}'\n", .{arg}) catch {};
+                stderr.print("For more information, try '--help'\n", .{}) catch {};
+                stderr.flush() catch {};
+                std.process.exit(1);
+            }
+        } else {
+            // Positional argument
+            if (opts.pattern == null) {
+                opts.pattern = arg;
+            } else if (opts.path == null) {
+                opts.path = arg;
+            } else {
+                stderr.print("error: unexpected argument '{s}'\n", .{arg}) catch {};
+                stderr.print("For more information, try '--help'\n", .{}) catch {};
+                stderr.flush() catch {};
+                std.process.exit(1);
+            }
+        }
+    }
+
+    return opts;
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -9,63 +156,87 @@ pub fn main() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
+    // Buffered writers for stdout and stderr
+    var stdout_buf: [8192]u8 = undefined;
+    var stderr_buf: [4096]u8 = undefined;
+    var stdout_writer = BufferedWriter.init(posix.STDOUT_FILENO, &stdout_buf);
+    var stderr_writer = BufferedWriter.init(posix.STDERR_FILENO, &stderr_buf);
+    const stdout = stdout_writer.writer();
+    const stderr = stderr_writer.writer();
 
-    _ = args.skip();
-
-    const pattern = args.next() orelse {
-        std.debug.print("Usage: simdglob <pattern> [flags]\n", .{});
-        std.debug.print("\nExample patterns:\n", .{});
-        std.debug.print("  *.txt          - All .txt files in current directory\n", .{});
-        std.debug.print("  **/*.zig       - All .zig files recursively\n", .{});
-        std.debug.print("  src/*.zig      - All .zig files in src directory\n", .{});
-        std.debug.print("  [abc]*.txt     - Files starting with a, b, or c\n", .{});
-        std.debug.print("  file?.txt      - file1.txt, file2.txt, etc.\n", .{});
-        std.debug.print("\nFlags:\n", .{});
-        std.debug.print("  --mark         - Append / to directories\n", .{});
-        std.debug.print("  --nosort       - Don't sort results\n", .{});
-        std.debug.print("  --noescape     - Don't treat \\ as escape character\n", .{});
-        std.debug.print("  --gitignore    - Filter results using .gitignore from cwd\n", .{});
-        return;
+    const opts = parseArgs(allocator, stderr) catch |err| {
+        switch (err) {
+            error.MissingArgument => stderr.print("error: option requires an argument\n", .{}) catch {},
+            error.InvalidNumber => stderr.print("error: invalid number for --limit\n", .{}) catch {},
+        }
+        stderr_writer.flush();
+        std.process.exit(1);
     };
 
-    var flags: u32 = 0;
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--mark")) {
-            flags |= simdglob.GLOB_MARK;
-        } else if (std.mem.eql(u8, arg, "--nosort")) {
-            flags |= simdglob.GLOB_NOSORT;
-        } else if (std.mem.eql(u8, arg, "--noescape")) {
-            flags |= simdglob.GLOB_NOESCAPE;
-        } else if (std.mem.eql(u8, arg, "--brace") or std.mem.eql(u8, arg, "-b")) {
-            flags |= simdglob.GLOB_BRACE;
-        } else if (std.mem.eql(u8, arg, "--gitignore") or std.mem.eql(u8, arg, "-g")) {
-            flags |= simdglob.GLOB_GITIGNORE;
-        } else {
-            std.debug.print("Unknown flag: {s}\n", .{arg});
-            return;
-        }
+    if (opts.show_version) {
+        printVersion(stdout);
+        stdout_writer.flush();
+        return;
     }
 
-    const start = std.time.nanoTimestamp();
-    var match_result = try simdglob.match(allocator, pattern, flags);
-    const end = std.time.nanoTimestamp();
+    if (opts.show_help) {
+        printHelp(stdout, "simdglob");
+        stdout_writer.flush();
+        return;
+    }
 
-    std.debug.print("Pattern: {s}\n", .{pattern});
+    const pattern = opts.pattern orelse {
+        printHelp(stderr, "simdglob");
+        stderr_writer.flush();
+        std.process.exit(1);
+    };
+
+    // Build the full pattern with optional path prefix
+    var full_pattern: []const u8 = undefined;
+    if (opts.path) |path| {
+        // Combine path and pattern
+        const trimmed_path = std.mem.trimRight(u8, path, "/");
+        full_pattern = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ trimmed_path, pattern });
+    } else {
+        full_pattern = pattern;
+    }
+
+    // Build flags
+    var flags: u32 = simdglob.GLOB_NOSORT;
+    if (opts.mark_dirs) flags |= simdglob.GLOB_MARK;
+    if (opts.no_escape) flags |= simdglob.GLOB_NOESCAPE;
+    if (opts.brace) flags |= simdglob.GLOB_BRACE;
+    if (opts.gitignore) flags |= simdglob.GLOB_GITIGNORE;
+    if (opts.hidden) flags |= simdglob.GLOB_PERIOD;
+    if (opts.dirs_only) flags |= simdglob.GLOB_ONLYDIR;
+
+    // Execute glob
+    var match_result = simdglob.match(allocator, full_pattern, flags) catch |err| {
+        stderr.print("error: glob failed: {}\n", .{err}) catch {};
+        stderr_writer.flush();
+        std.process.exit(1);
+    };
 
     if (match_result) |*result| {
         defer result.deinit();
 
-        std.debug.print("Matches: {d}\n", .{result.match_count});
-        std.debug.print("Time: {d:.2}ms\n\n", .{@as(f64, @floatFromInt(end - start)) / 1_000_000.0});
+        const total = result.match_count;
+        const display_limit = if (opts.show_all) total else @min(opts.limit, total);
 
-        for (result.paths) |path| {
-            std.debug.print("{s}\n", .{path});
+        // Output matching paths
+        for (result.paths[0..display_limit]) |path| {
+            stdout.print("{s}\n", .{path}) catch {};
+        }
+
+        // Flush stdout before potentially writing to stderr
+        stdout_writer.flush();
+
+        // Show summary if results were truncated
+        if (!opts.show_all and total > opts.limit) {
+            stderr.print("\n... and {d} more ({d} total). Use -a to show all.\n", .{ total - opts.limit, total }) catch {};
+            stderr_writer.flush();
         }
     } else {
-        std.debug.print("Matches: 0\n", .{});
-        std.debug.print("Time: {d:.2}ms\n\n", .{@as(f64, @floatFromInt(end - start)) / 1_000_000.0});
-        std.debug.print("No matches found.\n", .{});
+        std.process.exit(1);
     }
 }

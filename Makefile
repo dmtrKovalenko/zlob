@@ -31,7 +31,7 @@ else
     LIBEXT = dll
 endif
 
-.PHONY: all build install uninstall test clean
+.PHONY: all build install uninstall test clean make-cli install-cli uninstall-cli
 
 all: build
 
@@ -80,16 +80,38 @@ clean:
 	rm -f test_c_api test_match_paths main
 	@echo "Clean complete!"
 
+# Build CLI executable
+cli:
+	@echo "Building simdglob CLI..."
+	$(ZIG) build -Doptimize=ReleaseFast
+	@echo "CLI built: zig-out/bin/simdglob"
+
+# Install CLI executable
+install-cli: make-cli
+	@echo "Installing simdglob CLI to $(PREFIX)/bin..."
+	install -d $(PREFIX)/bin
+	install -m 755 zig-out/bin/simdglob $(PREFIX)/bin/simdglob
+	@echo "Installation complete!"
+	@echo "  Executable: $(PREFIX)/bin/simdglob"
+
+# Uninstall CLI executable
+uninstall-cli:
+	@echo "Uninstalling simdglob CLI..."
+	rm -f $(PREFIX)/bin/simdglob
+	@echo "Uninstall complete!"
+
 # Help
 help:
-	@echo "zlob - faster and more corect glob library, 100% POSIX compatible"
+	@echo "zlob - faster and more correct glob library, 100% POSIX compatible"
 	@echo ""
 	@echo "Targets:"
-	@echo "  make          - Build the shared library"
-	@echo "  make install  - Install library and headers (may require sudo)"
-	@echo "  make test     - Run minimal C API tests"
-	@echo "  make clean    - Remove build artifacts"
-	@echo "  make help     - Show this help message"
+	@echo "  make              - Build the shared library"
+	@echo "  make install      - Install library and headers (may require sudo)"
+	@echo "  make test         - Run minimal C API tests"
+	@echo "  make make-cli     - Build the CLI executable"
+	@echo "  make install-cli  - Install CLI executable (may require sudo)"
+	@echo "  make clean        - Remove build artifacts"
+	@echo "  make help         - Show this help message"
 	@echo ""
 	@echo "Variables:"
 	@echo "  PREFIX        - Installation prefix (default: /usr/local)"
@@ -99,4 +121,5 @@ help:
 	@echo "  make"
 	@echo "  make test"
 	@echo "  sudo make install"
+	@echo "  make make-cli && sudo make install-cli"
 	@echo "  sudo make PREFIX=/usr install"

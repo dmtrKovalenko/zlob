@@ -3,6 +3,12 @@
 //! Parses .gitignore files and provides efficient path filtering.
 //! Supports the full gitignore pattern format including negation patterns.
 //!
+//! Performance optimizations:
+//! - Literal patterns (no wildcards) use O(1) hash lookup
+//! - Directory ignore decisions are cached
+//! - Early termination when no negation patterns can override
+//! - Patterns pre-categorized to minimize runtime checks
+//!
 //! Pattern format:
 //! - Blank lines are ignored
 //! - Lines starting with # are comments
@@ -22,7 +28,7 @@ const Allocator = std.mem.Allocator;
 const glob = @import("glob.zig");
 const path_matcher = @import("path_matcher.zig");
 
-/// A single gitignore pattern - text is a slice into the source content
+/// A single gitignore pattern with pre-computed metadata
 pub const Pattern = struct {
     /// The pattern text (slice into source)
     text: []const u8,
@@ -34,14 +40,45 @@ pub const Pattern = struct {
     anchored: bool,
     /// Pattern contains ** for recursive matching
     has_double_star: bool,
+    /// Pattern has no wildcards (can use literal matching)
+    is_literal: bool,
+    /// For suffix patterns like *.rs - the suffix without *
+    suffix: ?[]const u8,
+    /// Index in original pattern list (for negation ordering)
+    index: u16,
 };
 
-/// Gitignore pattern set - stores source content and patterns as slices
+/// String hash map for O(1) literal lookups
+const StringHashMap = std.StringHashMap(PatternMatch);
+
+const PatternMatch = struct {
+    negated: bool,
+    dir_only: bool,
+    index: u16,
+};
+
+/// Gitignore pattern set with optimized matching
 pub const GitIgnore = struct {
+    /// All patterns for full matching
     patterns: []Pattern,
+    /// Wildcard patterns only (excludes literals)
+    wildcard_patterns: []Pattern,
+    /// Literal directory patterns for O(1) lookup (e.g., "target", "node_modules")
+    literal_dirs: StringHashMap,
+    /// Literal file patterns for O(1) lookup
+    literal_files: StringHashMap,
+    /// Suffix patterns grouped by extension (e.g., ".rs" -> [pattern for *.rs])
+    suffix_patterns: std.StringHashMap([]Pattern),
+    /// Whether any negation pattern exists (enables early termination)
+    has_negations: bool,
+    /// Index of first negation pattern (for early termination)
+    first_negation_index: u16,
+    /// Allocator for cleanup
     allocator: Allocator,
     /// Original file content - patterns slice into this
     source: []const u8,
+    /// Cache for directory decisions: path -> should_skip
+    dir_cache: std.StringHashMap(bool),
 
     const Self = @This();
 
@@ -95,10 +132,57 @@ pub const GitIgnore = struct {
         return try parseOwned(allocator, content);
     }
 
+    /// Check if a pattern text contains any glob wildcards
+    fn hasWildcards(text: []const u8) bool {
+        for (text) |c| {
+            switch (c) {
+                '*', '?', '[', ']' => return true,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// Extract suffix from a simple *.ext pattern
+    fn extractSuffix(text: []const u8) ?[]const u8 {
+        // Must start with * and have no other wildcards
+        if (text.len < 2 or text[0] != '*') return null;
+        // Check it's not **
+        if (text.len >= 2 and text[1] == '*') return null;
+        const rest = text[1..];
+        // Rest must have no wildcards
+        if (hasWildcards(rest)) return null;
+        return rest;
+    }
+
     /// Parse gitignore content - takes ownership of the content slice
     fn parseOwned(allocator: Allocator, content: []const u8) !Self {
-        var patterns = std.array_list.AlignedManaged(Pattern, null).init(allocator);
-        defer patterns.deinit();
+        const PatternList = std.array_list.AlignedManaged(Pattern, null);
+
+        var patterns_list = PatternList.init(allocator);
+        defer patterns_list.deinit();
+
+        var wildcard_list = PatternList.init(allocator);
+        defer wildcard_list.deinit();
+
+        var literal_dirs = StringHashMap.init(allocator);
+        errdefer literal_dirs.deinit();
+
+        var literal_files = StringHashMap.init(allocator);
+        errdefer literal_files.deinit();
+
+        var suffix_map = std.StringHashMap(PatternList).init(allocator);
+        defer {
+            var iter = suffix_map.valueIterator();
+            while (iter.next()) |list| {
+                list.deinit();
+            }
+            suffix_map.deinit();
+        }
+
+        var has_negations = false;
+        var first_negation_index: u16 = std.math.maxInt(u16);
+        var index: u16 = 0;
 
         var line_iter = mem.splitScalar(u8, content, '\n');
         while (line_iter.next()) |raw_line| {
@@ -107,15 +191,66 @@ pub const GitIgnore = struct {
             else
                 raw_line;
 
-            if (parseLine(line)) |pattern| {
-                try patterns.append(pattern);
+            if (parseLine(line, index)) |pattern| {
+                try patterns_list.append(pattern);
+
+                if (pattern.negated) {
+                    has_negations = true;
+                    if (index < first_negation_index) {
+                        first_negation_index = index;
+                    }
+                }
+
+                // Categorize pattern for optimized lookup
+                if (pattern.is_literal and !pattern.anchored) {
+                    // Simple literal pattern - add to hash map
+                    const match = PatternMatch{
+                        .negated = pattern.negated,
+                        .dir_only = pattern.dir_only,
+                        .index = index,
+                    };
+                    if (pattern.dir_only) {
+                        try literal_dirs.put(pattern.text, match);
+                    } else {
+                        try literal_files.put(pattern.text, match);
+                    }
+                } else if (pattern.suffix) |suffix| {
+                    // Suffix pattern like *.rs
+                    const result = try suffix_map.getOrPut(suffix);
+                    if (!result.found_existing) {
+                        result.value_ptr.* = PatternList.init(allocator);
+                    }
+                    try result.value_ptr.append(pattern);
+                } else {
+                    // Wildcard pattern OR anchored literal pattern
+                    try wildcard_list.append(pattern);
+                }
+
+                index += 1;
             }
         }
 
+        // Convert suffix ArrayLists to slices
+        var suffix_patterns = std.StringHashMap([]Pattern).init(allocator);
+        errdefer suffix_patterns.deinit();
+
+        var suffix_iter = suffix_map.iterator();
+        while (suffix_iter.next()) |entry| {
+            const slice = try entry.value_ptr.toOwnedSlice();
+            try suffix_patterns.put(entry.key_ptr.*, slice);
+        }
+
         return Self{
-            .patterns = try patterns.toOwnedSlice(),
+            .patterns = try patterns_list.toOwnedSlice(),
+            .wildcard_patterns = try wildcard_list.toOwnedSlice(),
+            .literal_dirs = literal_dirs,
+            .literal_files = literal_files,
+            .suffix_patterns = suffix_patterns,
+            .has_negations = has_negations,
+            .first_negation_index = first_negation_index,
             .allocator = allocator,
             .source = content,
+            .dir_cache = std.StringHashMap(bool).init(allocator),
         };
     }
 
@@ -126,7 +261,7 @@ pub const GitIgnore = struct {
     }
 
     /// Parse a single line - returns pattern with text as slice into line
-    fn parseLine(line: []const u8) ?Pattern {
+    fn parseLine(line: []const u8, index: u16) ?Pattern {
         var text = line;
 
         if (text.len == 0 or text[0] == '#') {
@@ -168,25 +303,76 @@ pub const GitIgnore = struct {
             }
         }
 
+        const is_literal = !hasWildcards(text);
+        const suffix = if (!anchored) extractSuffix(text) else null;
+
         return Pattern{
             .text = text,
             .negated = negated,
             .dir_only = dir_only,
             .anchored = anchored,
             .has_double_star = mem.indexOf(u8, text, "**") != null,
+            .is_literal = is_literal,
+            .suffix = suffix,
+            .index = index,
         };
     }
 
-    /// Check if a path should be ignored
+    /// Check if a path should be ignored - optimized version
     pub fn isIgnored(self: *const Self, path: []const u8, is_dir: bool) bool {
-        var ignored = false;
-
         const normalized_path = if (mem.startsWith(u8, path, "./")) path[2..] else path;
+
+        // Get basename for lookups
+        const basename = if (mem.lastIndexOfScalar(u8, normalized_path, '/')) |pos|
+            normalized_path[pos + 1 ..]
+        else
+            normalized_path;
+
+        // Fast path: if no negations exist, we can use optimized lookups
+        if (!self.has_negations) {
+            // Check literal patterns (O(1) lookup)
+            if (is_dir) {
+                if (self.literal_dirs.get(basename)) |_| {
+                    return true;
+                }
+            }
+            if (self.literal_files.get(basename)) |match| {
+                if (!match.dir_only or is_dir) {
+                    return true;
+                }
+            }
+
+            // Check suffix patterns (e.g., *.rs)
+            if (mem.lastIndexOfScalar(u8, basename, '.')) |dot_pos| {
+                const suffix = basename[dot_pos..];
+                if (self.suffix_patterns.get(suffix)) |patterns| {
+                    for (patterns) |pattern| {
+                        if (pattern.dir_only and !is_dir) continue;
+                        if (mem.endsWith(u8, basename, pattern.suffix.?)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // Check wildcard patterns
+            for (self.wildcard_patterns) |pattern| {
+                if (pattern.dir_only and !is_dir) continue;
+                if (matchPattern(&pattern, normalized_path, basename)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // Slow path: has negations, must process all patterns in order
+        var ignored = false;
 
         for (self.patterns) |pattern| {
             if (pattern.dir_only and !is_dir) continue;
 
-            if (matchPattern(&pattern, normalized_path)) {
+            if (matchPattern(&pattern, normalized_path, basename)) {
                 ignored = !pattern.negated;
             }
         }
@@ -195,14 +381,36 @@ pub const GitIgnore = struct {
     }
 
     /// Check if a directory should be skipped entirely (not traversed)
-    pub fn shouldSkipDirectory(self: *const Self, dir_path: []const u8) bool {
+    pub fn shouldSkipDirectory(self: *Self, dir_path: []const u8) bool {
+        const normalized_path = if (mem.startsWith(u8, dir_path, "./")) dir_path[2..] else dir_path;
+
+        // Check cache first
+        if (self.dir_cache.get(normalized_path)) |cached| {
+            return cached;
+        }
+
+        const basename = if (mem.lastIndexOfScalar(u8, normalized_path, '/')) |pos|
+            normalized_path[pos + 1 ..]
+        else
+            normalized_path;
+
+        // Quick check: literal directory patterns
+        if (self.literal_dirs.get(basename)) |match| {
+            if (!match.negated) {
+                // Check if any negation could apply to children
+                if (!self.has_negations) {
+                    self.dir_cache.put(normalized_path, true) catch {};
+                    return true;
+                }
+            }
+        }
+
         var ignored = false;
         var explicitly_included = false;
 
-        const normalized_path = if (mem.startsWith(u8, dir_path, "./")) dir_path[2..] else dir_path;
-
+        // Check all patterns
         for (self.patterns) |pattern| {
-            if (matchPattern(&pattern, normalized_path)) {
+            if (matchPattern(&pattern, normalized_path, basename)) {
                 if (pattern.negated) {
                     explicitly_included = true;
                     ignored = false;
@@ -213,48 +421,73 @@ pub const GitIgnore = struct {
             }
         }
 
+        var result = false;
         if (ignored and !explicitly_included) {
+            // Check if any negation pattern could match children
+            var could_affect_children = false;
             for (self.patterns) |pattern| {
                 if (pattern.negated) {
-                    if (pattern.has_double_star) return false;
-                    if (mem.startsWith(u8, pattern.text, normalized_path)) return false;
+                    if (pattern.has_double_star) {
+                        could_affect_children = true;
+                        break;
+                    }
+                    if (mem.startsWith(u8, pattern.text, normalized_path)) {
+                        could_affect_children = true;
+                        break;
+                    }
                 }
             }
-            return true;
+            result = !could_affect_children;
         }
 
-        return false;
+        // Cache the result
+        self.dir_cache.put(normalized_path, result) catch {};
+        return result;
     }
 
-    fn matchPattern(pattern: *const Pattern, path: []const u8) bool {
+    fn matchPattern(pattern: *const Pattern, path: []const u8, basename: []const u8) bool {
         const text = pattern.text;
+
+        // Literal patterns should have been handled by hash lookup
+        if (pattern.is_literal and !pattern.anchored) {
+            return mem.eql(u8, text, basename);
+        }
 
         if (pattern.anchored) {
             return path_matcher.matchGlobSimple(text, path);
         }
 
+        // Try full path match
         if (path_matcher.matchGlobSimple(text, path)) return true;
 
-        // Try basename
-        if (mem.lastIndexOf(u8, path, "/")) |last_slash| {
-            if (path_matcher.matchGlobSimple(text, path[last_slash + 1 ..])) return true;
-        }
+        // Try basename match
+        if (path_matcher.matchGlobSimple(text, basename)) return true;
 
-        // For patterns without /, try each segment
-        if (mem.indexOf(u8, text, "/") == null) {
+        // For patterns without /, try each path segment
+        if (mem.indexOfScalar(u8, text, '/') == null) {
             var remaining = path;
-            while (mem.indexOf(u8, remaining, "/")) |slash_pos| {
+            while (mem.indexOfScalar(u8, remaining, '/')) |slash_pos| {
                 if (path_matcher.matchGlobSimple(text, remaining[0..slash_pos])) return true;
                 remaining = remaining[slash_pos + 1 ..];
             }
-            if (path_matcher.matchGlobSimple(text, remaining)) return true;
         }
 
         return false;
     }
 
     pub fn deinit(self: *Self) void {
+        // Free suffix pattern slices
+        var suffix_iter = self.suffix_patterns.valueIterator();
+        while (suffix_iter.next()) |slice| {
+            self.allocator.free(slice.*);
+        }
+        self.suffix_patterns.deinit();
+
+        self.literal_dirs.deinit();
+        self.literal_files.deinit();
+        self.dir_cache.deinit();
         self.allocator.free(self.patterns);
+        self.allocator.free(self.wildcard_patterns);
         self.allocator.free(self.source);
     }
 };
@@ -365,4 +598,35 @@ test "shouldSkipDirectory" {
 
     try std.testing.expect(gi.shouldSkipDirectory("node_modules"));
     try std.testing.expect(!gi.shouldSkipDirectory("build"));
+}
+
+test "literal pattern optimization" {
+    const allocator = std.testing.allocator;
+    var gi = try GitIgnore.parse(allocator,
+        \\target/
+        \\node_modules/
+        \\.git/
+    );
+    defer gi.deinit();
+
+    // These should use O(1) hash lookup
+    try std.testing.expect(gi.isIgnored("target", true));
+    try std.testing.expect(gi.isIgnored("node_modules", true));
+    try std.testing.expect(gi.isIgnored(".git", true));
+    try std.testing.expect(gi.isIgnored("foo/target", true));
+    try std.testing.expect(!gi.isIgnored("target", false)); // dir_only
+}
+
+test "suffix pattern optimization" {
+    const allocator = std.testing.allocator;
+    var gi = try GitIgnore.parse(allocator,
+        \\*.rs
+        \\*.log
+    );
+    defer gi.deinit();
+
+    try std.testing.expect(gi.isIgnored("main.rs", false));
+    try std.testing.expect(gi.isIgnored("src/lib.rs", false));
+    try std.testing.expect(gi.isIgnored("debug.log", false));
+    try std.testing.expect(!gi.isIgnored("main.txt", false));
 }
