@@ -1,27 +1,8 @@
-//! Gitignore pattern parser and matcher
+//! This is a very simple gitignoire parser using already existing code for wildcard matching
+//! it was easy to implement but it is not 100% optimized.
 //!
-//! Parses .gitignore files and provides efficient path filtering.
-//! Supports the full gitignore pattern format including negation patterns.
-//!
-//! Performance optimizations:
-//! - Literal patterns (no wildcards) use O(1) hash lookup
-//! - Directory ignore decisions are cached
-//! - Early termination when no negation patterns can override
-//! - Patterns pre-categorized to minimize runtime checks
-//!
-//! Pattern format:
-//! - Blank lines are ignored
-//! - Lines starting with # are comments
-//! - Leading ! negates the pattern (re-includes previously ignored files)
-//! - Trailing / means the pattern only matches directories
-//! - Patterns with / (except trailing) are anchored to the gitignore location
-//! - * matches anything except /
-//! - ? matches any single character except /
-//! - [...] matches one character in the range
-//! - ** matches zero or more directories
-//!
-//! Reference: https://git-scm.com/docs/gitignore
-
+//! There are a bunch of things other libs are doing to optimize ignoring like grouping, pattern combination,
+//! caching and so on, imporving the performance but this is a good start for what it worth.
 const std = @import("std");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
@@ -42,8 +23,15 @@ pub const Pattern = struct {
     has_double_star: bool,
     /// Pattern has no wildcards (can use literal matching)
     is_literal: bool,
-    /// For suffix patterns like *.rs - the suffix without *
+    /// Pattern text contains / (requires full path matching if not anchored)
+    has_slash: bool,
+    /// For simple suffix patterns like *.rs - the suffix without * (e.g., ".rs")
+    /// Used for both suffix_patterns hash map grouping and fast matching
     suffix: ?[]const u8,
+    /// Pre-computed suffix length for fast comparison
+    suffix_len: u8,
+    /// Pre-computed u32 of suffix for SIMD-style matching (suffixes <= 4 bytes)
+    suffix_u32: u32,
     /// Index in original pattern list (for negation ordering)
     index: u16,
 };
@@ -305,6 +293,17 @@ pub const GitIgnore = struct {
 
         const is_literal = !hasWildcards(text);
         const suffix = if (!anchored) extractSuffix(text) else null;
+        const has_slash = mem.indexOfScalar(u8, text, '/') != null;
+
+        // Pre-compute suffix values for fast matching
+        var suffix_len: u8 = 0;
+        var suffix_u32: u32 = 0;
+        if (suffix) |s| {
+            suffix_len = @intCast(s.len);
+            if (s.len <= 4) {
+                @memcpy(@as([*]u8, @ptrCast(&suffix_u32))[0..s.len], s);
+            }
+        }
 
         return Pattern{
             .text = text,
@@ -313,16 +312,19 @@ pub const GitIgnore = struct {
             .anchored = anchored,
             .has_double_star = mem.indexOf(u8, text, "**") != null,
             .is_literal = is_literal,
+            .has_slash = has_slash,
             .suffix = suffix,
+            .suffix_len = suffix_len,
+            .suffix_u32 = suffix_u32,
             .index = index,
         };
     }
 
     /// Check if a path should be ignored - optimized version
     pub fn isIgnored(self: *const Self, path: []const u8, is_dir: bool) bool {
-        const normalized_path = if (mem.startsWith(u8, path, "./")) path[2..] else path;
+        // Fast path: skip ./ prefix if present (common case: no prefix)
+        const normalized_path = if (path.len > 2 and path[0] == '.' and path[1] == '/') path[2..] else path;
 
-        // Get basename for lookups
         const basename = if (mem.lastIndexOfScalar(u8, normalized_path, '/')) |pos|
             normalized_path[pos + 1 ..]
         else
@@ -330,7 +332,6 @@ pub const GitIgnore = struct {
 
         // Fast path: if no negations exist, we can use optimized lookups
         if (!self.has_negations) {
-            // Check literal patterns (O(1) lookup)
             if (is_dir) {
                 if (self.literal_dirs.get(basename)) |_| {
                     return true;
@@ -342,23 +343,22 @@ pub const GitIgnore = struct {
                 }
             }
 
-            // Check suffix patterns (e.g., *.rs)
             if (mem.lastIndexOfScalar(u8, basename, '.')) |dot_pos| {
                 const suffix = basename[dot_pos..];
                 if (self.suffix_patterns.get(suffix)) |patterns| {
+                    // Any matching suffix pattern means ignored (check dir_only constraint)
                     for (patterns) |pattern| {
-                        if (pattern.dir_only and !is_dir) continue;
-                        if (mem.endsWith(u8, basename, pattern.suffix.?)) {
-                            return true;
-                        }
+                        if (!pattern.dir_only or is_dir) return true;
                     }
                 }
             }
 
-            // Check wildcard patterns
+            // Check wildcard patterns - these require actual pattern matching
+            // OPTIMIZATION: Most wildcard patterns in typical .gitignore files
+            // are basename-only (no /), so we only need to check against basename
             for (self.wildcard_patterns) |pattern| {
                 if (pattern.dir_only and !is_dir) continue;
-                if (matchPattern(&pattern, normalized_path, basename)) {
+                if (matchPatternFast(&pattern, normalized_path, basename)) {
                     return true;
                 }
             }
@@ -368,23 +368,73 @@ pub const GitIgnore = struct {
 
         // Slow path: has negations, must process all patterns in order
         var ignored = false;
-
         for (self.patterns) |pattern| {
             if (pattern.dir_only and !is_dir) continue;
 
-            if (matchPattern(&pattern, normalized_path, basename)) {
+            if (matchPatternFast(&pattern, normalized_path, basename)) {
                 ignored = !pattern.negated;
             }
         }
 
         return ignored;
     }
+    inline fn matchPatternFast(pattern: *const Pattern, path: []const u8, basename: []const u8) bool {
+        const text = pattern.text;
+
+        // Anchored patterns match against full path only
+        if (pattern.anchored) {
+            return path_matcher.matchGlobSimple(text, path);
+        }
+
+        // Non-anchored patterns without / match against basename only
+        if (!pattern.has_slash) {
+            // Fast path for simple suffix patterns (*.o, *.rs)
+            // Use SIMD-style matching with pre-computed u32
+            if (pattern.suffix_len > 0) {
+                if (basename.len < pattern.suffix_len) return false;
+
+                const suffix_len = pattern.suffix_len;
+                return switch (suffix_len) {
+                    1 => basename[basename.len - 1] == @as(u8, @truncate(pattern.suffix_u32)),
+                    2 => blk: {
+                        const tail_ptr = basename.ptr + basename.len - 2;
+                        const tail: u16 = @as(*align(1) const u16, @ptrCast(tail_ptr)).*;
+                        break :blk tail == @as(u16, @truncate(pattern.suffix_u32));
+                    },
+                    3 => blk: {
+                        const tail_ptr = basename.ptr + basename.len - 3;
+                        const tail_u16: u16 = @as(*align(1) const u16, @ptrCast(tail_ptr)).*;
+                        const suffix_u16: u16 = @truncate(pattern.suffix_u32);
+                        break :blk tail_u16 == suffix_u16 and tail_ptr[2] == pattern.suffix.?[2];
+                    },
+                    4 => blk: {
+                        const tail_ptr = basename.ptr + basename.len - 4;
+                        const tail: u32 = @as(*align(1) const u32, @ptrCast(tail_ptr)).*;
+                        break :blk tail == pattern.suffix_u32;
+                    },
+                    else => mem.endsWith(u8, basename, pattern.suffix.?),
+                };
+            }
+            // Literal patterns
+            if (pattern.is_literal) {
+                return mem.eql(u8, text, basename);
+            }
+            // Complex wildcard patterns (*.o.*, .*,  etc)
+            return glob.fnmatchFull(text, basename);
+        }
+
+        // Non-anchored patterns with / - match full path
+        return path_matcher.matchGlobSimple(text, path);
+    }
 
     /// Check if a directory should be skipped entirely (not traversed)
+    /// This is called for every directory during traversal, so it must be fast.
+    /// We only skip directories that are DEFINITELY ignored with no possibility
+    /// of negation patterns affecting their children.
     pub fn shouldSkipDirectory(self: *Self, dir_path: []const u8) bool {
-        const normalized_path = if (mem.startsWith(u8, dir_path, "./")) dir_path[2..] else dir_path;
+        const normalized_path = if (dir_path.len > 2 and dir_path[0] == '.' and dir_path[1] == '/') dir_path[2..] else dir_path;
 
-        // Check cache first
+        // Check cache first - this is critical for performance
         if (self.dir_cache.get(normalized_path)) |cached| {
             return cached;
         }
@@ -394,84 +444,53 @@ pub const GitIgnore = struct {
         else
             normalized_path;
 
-        // Quick check: literal directory patterns
+        // FAST PATH: Check literal directory patterns (O(1) lookup)
+        // Common patterns like "node_modules/", "target/", ".git/"
         if (self.literal_dirs.get(basename)) |match| {
             if (!match.negated) {
-                // Check if any negation could apply to children
+                // Check if any negation could affect this directory or its children
                 if (!self.has_negations) {
+                    // No negations at all - safe to skip
+                    self.dir_cache.put(normalized_path, true) catch {};
+                    return true;
+                }
+
+                // Has negations - check if any could affect this directory
+                // A negation can affect this directory if:
+                // 1. It directly re-includes this directory path
+                // 2. It re-includes something under this directory (starts with our path + /)
+                var dominated_by_negation = false;
+                for (self.patterns) |pattern| {
+                    if (!pattern.negated) continue;
+
+                    // Check if negation could affect this dir or its children
+                    if (pattern.has_double_star) {
+                        // ** negation could match anywhere - must be conservative
+                        dominated_by_negation = true;
+                        break;
+                    }
+
+                    // Check if negation pattern matches or is under our path
+                    if (mem.startsWith(u8, pattern.text, normalized_path)) {
+                        dominated_by_negation = true;
+                        break;
+                    }
+                    if (mem.startsWith(u8, pattern.text, basename)) {
+                        dominated_by_negation = true;
+                        break;
+                    }
+                }
+
+                if (!dominated_by_negation) {
                     self.dir_cache.put(normalized_path, true) catch {};
                     return true;
                 }
             }
         }
 
-        var ignored = false;
-        var explicitly_included = false;
-
-        // Check all patterns
-        for (self.patterns) |pattern| {
-            if (matchPattern(&pattern, normalized_path, basename)) {
-                if (pattern.negated) {
-                    explicitly_included = true;
-                    ignored = false;
-                } else {
-                    ignored = true;
-                    explicitly_included = false;
-                }
-            }
-        }
-
-        var result = false;
-        if (ignored and !explicitly_included) {
-            // Check if any negation pattern could match children
-            var could_affect_children = false;
-            for (self.patterns) |pattern| {
-                if (pattern.negated) {
-                    if (pattern.has_double_star) {
-                        could_affect_children = true;
-                        break;
-                    }
-                    if (mem.startsWith(u8, pattern.text, normalized_path)) {
-                        could_affect_children = true;
-                        break;
-                    }
-                }
-            }
-            result = !could_affect_children;
-        }
-
-        // Cache the result
-        self.dir_cache.put(normalized_path, result) catch {};
-        return result;
-    }
-
-    fn matchPattern(pattern: *const Pattern, path: []const u8, basename: []const u8) bool {
-        const text = pattern.text;
-
-        // Literal patterns should have been handled by hash lookup
-        if (pattern.is_literal and !pattern.anchored) {
-            return mem.eql(u8, text, basename);
-        }
-
-        if (pattern.anchored) {
-            return path_matcher.matchGlobSimple(text, path);
-        }
-
-        // Try full path match
-        if (path_matcher.matchGlobSimple(text, path)) return true;
-
-        // Try basename match
-        if (path_matcher.matchGlobSimple(text, basename)) return true;
-
-        // For patterns without /, try each path segment
-        if (mem.indexOfScalar(u8, text, '/') == null) {
-            var remaining = path;
-            while (mem.indexOfScalar(u8, remaining, '/')) |slash_pos| {
-                if (path_matcher.matchGlobSimple(text, remaining[0..slash_pos])) return true;
-                remaining = remaining[slash_pos + 1 ..];
-            }
-        }
-
+        // For non-literal patterns or when negations might interfere,
+        // we need to be conservative and NOT skip
+        self.dir_cache.put(normalized_path, false) catch {};
         return false;
     }
 
