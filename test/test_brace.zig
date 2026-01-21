@@ -1,8 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
-const simdglob = @import("simdglob");
+const zlob = @import("zlob");
 
-test "GLOB_BRACE - basic brace expansion" {
+test "ZLOB_BRACE - basic brace expansion" {
     const files = [_][]const u8{
         "a.txt",
         "b.txt",
@@ -10,7 +10,7 @@ test "GLOB_BRACE - basic brace expansion" {
         "d.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "{a,b,c}.txt", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "{a,b,c}.txt", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
@@ -29,7 +29,7 @@ test "GLOB_BRACE - basic brace expansion" {
     try testing.expect(found_c);
 }
 
-test "GLOB_BRACE - brace with wildcards" {
+test "ZLOB_BRACE - brace with wildcards" {
     const files = [_][]const u8{
         "foo.txt",
         "foo.log",
@@ -38,7 +38,7 @@ test "GLOB_BRACE - brace with wildcards" {
         "baz.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "{foo,bar}.*", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "{foo,bar}.*", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 4), result.match_count);
@@ -60,7 +60,7 @@ test "GLOB_BRACE - brace with wildcards" {
     try testing.expect(found_bar_log);
 }
 
-test "GLOB_BRACE - wildcard with brace extension" {
+test "ZLOB_BRACE - wildcard with brace extension" {
     const files = [_][]const u8{
         "test.txt",
         "test.log",
@@ -71,13 +71,13 @@ test "GLOB_BRACE - wildcard with brace extension" {
         "readme.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "test.{txt,log,md}", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "test.{txt,log,md}", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
 }
 
-test "GLOB_BRACE - recursive" {
+test "ZLOB_BRACE - recursive" {
     const files = [_][]const u8{
         "1/2/3/test.txt",
         "1/test.log",
@@ -89,13 +89,13 @@ test "GLOB_BRACE - recursive" {
         "a/b/c/d/e/readme.md",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "**/*.{md,log}", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "**/*.{md,log}", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 6), result.match_count);
 }
 
-test "GLOB_BRACE - wildcard extension" {
+test "ZLOB_BRACE - wildcard extension" {
     const files = [_][]const u8{
         "test.txt",
         "test.log",
@@ -106,13 +106,13 @@ test "GLOB_BRACE - wildcard extension" {
         "readme.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "*.{txt,log,md}", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "*.{txt,log,md}", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 6), result.match_count);
 }
 
-test "GLOB_BRACE - two alternatives" {
+test "ZLOB_BRACE - two alternatives" {
     const files = [_][]const u8{
         "main.c",
         "test.c",
@@ -120,7 +120,7 @@ test "GLOB_BRACE - two alternatives" {
         "test.h",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "main.{c,h}", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "main.{c,h}", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -135,20 +135,20 @@ test "GLOB_BRACE - two alternatives" {
     try testing.expect(found_main_h);
 }
 
-test "GLOB_BRACE - single alternative" {
+test "ZLOB_BRACE - single alternative" {
     const files = [_][]const u8{
         "test.txt",
         "test.log",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "test.{txt}", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "test.{txt}", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);
     try testing.expect(std.mem.eql(u8, result.paths[0], "test.txt"));
 }
 
-test "GLOB_BRACE - multiple brace groups" {
+test "ZLOB_BRACE - multiple brace groups" {
     const files = [_][]const u8{
         "a/x.txt",
         "a/y.txt",
@@ -157,7 +157,7 @@ test "GLOB_BRACE - multiple brace groups" {
         "c/x.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "{a,b}/{x,y}.txt", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "{a,b}/{x,y}.txt", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 4), result.match_count);
@@ -178,22 +178,22 @@ test "GLOB_BRACE - multiple brace groups" {
     try testing.expect(found_by);
 }
 
-test "GLOB_BRACE - without flag treats as literal" {
+test "ZLOB_BRACE - without flag treats as literal" {
     const files = [_][]const u8{
         "a.txt",
         "b.txt",
         "{a,b}.txt",
     };
 
-    // Without GLOB_BRACE flag, braces should be treated as literal characters
-    var result = try simdglob.matchPaths(testing.allocator, "{a,b}.txt", &files, 0);
+    // Without ZLOB_BRACE flag, braces should be treated as literal characters
+    var result = try zlob.matchPaths(testing.allocator, "{a,b}.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);
     try testing.expect(std.mem.eql(u8, result.paths[0], "{a,b}.txt"));
 }
 
-test "GLOB_BRACE - prefix and suffix" {
+test "ZLOB_BRACE - prefix and suffix" {
     const files = [_][]const u8{
         "prefix_a_suffix.txt",
         "prefix_b_suffix.txt",
@@ -201,13 +201,13 @@ test "GLOB_BRACE - prefix and suffix" {
         "prefix_d_suffix.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "prefix_{a,b,c}_suffix.txt", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "prefix_{a,b,c}_suffix.txt", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
 }
 
-test "GLOB_BRACE - with paths" {
+test "ZLOB_BRACE - with paths" {
     const files = [_][]const u8{
         "src/main.zig",
         "src/test.zig",
@@ -216,13 +216,13 @@ test "GLOB_BRACE - with paths" {
         "docs/readme.md",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "{src,lib}/*.zig", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "{src,lib}/*.zig", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 4), result.match_count);
 }
 
-test "GLOB_BRACE - numeric alternatives" {
+test "ZLOB_BRACE - numeric alternatives" {
     const files = [_][]const u8{
         "file1.txt",
         "file2.txt",
@@ -230,13 +230,13 @@ test "GLOB_BRACE - numeric alternatives" {
         "file4.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "file{1,2,3}.txt", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "file{1,2,3}.txt", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
 }
 
-test "GLOB_BRACE - empty alternatives" {
+test "ZLOB_BRACE - empty alternatives" {
     const files = [_][]const u8{
         "test.txt",
         "test_suffix.txt",
@@ -244,7 +244,7 @@ test "GLOB_BRACE - empty alternatives" {
     };
 
     // {,_suffix} should match both empty string and "_suffix"
-    var result = try simdglob.matchPaths(testing.allocator, "test{,_suffix}.txt", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "test{,_suffix}.txt", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -259,7 +259,7 @@ test "GLOB_BRACE - empty alternatives" {
     try testing.expect(found_test_suffix);
 }
 
-test "GLOB_BRACE - complex real-world pattern" {
+test "ZLOB_BRACE - complex real-world pattern" {
     const files = [_][]const u8{
         "src/main.c",
         "src/main.h",
@@ -271,25 +271,25 @@ test "GLOB_BRACE - complex real-world pattern" {
         "docs/readme.md",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "{src,lib}/*.{c,h}", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "{src,lib}/*.{c,h}", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 6), result.match_count);
 }
 
-test "GLOB_BRACE - no matches" {
+test "ZLOB_BRACE - no matches" {
     const files = [_][]const u8{
         "a.txt",
         "b.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "{x,y,z}.txt", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "{x,y,z}.txt", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 0), result.match_count);
 }
 
-test "GLOB_BRACE - combined with character class" {
+test "ZLOB_BRACE - combined with character class" {
     const files = [_][]const u8{
         "a1.txt",
         "a2.txt",
@@ -298,24 +298,24 @@ test "GLOB_BRACE - combined with character class" {
         "c1.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "{a,b}[12].txt", &files, simdglob.GLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "{a,b}[12].txt", &files, zlob.ZLOB_BRACE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 4), result.match_count);
 }
 
-test "GLOB_BRACE - long alternatives" {
+test "ZLOB_BRACE - long alternatives" {
     const files = [_][]const u8{
         "very_long_alternative_name_one.txt",
         "very_long_alternative_name_two.txt",
         "very_long_alternative_name_three.txt",
     };
 
-    var result = try simdglob.matchPaths(
+    var result = try zlob.matchPaths(
         testing.allocator,
         "very_long_alternative_name_{one,two,three}.txt",
         &files,
-        simdglob.GLOB_BRACE,
+        zlob.ZLOB_BRACE,
     );
     defer result.deinit();
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const simdglob = @import("simdglob");
+const zlob = @import("zlob");
 const posix = std.posix;
 const fs = std.fs;
 const Io = std.Io;
@@ -11,10 +11,10 @@ const Options = struct {
     path: ?[]const u8 = null,
     show_all: bool = false,
     mark_dirs: bool = false,
-    no_sort: bool = false,
+    sorted: bool = false,
     no_escape: bool = false,
-    brace: bool = false,
-    gitignore: bool = false,
+    no_brace: bool = false,
+    no_gitignore: bool = false,
     hidden: bool = false,
     dirs_only: bool = false,
     show_help: bool = false,
@@ -40,7 +40,7 @@ const BufferedWriter = struct {
 };
 
 fn printVersion(w: *Io.Writer) void {
-    w.print("simdglob {s}\n", .{version}) catch {};
+    w.print("zlob {s}\n", .{version}) catch {};
 }
 
 fn printHelp(w: *Io.Writer, program_name: []const u8) void {
@@ -57,13 +57,13 @@ fn printHelp(w: *Io.Writer, program_name: []const u8) void {
         \\OPTIONS:
         \\    -a, --all            Show all results (default: first 100)
         \\    -n, --limit <NUM>    Limit results to NUM entries (default: 100)
-        \\    -g, --gitignore      Respect .gitignore rules
         \\    -H, --hidden         Include hidden files (match files starting with '.')
         \\    -d, --dirs-only      Only match directories
         \\    -m, --mark           Append '/' to directory names
-        \\    -b, --brace          Enable brace expansion (e.g., '*.{{c,h}}')
         \\    -E, --no-escape      Treat backslash as literal character
-        \\    -U, --unsorted       Don't sort results
+        \\    -s, --sorted         Sort results alphabetically (default: unsorted)
+        \\    -B, --no-brace       Disable brace expansion (default: enabled)
+        \\    -G, --no-gitignore   Don't respect .gitignore rules (default: enabled)
         \\    -h, --help           Print help information
         \\    -V, --version        Print version information
         \\
@@ -74,15 +74,15 @@ fn printHelp(w: *Io.Writer, program_name: []const u8) void {
         \\    [abc]        Match any character in the set
         \\    [a-z]        Match any character in the range
         \\    [!abc]       Match any character NOT in the set
-        \\    {{a,b,c}}      Match any of the comma-separated patterns (requires -b)
+        \\    {{a,b,c}}      Match any of the comma-separated patterns
         \\
         \\EXAMPLES:
         \\    {s} '**/*.zig'              Find all .zig files recursively
         \\    {s} '*.txt' /path/to/dir    Find .txt files in specified directory
-        \\    {s} -g '**/*.ts'            Find .ts files, respecting .gitignore
+        \\    {s} -G '**/*.ts'            Find .ts files, ignoring .gitignore
         \\    {s} -a '**/*'               List all files (no limit)
         \\    {s} -n 50 '**/*.c'          Show first 50 .c files
-        \\    {s} -b 'src/*.{{c,h}}'       Find .c and .h files in src/
+        \\    {s} 'src/*.{{c,h}}'           Find .c and .h files in src/
         \\
     , .{ program_name, program_name, program_name, program_name, program_name, program_name, program_name, program_name }) catch {};
 }
@@ -92,7 +92,7 @@ fn parseArgs(allocator: std.mem.Allocator, stderr: *Io.Writer) !Options {
     defer args.deinit();
 
     var opts = Options{};
-    const program_name = args.next() orelse "simdglob";
+    const program_name = args.next() orelse "zlob";
     _ = program_name;
 
     while (args.next()) |arg| {
@@ -112,14 +112,14 @@ fn parseArgs(allocator: std.mem.Allocator, stderr: *Io.Writer) !Options {
                 };
             } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--mark")) {
                 opts.mark_dirs = true;
-            } else if (std.mem.eql(u8, arg, "-U") or std.mem.eql(u8, arg, "--unsorted")) {
-                opts.no_sort = true;
+            } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--sorted")) {
+                opts.sorted = true;
             } else if (std.mem.eql(u8, arg, "-E") or std.mem.eql(u8, arg, "--no-escape")) {
                 opts.no_escape = true;
-            } else if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--brace")) {
-                opts.brace = true;
-            } else if (std.mem.eql(u8, arg, "-g") or std.mem.eql(u8, arg, "--gitignore")) {
-                opts.gitignore = true;
+            } else if (std.mem.eql(u8, arg, "-B") or std.mem.eql(u8, arg, "--no-brace")) {
+                opts.no_brace = true;
+            } else if (std.mem.eql(u8, arg, "-G") or std.mem.eql(u8, arg, "--no-gitignore")) {
+                opts.no_gitignore = true;
             } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--hidden")) {
                 opts.hidden = true;
             } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dirs-only")) {
@@ -180,18 +180,17 @@ pub fn main() !void {
     }
 
     if (opts.show_help) {
-        printHelp(stdout, "simdglob");
+        printHelp(stdout, "zlob");
         stdout_writer.flush();
         return;
     }
 
     const pattern = opts.pattern orelse {
-        printHelp(stderr, "simdglob");
+        printHelp(stderr, "zlob");
         stderr_writer.flush();
         std.process.exit(1);
     };
 
-    // Build the full pattern with optional path prefix
     var full_pattern: []const u8 = undefined;
     if (opts.path) |path| {
         // Combine path and pattern
@@ -201,17 +200,18 @@ pub fn main() !void {
         full_pattern = pattern;
     }
 
-    // Build flags
-    var flags: u32 = simdglob.GLOB_NOSORT;
-    if (opts.mark_dirs) flags |= simdglob.GLOB_MARK;
-    if (opts.no_escape) flags |= simdglob.GLOB_NOESCAPE;
-    if (opts.brace) flags |= simdglob.GLOB_BRACE;
-    if (opts.gitignore) flags |= simdglob.GLOB_GITIGNORE;
-    if (opts.hidden) flags |= simdglob.GLOB_PERIOD;
-    if (opts.dirs_only) flags |= simdglob.GLOB_ONLYDIR;
+    // reasonable defaults
+    var flags: u32 = zlob.ZLOB_NOSORT | zlob.ZLOB_BRACE | zlob.ZLOB_GITIGNORE;
 
-    // Execute glob
-    var match_result = simdglob.match(allocator, full_pattern, flags) catch |err| {
+    if (opts.sorted) flags &= ~@as(u32, zlob.ZLOB_NOSORT);
+    if (opts.no_brace) flags &= ~@as(u32, zlob.ZLOB_BRACE);
+    if (opts.no_gitignore) flags &= ~@as(u32, zlob.ZLOB_GITIGNORE);
+    if (opts.mark_dirs) flags |= zlob.ZLOB_MARK;
+    if (opts.no_escape) flags |= zlob.ZLOB_NOESCAPE;
+    if (opts.hidden) flags |= zlob.ZLOB_PERIOD;
+    if (opts.dirs_only) flags |= zlob.ZLOB_ONLYDIR;
+
+    var match_result = zlob.match(allocator, full_pattern, flags) catch |err| {
         stderr.print("error: glob failed: {}\n", .{err}) catch {};
         stderr_writer.flush();
         std.process.exit(1);
@@ -223,15 +223,12 @@ pub fn main() !void {
         const total = result.match_count;
         const display_limit = if (opts.show_all) total else @min(opts.limit, total);
 
-        // Output matching paths
         for (result.paths[0..display_limit]) |path| {
             stdout.print("{s}\n", .{path}) catch {};
         }
 
-        // Flush stdout before potentially writing to stderr
         stdout_writer.flush();
 
-        // Show summary if results were truncated
         if (!opts.show_all and total > opts.limit) {
             stderr.print("\n... and {d} more ({d} total). Use -a to show all.\n", .{ total - opts.limit, total }) catch {};
             stderr_writer.flush();

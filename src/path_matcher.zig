@@ -14,11 +14,11 @@ const fnmatchWithContext = glob.fnmatchWithContext;
 
 // Re-export types and flags
 pub const GlobResults = glob.GlobResults;
-pub const GLOB_NOSORT = glob.GLOB_NOSORT;
-pub const GLOB_PERIOD = glob.GLOB_PERIOD;
-pub const GLOB_NOCHECK = glob.GLOB_NOCHECK;
-pub const GLOB_NOESCAPE = glob.GLOB_NOESCAPE;
-pub const GLOB_BRACE = glob.GLOB_BRACE;
+pub const ZLOB_NOSORT = glob.ZLOB_NOSORT;
+pub const ZLOB_PERIOD = glob.ZLOB_PERIOD;
+pub const ZLOB_NOCHECK = glob.ZLOB_NOCHECK;
+pub const ZLOB_NOESCAPE = glob.ZLOB_NOESCAPE;
+pub const ZLOB_BRACE = glob.ZLOB_BRACE;
 
 const PatternSegments = struct {
     segments: [][]const u8,
@@ -118,7 +118,7 @@ fn splitPathComponentsFast(path: []const u8, buffer: [][]const u8) [][]const u8 
 
 /// Simple glob pattern matching with ** support - no allocation required.
 /// This is a lightweight alternative to matchSinglePath for cases where
-/// you don't need GLOB_PERIOD handling or pre-computed pattern contexts.
+/// you don't need ZLOB_PERIOD handling or pre-computed pattern contexts.
 ///
 /// Supports:
 /// - `*` matches any characters except `/`
@@ -146,7 +146,7 @@ pub fn matchGlobSimple(pattern: []const u8, path: []const u8) bool {
     return matchSegmentsSimple(pat_segments, path_segments, 0, 0);
 }
 
-/// Core recursive segment matching for ** patterns (no allocation, no GLOB_PERIOD)
+/// Core recursive segment matching for ** patterns (no allocation, no ZLOB_PERIOD)
 fn matchSegmentsSimple(
     pattern_segments: []const []const u8,
     path_segments: []const []const u8,
@@ -330,7 +330,7 @@ fn shouldSkipHidden(path_component: []const u8, pattern: []const u8, flags: u32)
         return true;
     }
 
-    if (flags & GLOB_PERIOD != 0) {
+    if (flags & ZLOB_PERIOD != 0) {
         return false;
     }
 
@@ -447,10 +447,10 @@ fn matchSinglePath(
 /// - `src/**/test_*.zig` - All test files under src/
 ///
 /// Supported flags:
-/// - GLOB_NOSORT: Don't sort results (return in input order)
-/// - GLOB_NOCHECK: Return pattern itself if no matches
-/// - GLOB_PERIOD: Allow wildcards to match files starting with '.'
-/// - GLOB_NOESCAPE: Treat backslashes as literal (not escape chars)
+/// - ZLOB_NOSORT: Don't sort results (return in input order)
+/// - ZLOB_NOCHECK: Return pattern itself if no matches
+/// - ZLOB_PERIOD: Allow wildcards to match files starting with '.'
+/// - ZLOB_NOESCAPE: Treat backslashes as literal (not escape chars)
 ///
 /// Requirements:
 /// - Input paths MUST be normalized (no consecutive slashes like //)
@@ -470,8 +470,8 @@ pub fn matchPaths(
     paths: []const []const u8,
     flags: u32,
 ) !GlobResults {
-    // Handle GLOB_BRACE expansion first
-    if (flags & GLOB_BRACE != 0) {
+    // Handle ZLOB_BRACE expansion first
+    if (flags & ZLOB_BRACE != 0) {
         var expanded_patterns = std.array_list.AlignedManaged([]const u8, null).init(allocator);
         defer {
             for (expanded_patterns.items) |p| {
@@ -487,8 +487,8 @@ pub fn matchPaths(
         defer all_matches.deinit();
 
         for (expanded_patterns.items) |exp_pattern| {
-            // Recursively call matchPaths without GLOB_BRACE flag to avoid infinite recursion
-            var result = try matchPaths(allocator, exp_pattern, paths, flags & ~@as(u32, GLOB_BRACE));
+            // Recursively call matchPaths without ZLOB_BRACE flag to avoid infinite recursion
+            var result = try matchPaths(allocator, exp_pattern, paths, flags & ~@as(u32, ZLOB_BRACE));
             defer result.deinit();
 
             // Add matches to our set for deduplication
@@ -499,7 +499,7 @@ pub fn matchPaths(
 
         // Convert set back to array
         if (all_matches.count() == 0) {
-            if (flags & GLOB_NOCHECK != 0) {
+            if (flags & ZLOB_NOCHECK != 0) {
                 var result_paths = try allocator.alloc([]const u8, 1);
                 result_paths[0] = try allocator.dupe(u8, pattern);
                 return GlobResults{
@@ -527,7 +527,7 @@ pub fn matchPaths(
         }
 
         // Sort if needed
-        if (flags & GLOB_NOSORT == 0) {
+        if (flags & ZLOB_NOSORT == 0) {
             mem.sort([]const u8, result_paths, {}, struct {
                 fn lessThan(_: void, a: []const u8, b: []const u8) bool {
                     return mem.order(u8, a, b) == .lt;
@@ -544,7 +544,7 @@ pub fn matchPaths(
     }
 
     if (paths.len == 0) {
-        if (flags & GLOB_NOCHECK != 0) {
+        if (flags & ZLOB_NOCHECK != 0) {
             var result_paths = try allocator.alloc([]const u8, 1);
             result_paths[0] = try allocator.dupe(u8, pattern);
             return GlobResults{
@@ -598,7 +598,7 @@ pub fn matchPaths(
             }
         }
 
-        if (matches.items.len == 0 and flags & GLOB_NOCHECK != 0) {
+        if (matches.items.len == 0 and flags & ZLOB_NOCHECK != 0) {
             var result_paths = try allocator.alloc([]const u8, 1);
             result_paths[0] = try allocator.dupe(u8, pattern);
             return GlobResults{
@@ -683,7 +683,7 @@ pub fn matchPaths(
         }
     }
 
-    if (matches.items.len == 0 and flags & GLOB_NOCHECK != 0) {
+    if (matches.items.len == 0 and flags & ZLOB_NOCHECK != 0) {
         var result_paths = try allocator.alloc([]const u8, 1);
         result_paths[0] = try allocator.dupe(u8, pattern);
         return GlobResults{
@@ -706,7 +706,7 @@ pub fn matchPaths(
 
     const result_paths = try matches.toOwnedSlice();
 
-    if (flags & GLOB_NOSORT == 0) {
+    if (flags & ZLOB_NOSORT == 0) {
         mem.sort([]const u8, result_paths, {}, struct {
             fn lessThan(_: void, a: []const u8, b: []const u8) bool {
                 return mem.order(u8, a, b) == .lt;

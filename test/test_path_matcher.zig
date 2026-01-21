@@ -1,12 +1,12 @@
 const std = @import("std");
 const testing = std.testing;
-const simdglob = @import("simdglob");
+const zlob = @import("zlob");
 
 // Create alias for easier access
-const matchPaths = simdglob.matchPaths;
-const GLOB_NOSORT = simdglob.GLOB_NOSORT;
-const GLOB_NOCHECK = simdglob.GLOB_NOCHECK;
-const GLOB_PERIOD = simdglob.GLOB_PERIOD;
+const matchPaths = zlob.matchPaths;
+const ZLOB_NOSORT = zlob.ZLOB_NOSORT;
+const ZLOB_NOCHECK = zlob.ZLOB_NOCHECK;
+const ZLOB_PERIOD = zlob.ZLOB_PERIOD;
 
 // Test basic ** patterns
 
@@ -114,14 +114,14 @@ test "matchPaths - ** with character class" {
 
 // Test flags
 
-test "matchPaths - GLOB_NOSORT flag" {
+test "matchPaths - ZLOB_NOSORT flag" {
     const paths = [_][]const u8{
         "zebra.txt",
         "alpha.txt",
         "beta.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "*.txt", &paths, GLOB_NOSORT);
+    var result = try matchPaths(testing.allocator, "*.txt", &paths, ZLOB_NOSORT);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
@@ -131,29 +131,29 @@ test "matchPaths - GLOB_NOSORT flag" {
     try testing.expectEqualStrings("beta.txt", result.paths[2]);
 }
 
-test "matchPaths - GLOB_NOCHECK flag" {
+test "matchPaths - ZLOB_NOCHECK flag" {
     const paths = [_][]const u8{"foo.txt"};
 
-    var result = try matchPaths(testing.allocator, "*.zig", &paths, GLOB_NOCHECK);
+    var result = try matchPaths(testing.allocator, "*.zig", &paths, ZLOB_NOCHECK);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);
     try testing.expectEqualStrings("*.zig", result.paths[0]);
 }
 
-test "matchPaths - GLOB_PERIOD allows hidden files" {
+test "matchPaths - ZLOB_PERIOD allows hidden files" {
     const paths = [_][]const u8{
         ".hidden/file.txt",
         "visible/file.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "**/file.txt", &paths, GLOB_PERIOD);
+    var result = try matchPaths(testing.allocator, "**/file.txt", &paths, ZLOB_PERIOD);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
 }
 
-test "matchPaths - hidden files blocked without GLOB_PERIOD" {
+test "matchPaths - hidden files blocked without ZLOB_PERIOD" {
     const paths = [_][]const u8{
         ".hidden/file.txt",
         "visible/file.txt",
@@ -190,10 +190,10 @@ test "matchPaths - empty input array" {
     try testing.expectEqual(@as(usize, 0), result.match_count);
 }
 
-test "matchPaths - empty input array with GLOB_NOCHECK" {
+test "matchPaths - empty input array with ZLOB_NOCHECK" {
     const paths = [_][]const u8{};
 
-    var result = try matchPaths(testing.allocator, "*.txt", &paths, GLOB_NOCHECK);
+    var result = try matchPaths(testing.allocator, "*.txt", &paths, ZLOB_NOCHECK);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);
@@ -431,10 +431,10 @@ test "matchPaths - user example 3: **/*.txt" {
 }
 
 // ============================================================================
-// GLOB_PERIOD with matchPaths - Test recursive patterns
+// ZLOB_PERIOD with matchPaths - Test recursive patterns
 // ============================================================================
 
-test "matchPaths - GLOB_PERIOD should NOT match hidden files by default" {
+test "matchPaths - ZLOB_PERIOD should NOT match hidden files by default" {
     const paths = [_][]const u8{
         "dir1/file1.txt",
         "dir1/.hidden.txt",
@@ -468,7 +468,7 @@ test "matchPaths - GLOB_PERIOD should NOT match hidden files by default" {
     try testing.expectEqual(@as(usize, 2), result.match_count); // 2 non-hidden .txt files
 }
 
-test "matchPaths - GLOB_PERIOD matches hidden files with flag" {
+test "matchPaths - ZLOB_PERIOD matches hidden files with flag" {
     const paths = [_][]const u8{
         "dir1/file1.txt",
         "dir1/.hidden.txt",
@@ -477,7 +477,7 @@ test "matchPaths - GLOB_PERIOD matches hidden files with flag" {
         "dir2/subdir/.dotfile",
     };
 
-    var result = try matchPaths(testing.allocator, "**/*.txt", &paths, GLOB_PERIOD);
+    var result = try matchPaths(testing.allocator, "**/*.txt", &paths, ZLOB_PERIOD);
     defer result.deinit();
 
     // Should match all .txt files including hidden ones

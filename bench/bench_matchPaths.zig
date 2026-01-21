@@ -1,5 +1,5 @@
 const std = @import("std");
-const simdglob = @import("simdglob");
+const zlob = @import("zlob");
 const time = std.time;
 
 // Benchmark configuration
@@ -14,14 +14,14 @@ fn benchmark(
 ) !void {
     // Warmup
     for (0..WARMUP_ITERATIONS) |_| {
-        var result = try simdglob.matchPaths(allocator, pattern, paths, 0);
+        var result = try zlob.matchPaths(allocator, pattern, paths, 0);
         result.deinit();
     }
 
     // Actual benchmark
     const start = time.nanoTimestamp();
     for (0..ITERATIONS) |_| {
-        var result = try simdglob.matchPaths(allocator, pattern, paths, 0);
+        var result = try zlob.matchPaths(allocator, pattern, paths, 0);
         result.deinit();
     }
     const end = time.nanoTimestamp();
@@ -34,7 +34,7 @@ fn benchmark(
         name,
         avg_us,
         blk: {
-            var result = try simdglob.matchPaths(allocator, pattern, paths, 0);
+            var result = try zlob.matchPaths(allocator, pattern, paths, 0);
             defer result.deinit();
             break :blk result.match_count;
         },

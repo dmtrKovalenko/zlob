@@ -7,8 +7,8 @@
 
 const std = @import("std");
 const testing = std.testing;
-const simdglob = @import("simdglob");
-const glob = simdglob.glob;
+const zlob = @import("zlob");
+const glob = zlob.glob;
 const fs = std.fs;
 
 const TestDir = struct {
@@ -68,7 +68,7 @@ const TestDir = struct {
         defer std.posix.chdir(old_cwd) catch {};
 
         // Use match API - returns ?GlobResults
-        var result = try simdglob.match(allocator, pattern, 0) orelse {
+        var result = try zlob.match(allocator, pattern, 0) orelse {
             // No matches - return empty array
             return try allocator.alloc([]const u8, 0);
         };

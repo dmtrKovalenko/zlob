@@ -1,7 +1,7 @@
 //! Benchmark comparing SIMD vs non-SIMD character search
 
 const std = @import("std");
-const simdglob = @import("simdglob");
+const zlob = @import("zlob");
 
 const ITERATIONS = 1_000_000;
 
@@ -75,7 +75,7 @@ pub fn main() !void {
             var result: ?usize = null;
             var i: usize = 0;
             while (i < ITERATIONS) : (i += 1) {
-                result = simdglob.simdFindChar(tc.haystack, tc.needle);
+                result = zlob.simdFindChar(tc.haystack, tc.needle);
                 std.mem.doNotOptimizeAway(&result); // Prevent optimization
             }
             const end = std.time.nanoTimestamp();

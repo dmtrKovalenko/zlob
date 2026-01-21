@@ -1,5 +1,5 @@
 const std = @import("std");
-const simdglob = @import("simdglob");
+const zlob = @import("zlob");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -52,14 +52,14 @@ pub fn main() !void {
 
     // Warmup
     for (0..10) |_| {
-        var result = try simdglob.matchPaths(allocator, "**/*.zig", paths, 0);
+        var result = try zlob.matchPaths(allocator, "**/*.zig", paths, 0);
         result.deinit();
     }
 
     // Run 1000 iterations for profiling
     const iterations = 1000;
     for (0..iterations) |_| {
-        var result = try simdglob.matchPaths(allocator, "**/*.zig", paths, 0);
+        var result = try zlob.matchPaths(allocator, "**/*.zig", paths, 0);
         result.deinit();
     }
 

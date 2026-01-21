@@ -1,6 +1,6 @@
 const std = @import("std");
 const c_lib = @import("c_lib");
-const glob_t = c_lib.glob_t;
+const zlob_t = c_lib.zlob_t;
 
 const Timer = std.time.Timer;
 
@@ -53,16 +53,16 @@ fn getRepoPath(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 fn runBenchmark(tc: TestCase, warmup_iterations: usize) !BenchmarkResult {
-    const flags: c_int = c_lib.GLOB_BRACE | c_lib.GLOB_GITIGNORE | c_lib.GLOB_NOSORT;
+    const flags: c_int = c_lib.ZLOB_BRACE | c_lib.ZLOB_GITIGNORE | c_lib.ZLOB_NOSORT;
 
     // Warmup runs to avoid cold cache effects
     var matches: usize = 0;
     for (0..warmup_iterations) |_| {
-        var pglob: glob_t = undefined;
-        const result = c_lib.glob(tc.pattern.ptr, flags, null, &pglob);
+        var pzlob: zlob_t = undefined;
+        const result = c_lib.glob(tc.pattern.ptr, flags, null, &pzlob);
         if (result == 0) {
-            matches = pglob.gl_pathc;
-            c_lib.globfree(&pglob);
+            matches = pzlob.gl_pathc;
+            c_lib.globfree(&pzlob);
         }
     }
 
@@ -71,11 +71,11 @@ fn runBenchmark(tc: TestCase, warmup_iterations: usize) !BenchmarkResult {
     const start = timer.read();
 
     for (0..tc.iterations) |_| {
-        var pglob: glob_t = undefined;
-        const result = c_lib.glob(tc.pattern.ptr, flags, null, &pglob);
+        var pzlob: zlob_t = undefined;
+        const result = c_lib.glob(tc.pattern.ptr, flags, null, &pzlob);
         if (result == 0) {
-            matches = pglob.gl_pathc;
-            c_lib.globfree(&pglob);
+            matches = pzlob.gl_pathc;
+            c_lib.globfree(&pzlob);
         }
     }
 

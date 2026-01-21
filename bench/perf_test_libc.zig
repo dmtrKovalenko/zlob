@@ -1,6 +1,6 @@
 const std = @import("std");
 const c_lib = @import("c_lib");
-const glob_t = c_lib.glob_t;
+const zlob_t = c_lib.zlob_t;
 
 pub fn main() !void {
     // Heavy workload for perf profiling
@@ -13,11 +13,11 @@ pub fn main() !void {
 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        var pglob: glob_t = undefined;
+        var pzlob: zlob_t = undefined;
         // Use a pattern that matches many files
-        const result = c_lib.glob("drivers/*.c", 0, null, &pglob);
+        const result = c_lib.glob("drivers/*.c", 0, null, &pzlob);
         if (result == 0) {
-            c_lib.globfree(&pglob);
+            c_lib.globfree(&pzlob);
         }
     }
 

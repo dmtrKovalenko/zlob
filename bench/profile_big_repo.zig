@@ -1,6 +1,6 @@
 const std = @import("std");
 const c_lib = @import("c_lib");
-const glob_t = c_lib.glob_t;
+const zlob_t = c_lib.zlob_t;
 
 const TestCase = struct {
     name: []const u8,
@@ -61,17 +61,17 @@ pub fn main() !void {
 
         // Determine flags based on pattern
         const flags: c_int = if (std.mem.indexOf(u8, tc.pattern, "{") != null)
-            c_lib.GLOB_BRACE
+            c_lib.ZLOB_BRACE
         else
             0;
 
         // Warmup run to avoid cold cache
         {
-            var pglob: glob_t = undefined;
-            const result = c_lib.glob(tc.pattern.ptr, flags, null, &pglob);
+            var pzlob: zlob_t = undefined;
+            const result = c_lib.glob(tc.pattern.ptr, flags, null, &pzlob);
             if (result == 0) {
-                std.debug.print("  Matches: {d}\n", .{pglob.gl_pathc});
-                c_lib.globfree(&pglob);
+                std.debug.print("  Matches: {d}\n", .{pzlob.gl_pathc});
+                c_lib.globfree(&pzlob);
             } else {
                 std.debug.print("  Matches: 0 (error code: {d})\n", .{result});
             }
@@ -84,11 +84,11 @@ pub fn main() !void {
         var i: usize = 0;
         var matches_this_test: usize = 0;
         while (i < tc.iterations) : (i += 1) {
-            var pglob: glob_t = undefined;
-            const result = c_lib.glob(tc.pattern.ptr, flags, null, &pglob);
+            var pzlob: zlob_t = undefined;
+            const result = c_lib.glob(tc.pattern.ptr, flags, null, &pzlob);
             if (result == 0) {
-                matches_this_test = pglob.gl_pathc;
-                c_lib.globfree(&pglob);
+                matches_this_test = pzlob.gl_pathc;
+                c_lib.globfree(&pzlob);
             }
         }
 

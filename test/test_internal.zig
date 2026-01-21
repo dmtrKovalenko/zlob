@@ -1,8 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
-const simdglob = @import("simdglob");
-const glob = simdglob.glob;
-const root = simdglob;
+const zlob = @import("zlob");
+const glob = zlob.glob;
+const root = zlob;
 
 // SIMD Character Search Tests
 // These tests verify the core SIMD optimization functionality

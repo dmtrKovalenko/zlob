@@ -82,22 +82,22 @@ clean:
 
 # Build CLI executable
 cli:
-	@echo "Building simdglob CLI..."
+	@echo "Building zlob CLI..."
 	$(ZIG) build -Doptimize=ReleaseFast
-	@echo "CLI built: zig-out/bin/simdglob"
+	@echo "CLI built: zig-out/bin/zlob"
 
 # Install CLI executable
 install-cli: make-cli
-	@echo "Installing simdglob CLI to $(PREFIX)/bin..."
+	@echo "Installing zlob CLI to $(PREFIX)/bin..."
 	install -d $(PREFIX)/bin
-	install -m 755 zig-out/bin/simdglob $(PREFIX)/bin/simdglob
+	install -m 755 zig-out/bin/zlob $(PREFIX)/bin/zlob
 	@echo "Installation complete!"
-	@echo "  Executable: $(PREFIX)/bin/simdglob"
+	@echo "  Executable: $(PREFIX)/bin/zlob"
 
 # Uninstall CLI executable
 uninstall-cli:
-	@echo "Uninstalling simdglob CLI..."
-	rm -f $(PREFIX)/bin/simdglob
+	@echo "Uninstalling zlob CLI..."
+	rm -f $(PREFIX)/bin/zlob
 	@echo "Uninstall complete!"
 
 # Help

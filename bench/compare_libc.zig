@@ -4,8 +4,8 @@ const c_lib = @import("c_lib");
 const Timer = std.time.Timer;
 
 // libc glob types and functions
-extern "c" fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: ?*const anyopaque, pglob: *GlobT) c_int;
-extern "c" fn globfree(pglob: *GlobT) void;
+extern "c" fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: ?*const anyopaque, pzlob: *GlobT) c_int;
+extern "c" fn globfree(pzlob: *GlobT) void;
 
 const GlobT = extern struct {
     gl_pathc: usize,
@@ -19,10 +19,10 @@ fn benchmarkLibcGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        var glob_buf: GlobT = undefined;
-        const result = glob(pattern, 0, null, &glob_buf);
+        var zlob_buf: GlobT = undefined;
+        const result = glob(pattern, 0, null, &zlob_buf);
         if (result == 0) {
-            globfree(&glob_buf);
+            globfree(&zlob_buf);
         }
     }
 
@@ -36,10 +36,10 @@ fn benchmarkZlobGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        var glob_buf: c_lib.glob_t = undefined;
-        const result = c_lib.glob(pattern, 0, null, &glob_buf);
+        var zlob_buf: c_lib.zlob_t = undefined;
+        const result = c_lib.glob(pattern, 0, null, &zlob_buf);
         if (result == 0) {
-            c_lib.globfree(&glob_buf);
+            c_lib.globfree(&zlob_buf);
         }
     }
 
@@ -82,19 +82,19 @@ pub fn main() !void {
     defer allocator.free(pattern_z);
 
     // First, count the matches
-    var glob_buf: GlobT = undefined;
-    const result = glob(pattern_z.ptr, 0, null, &glob_buf);
-    const libc_count = if (result == 0) glob_buf.gl_pathc else 0;
+    var zlob_buf: GlobT = undefined;
+    const result = glob(pattern_z.ptr, 0, null, &zlob_buf);
+    const libc_count = if (result == 0) zlob_buf.gl_pathc else 0;
     if (result == 0) {
-        globfree(&glob_buf);
+        globfree(&zlob_buf);
     }
 
     var zlob_count: usize = 0;
-    var zlob_buf: c_lib.glob_t = undefined;
-    const zlob_result = c_lib.glob(pattern_z.ptr, 0, null, &zlob_buf);
+    var zlob_buf2: c_lib.zlob_t = undefined;
+    const zlob_result = c_lib.glob(pattern_z.ptr, 0, null, &zlob_buf2);
     if (zlob_result == 0) {
-        zlob_count = zlob_buf.gl_pathc;
-        c_lib.globfree(&zlob_buf);
+        zlob_count = zlob_buf2.gl_pathc;
+        c_lib.globfree(&zlob_buf2);
     }
 
     std.debug.print("Match count: libc={d}, zlob={d}\n\n", .{ libc_count, zlob_count });

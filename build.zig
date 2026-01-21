@@ -29,13 +29,13 @@ pub fn build(b: *std.Build) void {
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
     // glob module (for direct access to glob implementation in tests)
-    const glob_mod = b.addModule("glob", .{
+    const zlob_mod = b.addModule("glob", .{
         .root_source_file = b.path("src/glob.zig"),
         .target = target,
         .link_libc = true,
     });
 
-    const mod = b.addModule("simdglob", .{
+    const mod = b.addModule("zlob", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
         // in this file, which means that if you have declarations that you
@@ -48,7 +48,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "glob", .module = glob_mod },
+            .{ .name = "glob", .module = zlob_mod },
         },
     });
 
@@ -58,7 +58,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "glob", .module = glob_mod },
+            .{ .name = "glob", .module = zlob_mod },
         },
     });
 
@@ -73,7 +73,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "glob", .module = glob_mod },
+                .{ .name = "glob", .module = zlob_mod },
             },
         }),
     });
@@ -98,7 +98,7 @@ pub fn build(b: *std.Build) void {
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
     const exe = b.addExecutable(.{
-        .name = "simdglob",
+        .name = "zlob",
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
@@ -113,12 +113,12 @@ pub fn build(b: *std.Build) void {
             // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
-                // Here "simdglob" is the name you will use in your source code to
-                // import this module (e.g. `@import("simdglob")`). The name is
+                // Here "zlob" is the name you will use in your source code to
+                // import this module (e.g. `@import("zlob")`). The name is
                 // repeated because you are allowed to rename your imports, which
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
-                .{ .name = "simdglob", .module = mod },
+                .{ .name = "zlob", .module = mod },
             },
         }),
     });
@@ -181,8 +181,8 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .link_libc = true,
                 .imports = &.{
-                    .{ .name = "simdglob", .module = mod },
-                    .{ .name = "glob", .module = glob_mod },
+                    .{ .name = "zlob", .module = mod },
+                    .{ .name = "glob", .module = zlob_mod },
                     .{ .name = "c_lib", .module = c_lib_mod },
                 },
             }),
@@ -199,7 +199,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "simdglob", .module = mod },
+                .{ .name = "zlob", .module = mod },
             },
         }),
     });
@@ -219,7 +219,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "simdglob", .module = mod },
+                .{ .name = "zlob", .module = mod },
             },
         }),
     });
@@ -239,7 +239,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "simdglob", .module = mod },
+                .{ .name = "zlob", .module = mod },
             },
         }),
     });
@@ -274,7 +274,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "simdglob", .module = mod },
+                .{ .name = "zlob", .module = mod },
                 .{ .name = "c_lib", .module = c_lib_mod },
             },
         }),
@@ -287,7 +287,7 @@ pub fn build(b: *std.Build) void {
     const perf_test_libc_step = b.step("perf-test-libc", "Perf profiling for C-style glob");
     perf_test_libc_step.dependOn(&perf_test_libc_cmd.step);
 
-    // Profile big repo with glob_libc
+    // Profile big repo with zlob_libc
     const profile_big_repo = b.addExecutable(.{
         .name = "profile_big_repo",
         .root_module = b.createModule(.{
@@ -295,7 +295,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "simdglob", .module = mod },
+                .{ .name = "zlob", .module = mod },
                 .{ .name = "c_lib", .module = c_lib_mod },
             },
         }),
@@ -305,7 +305,7 @@ pub fn build(b: *std.Build) void {
 
     const profile_big_repo_cmd = b.addRunArtifact(profile_big_repo);
     profile_big_repo_cmd.step.dependOn(b.getInstallStep());
-    const profile_big_repo_step = b.step("profile-big-repo", "Profile glob_libc on Linux kernel repository");
+    const profile_big_repo_step = b.step("profile-big-repo", "Profile zlob_libc on Linux kernel repository");
     profile_big_repo_step.dependOn(&profile_big_repo_cmd.step);
 
     const bench_brace = b.addExecutable(.{
@@ -315,7 +315,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "simdglob", .module = mod },
+                .{ .name = "zlob", .module = mod },
                 .{ .name = "c_lib", .module = c_lib_mod },
             },
         }),

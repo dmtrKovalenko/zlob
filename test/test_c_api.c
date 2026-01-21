@@ -17,41 +17,41 @@ int main(void) {
   printf("glob() - Filesystem Walking\n");
   TEST("Match *.zig files in src/");
   {
-    glob_t pglob;
-    int result = glob("src/*.zig", 0, NULL, &pglob);
+    zlob_t pzlob;
+    int result = glob("src/*.zig", 0, NULL, &pzlob);
 
-    if (result != 0 && result != GLOB_NOMATCH) {
+    if (result != 0 && result != ZLOB_NOMATCH) {
       FAIL("glob() returned error");
     }
 
     if (result == 0) {
-      printf("    Found %zu matches\n", pglob.gl_pathc);
+      printf("    Found %zu matches\n", pzlob.gl_pathc);
 
       // Verify results structure
-      if (pglob.gl_pathc == 0)
+      if (pzlob.gl_pathc == 0)
         FAIL("Expected at least one match");
-      if (pglob.gl_pathv == NULL)
+      if (pzlob.gl_pathv == NULL)
         FAIL("gl_pathv is NULL");
-      if (pglob.gl_pathlen == NULL)
+      if (pzlob.gl_pathlen == NULL)
         FAIL("gl_pathlen is NULL");
 
       // Verify first result
-      if (pglob.gl_pathv[0] == NULL)
+      if (pzlob.gl_pathv[0] == NULL)
         FAIL("First path is NULL");
-      size_t len = strlen(pglob.gl_pathv[0]);
-      if (len != pglob.gl_pathlen[0])
+      size_t len = strlen(pzlob.gl_pathv[0]);
+      if (len != pzlob.gl_pathlen[0])
         FAIL("gl_pathlen doesn't match strlen");
 
       // Verify NULL terminator
-      if (pglob.gl_pathv[pglob.gl_pathc] != NULL)
+      if (pzlob.gl_pathv[pzlob.gl_pathc] != NULL)
         FAIL("Array not NULL-terminated");
 
-      printf("    Example: %s (len=%zu)\n", pglob.gl_pathv[0],
-             pglob.gl_pathlen[0]);
-      globfree(&pglob);
+      printf("    Example: %s (len=%zu)\n", pzlob.gl_pathv[0],
+             pzlob.gl_pathlen[0]);
+      globfree(&pzlob);
       PASS();
     } else {
-      printf("    No matches (GLOB_NOMATCH)\n");
+      printf("    No matches (ZLOB_NOMATCH)\n");
       PASS();
     }
   }
@@ -60,26 +60,26 @@ int main(void) {
   printf("\nglob() - Recursive Pattern\n");
   TEST("Match **/*.zig files");
   {
-    glob_t pglob;
-    int result = glob("src/**/*.zig", 0, NULL, &pglob);
+    zlob_t pzlob;
+    int result = glob("src/**/*.zig", 0, NULL, &pzlob);
 
     if (result == 0) {
-      printf("    Found %zu matches\n", pglob.gl_pathc);
-      if (pglob.gl_pathc > 0) {
-        printf("    Example: %s\n", pglob.gl_pathv[0]);
+      printf("    Found %zu matches\n", pzlob.gl_pathc);
+      if (pzlob.gl_pathc > 0) {
+        printf("    Example: %s\n", pzlob.gl_pathv[0]);
       }
-      globfree(&pglob);
+      globfree(&pzlob);
       PASS();
-    } else if (result == GLOB_NOMATCH) {
-      printf("    No matches (GLOB_NOMATCH)\n");
+    } else if (result == ZLOB_NOMATCH) {
+      printf("    No matches (ZLOB_NOMATCH)\n");
       PASS();
     } else {
       FAIL("glob() returned error");
     }
   }
 
-  // glob_match_paths() - Path filtering (no filesystem)
-  printf("\nglob_match_paths() - Path Filtering\n");
+  // zlob_match_paths() - Path filtering (no filesystem)
+  printf("\nzlob_match_paths() - Path Filtering\n");
   TEST("Filter paths with *.c pattern");
   {
     const char *paths[] = {
@@ -87,25 +87,25 @@ int main(void) {
     };
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
-    glob_t pglob;
-    int result = glob_match_paths("*.c", paths, path_count, 0, &pglob);
+    zlob_t pzlob;
+    int result = zlob_match_paths("*.c", paths, path_count, 0, &pzlob);
 
     if (result != 0)
-      FAIL("glob_match_paths() failed");
-    if (pglob.gl_pathc != 3)
+      FAIL("zlob_match_paths() failed");
+    if (pzlob.gl_pathc != 3)
       FAIL("Expected 3 matches");
-    if (pglob.gl_pathv == NULL)
+    if (pzlob.gl_pathv == NULL)
       FAIL("gl_pathv is NULL");
-    if (pglob.gl_pathlen == NULL)
+    if (pzlob.gl_pathlen == NULL)
       FAIL("gl_pathlen is NULL");
 
-    printf("    Found %zu matches (expected 3)\n", pglob.gl_pathc);
+    printf("    Found %zu matches (expected 3)\n", pzlob.gl_pathc);
 
     // Verify zero-copy: pointers should reference original array
     int found_original = 0;
-    for (size_t i = 0; i < pglob.gl_pathc; i++) {
+    for (size_t i = 0; i < pzlob.gl_pathc; i++) {
       for (size_t j = 0; j < path_count; j++) {
-        if (pglob.gl_pathv[i] == paths[j]) {
+        if (pzlob.gl_pathv[i] == paths[j]) {
           found_original++;
           break;
         }
@@ -114,28 +114,28 @@ int main(void) {
     if (found_original != 3)
       FAIL("Zero-copy failed: pointers don't reference original memory");
 
-    globfree(&pglob);
+    globfree(&pzlob);
     PASS();
   }
 
-  // glob_match_paths() with no matches
-  printf("\nglob_match_paths() - No Matches\n");
+  // zlob_match_paths() with no matches
+  printf("\nzlob_match_paths() - No Matches\n");
   TEST("Filter paths with *.xyz pattern (no matches)");
   {
     const char *paths[] = {"main.c", "test.h", "readme.md"};
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
-    glob_t pglob;
-    int result = glob_match_paths("*.xyz", paths, path_count, 0, &pglob);
+    zlob_t pzlob;
+    int result = zlob_match_paths("*.xyz", paths, path_count, 0, &pzlob);
 
-    if (result != GLOB_NOMATCH)
-      FAIL("Expected GLOB_NOMATCH");
-    printf("    Correctly returned GLOB_NOMATCH\n");
+    if (result != ZLOB_NOMATCH)
+      FAIL("Expected ZLOB_NOMATCH");
+    printf("    Correctly returned ZLOB_NOMATCH\n");
     PASS();
   }
 
-  // glob_match_paths() with recursive pattern
-  printf("\nglob_match_paths() - Recursive Pattern\n");
+  // zlob_match_paths() with recursive pattern
+  printf("\nzlob_match_paths() - Recursive Pattern\n");
   TEST("Filter paths with **/*.c pattern");
   {
     const char *paths[] = {
@@ -146,20 +146,20 @@ int main(void) {
     };
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
-    glob_t pglob;
-    int result = glob_match_paths("**/*.c", paths, path_count, 0, &pglob);
+    zlob_t pzlob;
+    int result = zlob_match_paths("**/*.c", paths, path_count, 0, &pzlob);
 
     if (result != 0)
-      FAIL("glob_match_paths() failed");
-    if (pglob.gl_pathc != 3)
+      FAIL("zlob_match_paths() failed");
+    if (pzlob.gl_pathc != 3)
       FAIL("Expected 3 matches");
 
-    printf("    Found %zu matches (expected 3)\n", pglob.gl_pathc);
-    for (size_t i = 0; i < pglob.gl_pathc; i++) {
-      printf("      - %s (len=%zu)\n", pglob.gl_pathv[i], pglob.gl_pathlen[i]);
+    printf("    Found %zu matches (expected 3)\n", pzlob.gl_pathc);
+    for (size_t i = 0; i < pzlob.gl_pathc; i++) {
+      printf("      - %s (len=%zu)\n", pzlob.gl_pathv[i], pzlob.gl_pathlen[i]);
     }
 
-    globfree(&pglob);
+    globfree(&pzlob);
     PASS();
   }
 
@@ -169,24 +169,24 @@ int main(void) {
     const char *paths[] = {"short.c", "medium_name.c", "very_long_filename.c"};
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
-    glob_t pglob;
-    int result = glob_match_paths("*.c", paths, path_count, 0, &pglob);
+    zlob_t pzlob;
+    int result = zlob_match_paths("*.c", paths, path_count, 0, &pzlob);
 
     if (result != 0)
-      FAIL("glob_match_paths() failed");
+      FAIL("zlob_match_paths() failed");
 
     // Verify lengths match strlen
-    for (size_t i = 0; i < pglob.gl_pathc; i++) {
-      size_t actual_len = strlen(pglob.gl_pathv[i]);
-      if (pglob.gl_pathlen[i] != actual_len) {
+    for (size_t i = 0; i < pzlob.gl_pathc; i++) {
+      size_t actual_len = strlen(pzlob.gl_pathv[i]);
+      if (pzlob.gl_pathlen[i] != actual_len) {
         printf("    Path %zu: gl_pathlen=%zu, strlen=%zu\n", i,
-               pglob.gl_pathlen[i], actual_len);
+               pzlob.gl_pathlen[i], actual_len);
         FAIL("gl_pathlen doesn't match strlen");
       }
     }
 
     printf("    All lengths correct (avoiding strlen overhead)\n");
-    globfree(&pglob);
+    globfree(&pzlob);
     PASS();
   }
 
@@ -195,17 +195,17 @@ int main(void) {
     const char *paths[] = {"short.c", "long.c", "other.c"};
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
-    glob_t pglob;
-    int result = glob_match_paths("{short, long}.c", paths, path_count, 0, &pglob);
+    zlob_t pzlob;
+    int result = zlob_match_paths("{short, long}.c", paths, path_count, 0, &pzlob);
 
     if (result != 0)
-      FAIL("glob_match_paths() failed");
+      FAIL("zlob_match_paths() failed");
 
-    if pglob.gl_pathc != 2
+    if pzlob.gl_pathc != 2
       FAIL("Expected 2 matches");
 
     printf("    All lengths correct (avoiding strlen overhead)\n");
-    globfree(&pglob);
+    globfree(&pzlob);
     PASS();
   }
 

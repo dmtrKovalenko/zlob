@@ -3,10 +3,10 @@ const testing = std.testing;
 const c_lib = @import("c_lib");
 const c = std.c;
 
-// Re-import only the constants we need from c_lib's glob_t
-const GLOB_ERR = 1 << 0; // 0x0001
-const GLOB_NOMATCH = 3;
-const GLOB_ABORTED = 2;
+// Re-import only the constants we need from c_lib's zlob_t
+const ZLOB_ERR = 1 << 0; // 0x0001
+const ZLOB_NOMATCH = 3;
+const ZLOB_ABORTED = 2;
 
 // Test structure to track errfunc calls
 const ErrorCallbackContext = struct {
@@ -65,17 +65,17 @@ test "errfunc is called on directory access error" {
     const pattern = try allocator.dupeZ(u8, "*/*");
     defer allocator.free(pattern);
 
-    var pglob: c_lib.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, testErrorCallback, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: c_lib.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, testErrorCallback, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     // Should succeed but errfunc should have been called
     // We can't easily verify the callback was called without thread-local storage
     // but at least verify it doesn't crash
-    try testing.expect(result == 0 or result == GLOB_NOMATCH or result == GLOB_ABORTED);
+    try testing.expect(result == 0 or result == ZLOB_NOMATCH or result == ZLOB_ABORTED);
 }
 
-test "errfunc returning non-zero causes GLOB_ABORTED" {
+test "errfunc returning non-zero causes ZLOB_ABORTED" {
     const allocator = testing.allocator;
 
     // Create a directory structure with a restricted directory
@@ -106,21 +106,21 @@ test "errfunc returning non-zero causes GLOB_ABORTED" {
     const pattern = try allocator.dupeZ(u8, "*/*");
     defer allocator.free(pattern);
 
-    var pglob: c_lib.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, testErrorCallbackAbort, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: c_lib.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, testErrorCallbackAbort, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
-    // Should return GLOB_ABORTED if errfunc returned non-zero (when error occurs)
+    // Should return ZLOB_ABORTED if errfunc returned non-zero (when error occurs)
     // Note: The test creates a restricted directory that should fail opendir()
-    // and trigger the errfunc callback which returns 1, causing GLOB_ABORTED
-    try testing.expect(result == GLOB_ABORTED);
+    // and trigger the errfunc callback which returns 1, causing ZLOB_ABORTED
+    try testing.expect(result == ZLOB_ABORTED);
 }
 
-test "GLOB_ERR flag causes abort on directory error" {
+test "ZLOB_ERR flag causes abort on directory error" {
     const allocator = testing.allocator;
 
     // Create a directory structure with a restricted directory
-    const test_dir = "/tmp/test_glob_err_flag";
+    const test_dir = "/tmp/test_zlob_err_flag";
     std.fs.cwd().makeDir(test_dir) catch {};
     defer std.fs.cwd().deleteTree(test_dir) catch {};
 
@@ -143,19 +143,19 @@ test "GLOB_ERR flag causes abort on directory error" {
     try std.posix.chdir(test_dir);
     defer std.posix.chdir(old_cwd) catch {};
 
-    // Try to glob with GLOB_ERR flag
+    // Try to glob with ZLOB_ERR flag
     const pattern = try allocator.dupeZ(u8, "*/*");
     defer allocator.free(pattern);
 
-    var pglob: c_lib.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, GLOB_ERR, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: c_lib.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, ZLOB_ERR, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
-    // Should return GLOB_ABORTED when GLOB_ERR is set and error occurs
-    try testing.expect(result == GLOB_ABORTED);
+    // Should return ZLOB_ABORTED when ZLOB_ERR is set and error occurs
+    try testing.expect(result == ZLOB_ABORTED);
 }
 
-test "errfunc NULL with GLOB_ERR still aborts" {
+test "errfunc NULL with ZLOB_ERR still aborts" {
     const allocator = testing.allocator;
 
     // Create a directory structure with a restricted directory
@@ -182,10 +182,10 @@ test "errfunc NULL with GLOB_ERR still aborts" {
     const pattern = try allocator.dupeZ(u8, "*/*");
     defer allocator.free(pattern);
 
-    var pglob: c_lib.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, GLOB_ERR, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: c_lib.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, ZLOB_ERR, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
-    // Should abort even with NULL errfunc when GLOB_ERR is set
-    try testing.expect(result == GLOB_ABORTED);
+    // Should abort even with NULL errfunc when ZLOB_ERR is set
+    try testing.expect(result == ZLOB_ABORTED);
 }

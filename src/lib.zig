@@ -13,29 +13,29 @@ const std = @import("std");
 pub const glob = @import("glob");
 pub const GlobResults = glob.GlobResults;
 pub const GlobError = glob.GlobError;
-pub const glob_t = glob.glob_t;
+pub const zlob_t = glob.zlob_t;
 pub const analyzePattern = glob.analyzePattern;
 pub const simdFindChar = glob.simdFindChar;
 pub const hasWildcardsSIMD = glob.hasWildcardsSIMD;
 
-pub const GLOB_APPEND = glob.GLOB_APPEND;
-pub const GLOB_DOOFFS = glob.GLOB_DOOFFS;
-pub const GLOB_ERR = glob.GLOB_ERR;
-pub const GLOB_MARK = glob.GLOB_MARK;
-pub const GLOB_NOCHECK = glob.GLOB_NOCHECK;
-pub const GLOB_NOSORT = glob.GLOB_NOSORT;
-pub const GLOB_NOESCAPE = glob.GLOB_NOESCAPE;
-pub const GLOB_MAGCHAR = glob.GLOB_MAGCHAR;
-pub const GLOB_NOMAGIC = glob.GLOB_NOMAGIC;
-pub const GLOB_TILDE = glob.GLOB_TILDE;
-pub const GLOB_BRACE = glob.GLOB_BRACE;
-pub const GLOB_PERIOD = glob.GLOB_PERIOD;
-pub const GLOB_ONLYDIR = glob.GLOB_ONLYDIR;
-pub const GLOB_TILDE_CHECK = glob.GLOB_TILDE_CHECK;
-pub const GLOB_GITIGNORE = glob.GLOB_GITIGNORE;
-pub const GLOB_NOSPACE = glob.GLOB_NOSPACE;
-pub const GLOB_ABORTED = glob.GLOB_ABORTED;
-pub const GLOB_NOMATCH = glob.GLOB_NOMATCH;
+pub const ZLOB_APPEND = glob.ZLOB_APPEND;
+pub const ZLOB_DOOFFS = glob.ZLOB_DOOFFS;
+pub const ZLOB_ERR = glob.ZLOB_ERR;
+pub const ZLOB_MARK = glob.ZLOB_MARK;
+pub const ZLOB_NOCHECK = glob.ZLOB_NOCHECK;
+pub const ZLOB_NOSORT = glob.ZLOB_NOSORT;
+pub const ZLOB_NOESCAPE = glob.ZLOB_NOESCAPE;
+pub const ZLOB_MAGCHAR = glob.ZLOB_MAGCHAR;
+pub const ZLOB_NOMAGIC = glob.ZLOB_NOMAGIC;
+pub const ZLOB_TILDE = glob.ZLOB_TILDE;
+pub const ZLOB_BRACE = glob.ZLOB_BRACE;
+pub const ZLOB_PERIOD = glob.ZLOB_PERIOD;
+pub const ZLOB_ONLYDIR = glob.ZLOB_ONLYDIR;
+pub const ZLOB_TILDE_CHECK = glob.ZLOB_TILDE_CHECK;
+pub const ZLOB_GITIGNORE = glob.ZLOB_GITIGNORE;
+pub const ZLOB_NOSPACE = glob.ZLOB_NOSPACE;
+pub const ZLOB_ABORTED = glob.ZLOB_ABORTED;
+pub const ZLOB_NOMATCH = glob.ZLOB_NOMATCH;
 
 /// Perform file system walking and collect matching results to GlobResults
 ///
@@ -54,28 +54,28 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !?Gl
     const pattern_z = try allocator.dupeZ(u8, pattern);
     defer allocator.free(pattern_z);
 
-    var pglob: glob_t = undefined;
-    const opt_result = try glob.glob(allocator, pattern_z.ptr, @intCast(flags), null, &pglob);
+    var pzlob: zlob_t = undefined;
+    const opt_result = try glob.glob(allocator, pattern_z.ptr, @intCast(flags), null, &pzlob);
 
     if (opt_result) |_| {
-        var paths = try allocator.alloc([]const u8, pglob.gl_pathc);
+        var paths = try allocator.alloc([]const u8, pzlob.gl_pathc);
         errdefer allocator.free(paths);
 
         var i: usize = 0;
-        while (i < pglob.gl_pathc) : (i += 1) {
-            const c_path = pglob.gl_pathv[i];
-            const path_len = pglob.gl_pathlen[i];
+        while (i < pzlob.gl_pathc) : (i += 1) {
+            const c_path = pzlob.gl_pathv[i];
+            const path_len = pzlob.gl_pathlen[i];
             paths[i] = c_path[0..path_len];
         }
 
         return GlobResults{
             .paths = paths,
-            .match_count = pglob.gl_pathc,
+            .match_count = pzlob.gl_pathc,
             .allocator = allocator,
-            .pglob = pglob,
+            .pzlob = pzlob,
         };
     } else {
-        if (flags & GLOB_NOCHECK != 0) {
+        if (flags & ZLOB_NOCHECK != 0) {
             var paths = try allocator.alloc([]const u8, 1);
             errdefer allocator.free(paths);
             paths[0] = try allocator.dupe(u8, pattern);
@@ -108,7 +108,7 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !?Gl
 ///     "/users/bob/docs/readme.md",
 /// };
 ///
-/// const result = try simdglob.matchPaths(allocator, "/users/**/code/*.c", &paths, 0);
+/// const result = try zlob.matchPaths(allocator, "/users/**/code/*.c", &paths, 0);
 /// defer result.deinit();
 ///
 /// for (result.paths) |path| {
@@ -117,10 +117,10 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: u32) !?Gl
 /// ```
 ///
 /// Supported flags:
-/// - GLOB_NOSORT: Don't sort results
-/// - GLOB_NOCHECK: Return pattern itself if no matches
-/// - GLOB_PERIOD: Allow wildcards to match hidden files (starting with '.')
-/// - GLOB_NOESCAPE: Treat backslashes as literal characters
+/// - ZLOB_NOSORT: Don't sort results
+/// - ZLOB_NOCHECK: Return pattern itself if no matches
+/// - ZLOB_PERIOD: Allow wildcards to match hidden files (starting with '.')
+/// - ZLOB_NOESCAPE: Treat backslashes as literal characters
 ///
 /// Requirements:
 /// - Input paths MUST be normalized (no consecutive slashes like //)

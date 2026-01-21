@@ -58,10 +58,10 @@ fn cleanupTestFiles(allocator: std.mem.Allocator, base_path: []const u8) !void {
 }
 
 // ============================================================================
-// GLOB_MARK - Append '/' to directories
+// ZLOB_MARK - Append '/' to directories
 // ============================================================================
 
-test "GLOB_MARK - appends slash to directories" {
+test "ZLOB_MARK - appends slash to directories" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -83,17 +83,17 @@ test "GLOB_MARK - appends slash to directories" {
     const pattern = try allocator.dupeZ(u8, "*");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expect(pglob.gl_pathc >= 3); // At least 3 directories
+    try testing.expect(pzlob.gl_pathc >= 3); // At least 3 directories
 
     // Count directories with trailing slash
     var dir_with_slash_count: usize = 0;
-    for (0..pglob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+    for (0..pzlob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
         if (path.len > 0 and path[path.len - 1] == '/') {
             dir_with_slash_count += 1;
         }
@@ -104,7 +104,7 @@ test "GLOB_MARK - appends slash to directories" {
     try testing.expect(dir_with_slash_count >= 2);
 }
 
-test "GLOB_MARK - does not append slash to files" {
+test "ZLOB_MARK - does not append slash to files" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -126,21 +126,21 @@ test "GLOB_MARK - does not append slash to files" {
     const pattern = try allocator.dupeZ(u8, "*.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expect(pglob.gl_pathc >= 1);
+    try testing.expect(pzlob.gl_pathc >= 1);
 
     // Files should NOT have trailing slash
-    for (0..pglob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+    for (0..pzlob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
         try testing.expect(path.len == 0 or path[path.len - 1] != '/');
     }
 }
 
-test "GLOB_MARK - works with recursive glob" {
+test "ZLOB_MARK - works with recursive glob" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -162,25 +162,25 @@ test "GLOB_MARK - works with recursive glob" {
     const pattern = try allocator.dupeZ(u8, "**/");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
-    try testing.expect(result == 0 or result == glob.GLOB_NOMATCH);
+    try testing.expect(result == 0 or result == glob.ZLOB_NOMATCH);
     if (result == 0) {
         // All matches should be directories with trailing slash
-        for (0..pglob.gl_pathc) |i| {
-            const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+        for (0..pzlob.gl_pathc) |i| {
+            const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
             try testing.expect(path.len > 0 and path[path.len - 1] == '/');
         }
     }
 }
 
 // ============================================================================
-// GLOB_DOOFFS - Reserve gl_offs slots at beginning
+// ZLOB_DOOFFS - Reserve gl_offs slots at beginning
 // ============================================================================
 
-test "GLOB_DOOFFS - reserves offset slots at beginning" {
+test "ZLOB_DOOFFS - reserves offset slots at beginning" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -202,29 +202,29 @@ test "GLOB_DOOFFS - reserves offset slots at beginning" {
     const pattern = try allocator.dupeZ(u8, "*.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    pglob.gl_offs = 3; // Request 3 offset slots
+    var pzlob: glob.zlob_t = undefined;
+    pzlob.gl_offs = 3; // Request 3 offset slots
 
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_DOOFFS, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_DOOFFS, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expect(pglob.gl_pathc >= 1);
+    try testing.expect(pzlob.gl_pathc >= 1);
 
     // First gl_offs entries should be NULL
-    try testing.expect(pglob.gl_pathv[0] == null);
-    try testing.expect(pglob.gl_pathv[1] == null);
-    try testing.expect(pglob.gl_pathv[2] == null);
+    try testing.expect(pzlob.gl_pathv[0] == null);
+    try testing.expect(pzlob.gl_pathv[1] == null);
+    try testing.expect(pzlob.gl_pathv[2] == null);
 
     // First actual match should be at gl_pathv[gl_offs]
-    const first_match = pglob.gl_pathv[pglob.gl_offs];
+    const first_match = pzlob.gl_pathv[pzlob.gl_offs];
     try testing.expect(first_match != null);
     const path = std.mem.sliceTo(first_match, 0);
     try testing.expect(path.len > 0);
     try testing.expect(std.mem.endsWith(u8, path, ".txt"));
 }
 
-test "GLOB_DOOFFS - works with GLOB_APPEND" {
+test "ZLOB_DOOFFS - works with ZLOB_APPEND" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -243,35 +243,35 @@ test "GLOB_DOOFFS - works with GLOB_APPEND" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    var pglob: glob.glob_t = undefined;
-    pglob.gl_offs = 2;
+    var pzlob: glob.zlob_t = undefined;
+    pzlob.gl_offs = 2;
 
     // First glob
     const pattern1 = try allocator.dupeZ(u8, "*.txt");
     defer allocator.free(pattern1);
-    const result1 = c_lib.glob(pattern1.ptr, glob.GLOB_DOOFFS, null, &pglob);
+    const result1 = c_lib.glob(pattern1.ptr, glob.ZLOB_DOOFFS, null, &pzlob);
     try testing.expectEqual(@as(c_int, 0), result1);
-    const first_count = pglob.gl_pathc;
+    const first_count = pzlob.gl_pathc;
 
     // Second glob with APPEND
     const pattern2 = try allocator.dupeZ(u8, "*.c");
     defer allocator.free(pattern2);
-    const result2 = c_lib.glob(pattern2.ptr, glob.GLOB_DOOFFS | glob.GLOB_APPEND, null, &pglob);
-    defer c_lib.globfree(&pglob);
+    const result2 = c_lib.glob(pattern2.ptr, glob.ZLOB_DOOFFS | glob.ZLOB_APPEND, null, &pzlob);
+    defer c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result2);
-    try testing.expect(pglob.gl_pathc > first_count);
+    try testing.expect(pzlob.gl_pathc > first_count);
 
     // Offset slots still NULL
-    try testing.expect(pglob.gl_pathv[0] == null);
-    try testing.expect(pglob.gl_pathv[1] == null);
+    try testing.expect(pzlob.gl_pathv[0] == null);
+    try testing.expect(pzlob.gl_pathv[1] == null);
 }
 
 // ============================================================================
-// GLOB_PERIOD - Allow leading '.' to match metacharacters
+// ZLOB_PERIOD - Allow leading '.' to match metacharacters
 // ============================================================================
 
-test "GLOB_PERIOD - matches hidden files with wildcard" {
+test "ZLOB_PERIOD - matches hidden files with wildcard" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -290,22 +290,22 @@ test "GLOB_PERIOD - matches hidden files with wildcard" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    // Define GLOB_PERIOD
-    const GLOB_PERIOD: c_int = 0x0080;
+    // Define ZLOB_PERIOD
+    const ZLOB_PERIOD: c_int = 0x0080;
 
     const pattern = try allocator.dupeZ(u8, "*");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, GLOB_PERIOD, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, ZLOB_PERIOD, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
     // Count matches that start with '.'
     var hidden_count: usize = 0;
-    for (0..pglob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+    for (0..pzlob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
         if (path.len > 0 and path[0] == '.') {
             hidden_count += 1;
         }
@@ -315,7 +315,7 @@ test "GLOB_PERIOD - matches hidden files with wildcard" {
     try testing.expect(hidden_count >= 1);
 }
 
-test "GLOB_PERIOD - without flag does not match hidden files" {
+test "ZLOB_PERIOD - without flag does not match hidden files" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -337,20 +337,20 @@ test "GLOB_PERIOD - without flag does not match hidden files" {
     const pattern = try allocator.dupeZ(u8, "*");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
     // Should NOT match hidden files
-    for (0..pglob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+    for (0..pzlob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
         try testing.expect(path.len == 0 or path[0] != '.');
     }
 }
 
-test "GLOB_PERIOD - explicit dot still matches" {
+test "ZLOB_PERIOD - explicit dot still matches" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -372,16 +372,16 @@ test "GLOB_PERIOD - explicit dot still matches" {
     const pattern = try allocator.dupeZ(u8, ".*");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
-    // Should match hidden files even without GLOB_PERIOD
+    // Should match hidden files even without ZLOB_PERIOD
     var hidden_count: usize = 0;
-    for (0..pglob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+    for (0..pzlob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
         if (path.len > 0 and path[0] == '.') {
             hidden_count += 1;
         }
@@ -390,38 +390,38 @@ test "GLOB_PERIOD - explicit dot still matches" {
 }
 
 // ============================================================================
-// GLOB_TILDE - Expand tilde (~) to home directory
+// ZLOB_TILDE - Expand tilde (~) to home directory
 // ============================================================================
 
-test "GLOB_TILDE - expands tilde to home directory" {
+test "ZLOB_TILDE - expands tilde to home directory" {
     const allocator = testing.allocator;
 
     // Get $HOME environment variable
     const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
 
     // Create a test file in home directory
-    const test_file = try std.fmt.allocPrint(allocator, "{s}/.glob_test_tilde_12345.txt", .{home});
+    const test_file = try std.fmt.allocPrint(allocator, "{s}/.zlob_test_tilde_12345.txt", .{home});
     defer allocator.free(test_file);
 
     const f = std.fs.cwd().createFile(test_file, .{}) catch return error.SkipZigTest;
     f.close();
     defer std.fs.cwd().deleteFile(test_file) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "~/.glob_test_tilde_*.txt");
+    const pattern = try allocator.dupeZ(u8, "~/.zlob_test_tilde_*.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_TILDE, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
 
-    const matched_path = std.mem.sliceTo(pglob.gl_pathv[0], 0);
+    const matched_path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
     try testing.expect(std.mem.startsWith(u8, matched_path, home));
 }
 
-test "GLOB_TILDE - expands ~username to user home" {
+test "ZLOB_TILDE - expands ~username to user home" {
     const allocator = testing.allocator;
 
     // Get current username
@@ -429,86 +429,86 @@ test "GLOB_TILDE - expands ~username to user home" {
     const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
 
     // Create test file
-    const test_file = try std.fmt.allocPrint(allocator, "{s}/.glob_test_user_12345.txt", .{home});
+    const test_file = try std.fmt.allocPrint(allocator, "{s}/.zlob_test_user_12345.txt", .{home});
     defer allocator.free(test_file);
 
     const f = std.fs.cwd().createFile(test_file, .{}) catch return error.SkipZigTest;
     f.close();
     defer std.fs.cwd().deleteFile(test_file) catch {};
 
-    const pattern_str = try std.fmt.allocPrint(allocator, "~{s}/.glob_test_user_*.txt", .{username});
+    const pattern_str = try std.fmt.allocPrint(allocator, "~{s}/.zlob_test_user_*.txt", .{username});
     defer allocator.free(pattern_str);
 
     const pattern = try allocator.dupeZ(u8, pattern_str);
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_TILDE, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
 
-    const matched_path = std.mem.sliceTo(pglob.gl_pathv[0], 0);
+    const matched_path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
     try testing.expect(std.mem.startsWith(u8, matched_path, home));
 }
 
-test "GLOB_TILDE - without flag treats tilde as literal" {
+test "ZLOB_TILDE - without flag treats tilde as literal" {
     const allocator = testing.allocator;
 
     const pattern = try allocator.dupeZ(u8, "~/*.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
-    // Without GLOB_TILDE, should try to find literal ~ directory
-    // Most likely GLOB_NOMATCH or GLOB_ABORTED
-    try testing.expect(result == glob.GLOB_NOMATCH or result == glob.GLOB_ABORTED);
+    // Without ZLOB_TILDE, should try to find literal ~ directory
+    // Most likely ZLOB_NOMATCH or ZLOB_ABORTED
+    try testing.expect(result == glob.ZLOB_NOMATCH or result == glob.ZLOB_ABORTED);
 }
 
 // ============================================================================
-// GLOB_TILDE_CHECK - Error if username not found
+// ZLOB_TILDE_CHECK - Error if username not found
 // ============================================================================
 
-test "GLOB_TILDE_CHECK - errors on nonexistent username" {
+test "ZLOB_TILDE_CHECK - errors on nonexistent username" {
     const allocator = testing.allocator;
 
     const pattern = try allocator.dupeZ(u8, "~nonexistentuser99999/*.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_TILDE | glob.GLOB_TILDE_CHECK, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_TILDE | glob.ZLOB_TILDE_CHECK, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
-    // Should return GLOB_NOMATCH for nonexistent user
-    try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
+    // Should return ZLOB_NOMATCH for nonexistent user
+    try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
 }
 
-test "GLOB_TILDE_CHECK - without flag returns tilde literal on unknown user" {
+test "ZLOB_TILDE_CHECK - without flag returns tilde literal on unknown user" {
     const allocator = testing.allocator;
 
     const pattern = try allocator.dupeZ(u8, "~nonexistentuser99999");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_TILDE | glob.GLOB_NOCHECK, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_TILDE | glob.ZLOB_NOCHECK, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
-    // Without GLOB_TILDE_CHECK, should fall back to literal tilde
+    // Without ZLOB_TILDE_CHECK, should fall back to literal tilde
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
 
-    const path = std.mem.sliceTo(pglob.gl_pathv[0], 0);
+    const path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
     try testing.expect(std.mem.startsWith(u8, path, "~nonexistentuser99999"));
 }
 
 // ============================================================================
-// GLOB_NOMAGIC - Return nothing if no magic and no match
+// ZLOB_NOMAGIC - Return nothing if no magic and no match
 // ============================================================================
 
-test "GLOB_NOMAGIC - returns NOMATCH for literal with no match" {
+test "ZLOB_NOMAGIC - returns NOMATCH for literal with no match" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -527,19 +527,19 @@ test "GLOB_NOMAGIC - returns NOMATCH for literal with no match" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    const GLOB_NOMAGIC: c_int = 0x0200;
+    const ZLOB_NOMAGIC: c_int = 0x0200;
 
     // Literal pattern (no wildcards) that doesn't exist
     const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, GLOB_NOMAGIC, null, &pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, ZLOB_NOMAGIC, null, &pzlob);
 
-    try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
+    try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
 }
 
-test "GLOB_NOMAGIC - returns NOMATCH for wildcard pattern with no match" {
+test "ZLOB_NOMAGIC - returns NOMATCH for wildcard pattern with no match" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -558,20 +558,20 @@ test "GLOB_NOMAGIC - returns NOMATCH for wildcard pattern with no match" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    const GLOB_NOMAGIC: c_int = 0x0200;
+    const ZLOB_NOMAGIC: c_int = 0x0200;
 
     // Pattern with wildcards that doesn't match
     const pattern = try allocator.dupeZ(u8, "*.nonexistent");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, GLOB_NOMAGIC, null, &pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, ZLOB_NOMAGIC, null, &pzlob);
 
     // Has metacharacters, so still returns NOMATCH
-    try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
+    try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
 }
 
-test "GLOB_NOMAGIC - succeeds for literal that exists" {
+test "ZLOB_NOMAGIC - succeeds for literal that exists" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -590,24 +590,24 @@ test "GLOB_NOMAGIC - succeeds for literal that exists" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    const GLOB_NOMAGIC: c_int = 0x0200;
+    const ZLOB_NOMAGIC: c_int = 0x0200;
 
     const pattern = try allocator.dupeZ(u8, "file1.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, GLOB_NOMAGIC, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, ZLOB_NOMAGIC, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
 }
 
 // ============================================================================
 // Combined flags tests
 // ============================================================================
 
-test "GLOB_MARK and GLOB_PERIOD together" {
+test "ZLOB_MARK and ZLOB_PERIOD together" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -626,21 +626,21 @@ test "GLOB_MARK and GLOB_PERIOD together" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    const GLOB_PERIOD: c_int = 0x0080;
+    const ZLOB_PERIOD: c_int = 0x0080;
 
     const pattern = try allocator.dupeZ(u8, "*");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK | GLOB_PERIOD, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK | ZLOB_PERIOD, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
     // Should match hidden files/dirs AND add trailing slash to directories
     var hidden_dir_with_slash: bool = false;
-    for (0..pglob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+    for (0..pzlob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
         if (path.len > 0 and path[0] == '.' and path[path.len - 1] == '/') {
             hidden_dir_with_slash = true;
         }
@@ -648,13 +648,13 @@ test "GLOB_MARK and GLOB_PERIOD together" {
     try testing.expect(hidden_dir_with_slash); // .hidden_dir/
 }
 
-test "GLOB_TILDE with recursive glob" {
+test "ZLOB_TILDE with recursive glob" {
     const allocator = testing.allocator;
 
     const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
 
     // Create nested test directory in home
-    const test_dir_path = try std.fmt.allocPrint(allocator, "{s}/.glob_test_nested", .{home});
+    const test_dir_path = try std.fmt.allocPrint(allocator, "{s}/.zlob_test_nested", .{home});
     defer allocator.free(test_dir_path);
 
     std.fs.cwd().makeDir(test_dir_path) catch {};
@@ -666,22 +666,22 @@ test "GLOB_TILDE with recursive glob" {
     const f = std.fs.cwd().createFile(test_file, .{}) catch return error.SkipZigTest;
     f.close();
 
-    const pattern = try allocator.dupeZ(u8, "~/**/.glob_test_nested/*.txt");
+    const pattern = try allocator.dupeZ(u8, "~/**/.zlob_test_nested/*.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_TILDE, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expect(pglob.gl_pathc >= 1);
+    try testing.expect(pzlob.gl_pathc >= 1);
 }
 
 // ============================================================================
-// GLOB_PERIOD with recursive patterns - Test both directory walking and matchPaths
+// ZLOB_PERIOD with recursive patterns - Test both directory walking and matchPaths
 // ============================================================================
 
-test "GLOB_PERIOD - recursive glob should not match hidden files by default" {
+test "ZLOB_PERIOD - recursive glob should not match hidden files by default" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -700,19 +700,19 @@ test "GLOB_PERIOD - recursive glob should not match hidden files by default" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    // Test with ** recursive pattern - should NOT match hidden files without GLOB_PERIOD
+    // Test with ** recursive pattern - should NOT match hidden files without ZLOB_PERIOD
     const pattern = try allocator.dupeZ(u8, "**/*");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
     // Should NOT match any hidden files or files inside hidden directories
-    for (0..pglob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+    for (0..pzlob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
 
         // Check that path doesn't contain /.hidden anywhere
         if (std.mem.indexOf(u8, path, "/.hidden") != null) {
@@ -727,13 +727,13 @@ test "GLOB_PERIOD - recursive glob should not match hidden files by default" {
             path;
 
         if (basename.len > 0 and basename[0] == '.') {
-            std.debug.print("ERROR: Matched hidden file without GLOB_PERIOD: {s}\n", .{path});
+            std.debug.print("ERROR: Matched hidden file without ZLOB_PERIOD: {s}\n", .{path});
         }
         try testing.expect(basename.len == 0 or basename[0] != '.');
     }
 }
 
-test "GLOB_PERIOD - recursive glob matches hidden files with flag" {
+test "ZLOB_PERIOD - recursive glob matches hidden files with flag" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -752,15 +752,15 @@ test "GLOB_PERIOD - recursive glob matches hidden files with flag" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    const GLOB_PERIOD: c_int = 0x0080;
+    const ZLOB_PERIOD: c_int = 0x0080;
 
-    // Test with ** recursive pattern WITH GLOB_PERIOD - should match hidden files
+    // Test with ** recursive pattern WITH ZLOB_PERIOD - should match hidden files
     const pattern = try allocator.dupeZ(u8, "**/*");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, GLOB_PERIOD, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, ZLOB_PERIOD, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -768,8 +768,8 @@ test "GLOB_PERIOD - recursive glob matches hidden files with flag" {
     var hidden_file_count: usize = 0;
     var hidden_in_path_count: usize = 0;
 
-    for (0..pglob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+    for (0..pzlob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
 
         // Check if path contains .hidden_dir
         if (std.mem.indexOf(u8, path, ".hidden_dir") != null) {
@@ -792,7 +792,7 @@ test "GLOB_PERIOD - recursive glob matches hidden files with flag" {
     try testing.expect(hidden_in_path_count >= 1); // At least .hidden_dir/file5.txt
 }
 
-test "GLOB_PERIOD - explicit dot pattern still matches without flag in recursive glob" {
+test "ZLOB_PERIOD - explicit dot pattern still matches without flag in recursive glob" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -811,21 +811,21 @@ test "GLOB_PERIOD - explicit dot pattern still matches without flag in recursive
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    // Pattern explicitly starts with . - should match even without GLOB_PERIOD
+    // Pattern explicitly starts with . - should match even without ZLOB_PERIOD
     const pattern = try allocator.dupeZ(u8, "**/.hidden*");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
     // Should match .hidden_file and .hidden_dir because pattern explicitly starts with '.'
-    try testing.expect(pglob.gl_pathc >= 1);
+    try testing.expect(pzlob.gl_pathc >= 1);
 
-    for (0..pglob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pglob.gl_pathv[i], 0);
+    for (0..pzlob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
         try testing.expect(std.mem.indexOf(u8, path, ".hidden") != null);
     }
 }
@@ -852,14 +852,14 @@ test "literal path - file exists" {
     const pattern = try allocator.dupeZ(u8, "file1.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
-    try testing.expectEqualStrings("file1.txt", std.mem.sliceTo(pglob.gl_pathv[0], 0));
-    try testing.expectEqual(@as(usize, 9), pglob.gl_pathlen[0]);
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqualStrings("file1.txt", std.mem.sliceTo(pzlob.gl_pathv[0], 0));
+    try testing.expectEqual(@as(usize, 9), pzlob.gl_pathlen[0]);
 }
 
 test "literal path - directory exists" {
@@ -880,16 +880,16 @@ test "literal path - directory exists" {
     const pattern = try allocator.dupeZ(u8, "dir1");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
-    try testing.expectEqualStrings("dir1", std.mem.sliceTo(pglob.gl_pathv[0], 0));
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqualStrings("dir1", std.mem.sliceTo(pzlob.gl_pathv[0], 0));
 }
 
-test "literal path - GLOB_ONLYDIR with directory" {
+test "literal path - ZLOB_ONLYDIR with directory" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -907,16 +907,16 @@ test "literal path - GLOB_ONLYDIR with directory" {
     const pattern = try allocator.dupeZ(u8, "dir1");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_ONLYDIR, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_ONLYDIR, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
-    try testing.expectEqualStrings("dir1", std.mem.sliceTo(pglob.gl_pathv[0], 0));
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqualStrings("dir1", std.mem.sliceTo(pzlob.gl_pathv[0], 0));
 }
 
-test "literal path - GLOB_ONLYDIR with file (should fail)" {
+test "literal path - ZLOB_ONLYDIR with file (should fail)" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -934,14 +934,14 @@ test "literal path - GLOB_ONLYDIR with file (should fail)" {
     const pattern = try allocator.dupeZ(u8, "file1.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_ONLYDIR, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_ONLYDIR, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
+    try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
 }
 
-test "literal path - GLOB_MARK with directory" {
+test "literal path - ZLOB_MARK with directory" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -959,18 +959,18 @@ test "literal path - GLOB_MARK with directory" {
     const pattern = try allocator.dupeZ(u8, "dir1");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
-    const path = std.mem.sliceTo(pglob.gl_pathv[0], 0);
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    const path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
     try testing.expectEqualStrings("dir1/", path);
-    try testing.expectEqual(@as(usize, 5), pglob.gl_pathlen[0]);
+    try testing.expectEqual(@as(usize, 5), pzlob.gl_pathlen[0]);
 }
 
-test "literal path - GLOB_MARK with file (no slash)" {
+test "literal path - ZLOB_MARK with file (no slash)" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -988,13 +988,13 @@ test "literal path - GLOB_MARK with file (no slash)" {
     const pattern = try allocator.dupeZ(u8, "file1.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
-    const path = std.mem.sliceTo(pglob.gl_pathv[0], 0);
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    const path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
     try testing.expectEqualStrings("file1.txt", path);
 }
 
@@ -1016,17 +1016,17 @@ test "literal path - ./ prefix normalization" {
     const pattern = try allocator.dupeZ(u8, "./file1.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
     // Should normalize away the "./" prefix
-    try testing.expectEqualStrings("file1.txt", std.mem.sliceTo(pglob.gl_pathv[0], 0));
+    try testing.expectEqualStrings("file1.txt", std.mem.sliceTo(pzlob.gl_pathv[0], 0));
 }
 
-test "literal path - GLOB_NOCHECK returns pattern when not found" {
+test "literal path - ZLOB_NOCHECK returns pattern when not found" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -1044,17 +1044,17 @@ test "literal path - GLOB_NOCHECK returns pattern when not found" {
     const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_NOCHECK, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_NOCHECK, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
     // Should return the pattern itself
-    try testing.expectEqualStrings("nonexistent.txt", std.mem.sliceTo(pglob.gl_pathv[0], 0));
+    try testing.expectEqualStrings("nonexistent.txt", std.mem.sliceTo(pzlob.gl_pathv[0], 0));
 }
 
-test "literal path - not found without GLOB_NOCHECK" {
+test "literal path - not found without ZLOB_NOCHECK" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -1072,14 +1072,14 @@ test "literal path - not found without GLOB_NOCHECK" {
     const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, glob.GLOB_NOMATCH), result);
+    try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
 }
 
-test "literal path - GLOB_MARK and GLOB_ONLYDIR together" {
+test "literal path - ZLOB_MARK and ZLOB_ONLYDIR together" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -1097,13 +1097,13 @@ test "literal path - GLOB_MARK and GLOB_ONLYDIR together" {
     const pattern = try allocator.dupeZ(u8, "dir1");
     defer allocator.free(pattern);
 
-    var pglob: glob.glob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.GLOB_MARK | glob.GLOB_ONLYDIR, null, &pglob);
-    defer if (result == 0) c_lib.globfree(&pglob);
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK | glob.ZLOB_ONLYDIR, null, &pzlob);
+    defer if (result == 0) c_lib.globfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pglob.gl_pathc);
-    const path = std.mem.sliceTo(pglob.gl_pathv[0], 0);
+    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    const path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
     try testing.expectEqualStrings("dir1/", path);
-    try testing.expectEqual(@as(usize, 5), pglob.gl_pathlen[0]);
+    try testing.expectEqual(@as(usize, 5), pzlob.gl_pathlen[0]);
 }

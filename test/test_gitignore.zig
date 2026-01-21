@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const simdglob = @import("simdglob");
+const zlob = @import("zlob");
 const glob = @import("glob");
 const GitIgnore = glob.GitIgnore;
 

@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const simdglob = @import("simdglob");
+const zlob = @import("zlob");
 
 test "matchPaths - simple wildcard" {
     const files = [_][]const u8{
@@ -11,7 +11,7 @@ test "matchPaths - simple wildcard" {
         "readme.md",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "*.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "*.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -35,7 +35,7 @@ test "matchPaths - question mark" {
         "x.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "?.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "?.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -49,7 +49,7 @@ test "matchPaths - character class" {
         "d4.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "[ab]*.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "[ab]*.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -62,7 +62,7 @@ test "matchPaths - negated character class" {
         "c3.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "[!a]*.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "[!a]*.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -76,7 +76,7 @@ test "matchPaths - with paths" {
         "docs/readme.md",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "src/*.zig", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "src/*.zig", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -90,7 +90,7 @@ test "matchPaths - recursive pattern" {
     };
 
     // Use recursive pattern to match test.txt at any depth
-    var result = try simdglob.matchPaths(testing.allocator, "**/test.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "**/test.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -102,7 +102,7 @@ test "matchPaths - no matches" {
         "main.zig",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "*.log", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "*.log", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 0), result.match_count);
@@ -111,7 +111,7 @@ test "matchPaths - no matches" {
 test "matchPaths - empty file list" {
     const files = [_][]const u8{};
 
-    var result = try simdglob.matchPaths(testing.allocator, "*.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "*.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 0), result.match_count);
@@ -124,7 +124,7 @@ test "matchPaths - exact match" {
         "file.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "test.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "test.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);
@@ -139,7 +139,7 @@ test "matchPaths - complex pattern" {
         "test_ab.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "test_[0-9]*.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "test_[0-9]*.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 2), result.match_count);
@@ -152,7 +152,7 @@ test "matchPaths - sorted results" {
         "b.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "*.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "*.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
@@ -170,7 +170,7 @@ test "matchPaths - NOSORT flag" {
         "b.txt",
     };
 
-    var result = try simdglob.matchPaths(testing.allocator, "*.txt", &files, simdglob.GLOB_NOSORT);
+    var result = try zlob.matchPaths(testing.allocator, "*.txt", &files, zlob.ZLOB_NOSORT);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);
@@ -186,7 +186,7 @@ test "matchPaths - large file list" {
         files[i] = name;
     }
 
-    var result = try simdglob.matchPaths(testing.allocator, "file_5*.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "file_5*.txt", &files, 0);
     defer result.deinit();
 
     // Should match file_5.txt, file_50.txt, file_51.txt, ..., file_599.txt
@@ -202,7 +202,7 @@ test "matchPaths - SIMD fast path" {
     };
 
     // Long literal pattern should use SIMD fast path
-    var result = try simdglob.matchPaths(testing.allocator, "very_long_filename_that_triggers_simd.txt", &files, 0);
+    var result = try zlob.matchPaths(testing.allocator, "very_long_filename_that_triggers_simd.txt", &files, 0);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);
