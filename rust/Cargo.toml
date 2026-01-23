@@ -1,0 +1,18 @@
+[package]
+name = "zlob"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance glob pattern matching with SIMD optimizations"
+license = "MIT"
+keywords = ["glob", "pattern", "matching", "simd", "gitignore"]
+categories = ["filesystem", "text-processing"]
+readme = "README.md"
+
+[dependencies]
+bitflags = "2"
+
+[build-dependencies]
+# No external dependencies - we invoke zig directly
+
+[dev-dependencies]
+tempfile = "3"

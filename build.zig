@@ -1,5 +1,10 @@
 const std = @import("std");
 
+// Parse version from build.zig.zon at comptime (single source of truth)
+const zon = @import("build.zig.zon");
+const version_string: []const u8 = zon.version;
+const version = std.SemanticVersion.parse(version_string) catch @compileError("Invalid version in build.zig.zon");
+
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
 // executed by an external runner. The functions in `std.Build` implement a DSL
@@ -82,6 +87,23 @@ pub fn build(b: *std.Build) void {
     c_lib.installHeader(b.path("include/zlob.h"), "zlob.h");
     b.installArtifact(c_lib);
 
+    // C-compatible static library (libzlob.a) for Rust FFI and static linking
+    const c_lib_static = b.addLibrary(.{
+        .name = "zlob",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_lib.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zlob", .module = zlob_core_mod },
+            },
+        }),
+    });
+
+    b.installArtifact(c_lib_static);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -98,30 +120,37 @@ pub fn build(b: *std.Build) void {
     //
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
+    const exe_mod = b.createModule(.{
+        // b.createModule defines a new module just like b.addModule but,
+        // unlike b.addModule, it does not expose the module to consumers of
+        // this package, which is why in this case we don't have to give it a name.
+        .root_source_file = b.path("src/main.zig"),
+        // Target and optimization levels must be explicitly wired in when
+        // defining an executable or library (in the root module), and you
+        // can also hardcode a specific target for an executable or library
+        // definition if desireable (e.g. firmware for embedded devices).
+        .target = target,
+        .optimize = optimize,
+        // List of modules available for import in source files part of the
+        // root module.
+        .imports = &.{
+            // Here "zlob" is the name you will use in your source code to
+            // import this module (e.g. `@import("zlob")`). The name is
+            // repeated because you are allowed to rename your imports, which
+            // can be extremely useful in case of collisions (which can happen
+            // importing modules from different packages).
+            .{ .name = "zlob", .module = mod },
+        },
+    });
+
+    // Pass version from build.zig.zon to the CLI
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", version_string);
+    exe_mod.addOptions("build_options", options);
+
     const exe = b.addExecutable(.{
         .name = "zlob",
-        .root_module = b.createModule(.{
-            // b.createModule defines a new module just like b.addModule but,
-            // unlike b.addModule, it does not expose the module to consumers of
-            // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/main.zig"),
-            // Target and optimization levels must be explicitly wired in when
-            // defining an executable or library (in the root module), and you
-            // can also hardcode a specific target for an executable or library
-            // definition if desireable (e.g. firmware for embedded devices).
-            .target = target,
-            .optimize = optimize,
-            // List of modules available for import in source files part of the
-            // root module.
-            .imports = &.{
-                // Here "zlob" is the name you will use in your source code to
-                // import this module (e.g. `@import("zlob")`). The name is
-                // repeated because you are allowed to rename your imports, which
-                // can be extremely useful in case of collisions (which can happen
-                // importing modules from different packages).
-                .{ .name = "zlob", .module = mod },
-            },
-        }),
+        .root_module = exe_mod,
     });
 
     // This declares intent for the executable to be installed into the

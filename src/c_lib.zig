@@ -7,7 +7,12 @@ pub const zlob_t = zlob_impl.zlob_t;
 pub const zlob_dirent_t = zlob_impl.zlob_dirent_t;
 pub const DirIterator = zlob_impl.DirIterator;
 
-/// Zig or Rust compatible string slice type
+/// Zig or Rust compatible string slice type 
+/// which makes FFI code execute signficantly faster than using C-style null-terminated strings
+/// at a cost of relying on the unstable Rust/Zig ABI compatiblitiy.
+///
+/// Meaning that any api that is accepting this type may break in any future version of Zig or Rust 
+/// but it comes with a significant 15% performance boost for some hot paths so it may be worth the risk
 pub const zlob_slice_t = extern struct {
     ptr: [*]const u8,
     len: usize,
@@ -39,7 +44,9 @@ pub const ZLOB_NOMATCH = zlob_impl.ZLOB_NOMATCH;
 
 const ZLOB_FLAGS_SHARED_STRINGS = zlob_impl.ZLOB_FLAGS_SHARED_STRINGS;
 
-pub export fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) c_int {
+/// POSIX-compatible glob() function
+/// Exported as "glob" for C ABI compatibility, callable as "zlob" from Zig code
+pub fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) callconv(.c) c_int {
     const allocator = std.heap.c_allocator;
 
     if (zlob_impl.glob(allocator, pattern, flags, errfunc, pzlob)) |opt_result| {
@@ -56,8 +63,16 @@ pub export fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob
     }
 }
 
-pub export fn zlobfree(pzlob: *zlob_t) void {
+/// POSIX-compatible globfree() function
+/// Exported as "globfree" for C ABI compatibility, callable as "zlobfree" from Zig code
+pub fn zlobfree(pzlob: *zlob_t) callconv(.c) void {
     zlob_impl.globfreeInternal(std.heap.c_allocator, pzlob);
+}
+
+// Export with POSIX-compatible C symbol names
+comptime {
+    @export(&zlob, .{ .name = "glob" });
+    @export(&zlobfree, .{ .name = "globfree" });
 }
 
 /// Extnesion to the standard C api allowing to match the pattern against the flat list of paths
@@ -167,11 +182,3 @@ pub export fn zlob_match_paths_slice(
 
     return 0;
 }
-
-// ============================================================================
-// Version information
-// ============================================================================
-
-export const ZLOB_VERSION_MAJOR: c_int = 1;
-export const ZLOB_VERSION_MINOR: c_int = 0;
-export const ZLOB_VERSION_PATCH: c_int = 0;

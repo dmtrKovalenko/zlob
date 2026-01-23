@@ -420,6 +420,17 @@ pub fn analyzeBracedPattern(allocator: Allocator, pattern: []const u8) !Optimiza
         return .fallback;
     };
 
+    // Check if braces are only in the filename (last) component
+    // If braces are in directory components, we need to fall back to multi-pattern expansion
+    for (parsed.components) |comp| {
+        if (!comp.is_last and comp.alternatives != null) {
+            // Braces in directory component - need to expand into multiple patterns
+            var parsed_mut = parsed;
+            parsed_mut.deinit();
+            return .fallback;
+        }
+    }
+
     return .{ .single_walk = parsed };
 }
 
@@ -561,23 +572,16 @@ test "analyzePatternForGlob - single_walk with alternatives" {
     try testing.expectEqual(@as(usize, 2), last_comp.alternatives.?.len);
 }
 
-test "analyzePatternForGlob - single_walk with dir alternatives" {
+test "analyzePatternForGlob - dir alternatives uses fallback" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    // Pattern like {src,lib}/**/*.rs should use single_walk
+    // Pattern like {src,lib}/**/*.rs should use fallback because braces are in directory component
     var result = try analyzeBracedPattern(allocator, "{src,lib}/**/*.rs");
     defer result.deinit();
 
-    try testing.expect(result == .single_walk);
-
-    const parsed = result.single_walk;
-    try testing.expectEqual(@as(usize, 3), parsed.components.len);
-
-    // First component should have alternatives
-    const first_comp = parsed.components[0];
-    try testing.expect(first_comp.alternatives != null);
-    try testing.expectEqual(@as(usize, 2), first_comp.alternatives.?.len);
+    // Directory-level braces require multi-pattern expansion (fallback)
+    try testing.expect(result == .fallback);
 }
 
 test "analyzePatternForGlob - no braces returns no_braces strategy" {

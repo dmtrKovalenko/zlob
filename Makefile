@@ -4,6 +4,8 @@
 #   make          - Build the shared library
 #   make install  - Install library and headers (requires sudo)
 #   make test     - Run minimal C API tests
+#   make dev      - Build all: Zig, C library, and Rust bindings
+#   make dev-test - Run all tests: Zig, C, and Rust
 #   make clean    - Remove build artifacts
 
 PREFIX ?= /usr/local
@@ -11,12 +13,11 @@ LIBDIR = $(PREFIX)/lib
 INCLUDEDIR = $(PREFIX)/include
 
 LIBNAME = libzlob.so
-VERSION = 1.0.0
 
 ZIG = zig
-ZIG_FLAGS = -O ReleaseFast
 CC ?= gcc
 CFLAGS = -Wall -Wextra -O2
+CARGO ?= cargo
 
 # Detect OS for library extension
 UNAME_S := $(shell uname -s)
@@ -31,15 +32,20 @@ else
     LIBEXT = dll
 endif
 
-.PHONY: all build install uninstall test clean make-cli install-cli uninstall-cli
+.PHONY: all build install uninstall test clean cli install-cli uninstall-cli dev dev-test help
 
 all: build
 
 # Build the shared library using zig build
 build:
-	@echo "Building zlob library..."
+	@echo "Building zlob..."
 	$(ZIG) build -Doptimize=ReleaseFast
-	@echo "Library built: zig-out/lib/$(LIBNAME)"
+	@echo ""
+	@echo "Build complete:"
+	@echo "  Library: zig-out/lib/$(LIBNAME)"
+	@echo "  Static:  zig-out/lib/libzlob.a"
+	@echo "  CLI:     zig-out/bin/zlob"
+	@echo "  Header:  zig-out/include/zlob.h"
 
 # Install library and headers
 install: build
@@ -47,7 +53,7 @@ install: build
 	install -d $(LIBDIR)
 	install -d $(INCLUDEDIR)
 	install -m 644 zig-out/lib/$(LIBNAME) $(LIBDIR)/$(LIBNAME)
-	install -m 644 include/zlob.h $(INCLUDEDIR)/zlob.h
+	install -m 644 zig-out/include/zlob.h $(INCLUDEDIR)/zlob.h
 	@if [ "$(UNAME_S)" = "Linux" ]; then \
 		ldconfig 2>/dev/null || true; \
 	fi
@@ -67,7 +73,7 @@ uninstall:
 
 # Minimal test of C API
 test: build test/test_c_api.c
-	$(CC) $(CFLAGS) -I./include -L./zig-out/lib \
+	$(CC) $(CFLAGS) -I./zig-out/include -L./zig-out/lib \
 		-o test_c_api test/test_c_api.c -lzlob \
 		-Wl,-rpath,./zig-out/lib
 	@echo ""
@@ -78,6 +84,7 @@ test: build test/test_c_api.c
 clean:
 	rm -rf zig-out zig-cache .zig-cache
 	rm -f test_c_api test_match_paths main
+	cd rust && $(CARGO) clean 2>/dev/null || true
 	@echo "Clean complete!"
 
 # Build CLI executable
@@ -87,7 +94,7 @@ cli:
 	@echo "CLI built: zig-out/bin/zlob"
 
 # Install CLI executable
-install-cli: make-cli
+install-cli: cli
 	@echo "Installing zlob CLI to $(PREFIX)/bin..."
 	install -d $(PREFIX)/bin
 	install -m 755 zig-out/bin/zlob $(PREFIX)/bin/zlob
@@ -100,26 +107,71 @@ uninstall-cli:
 	rm -f $(PREFIX)/bin/zlob
 	@echo "Uninstall complete!"
 
+# ============================================================================
+# Development targets
+# ============================================================================
+
+# Build all: Zig library, C library, and Rust bindings
+dev: build
+	@echo ""
+	@echo "Building Rust bindings..."
+	cd rust && $(CARGO) build
+	@echo ""
+	@echo "Development build complete:"
+	@echo "  Zig library:  zig-out/lib/$(LIBNAME)"
+	@echo "  Zig static:   zig-out/lib/libzlob.a"
+	@echo "  Zig CLI:      zig-out/bin/zlob"
+	@echo "  Rust target:  rust/target/debug/libzlob.rlib"
+
+# Run all tests: Zig, C, and Rust
+dev-test: build
+	@echo "========================================"
+	@echo "Running Zig tests..."
+	@echo "========================================"
+	$(ZIG) build test
+	@echo ""
+	@echo "========================================"
+	@echo "Running C API tests..."
+	@echo "========================================"
+	$(CC) $(CFLAGS) -I./zig-out/include -L./zig-out/lib \
+		-o test_c_api test/test_c_api.c -lzlob \
+		-Wl,-rpath,./zig-out/lib
+	./test_c_api
+	@rm -f test_c_api
+	@echo ""
+	@echo "========================================"
+	@echo "Running Rust tests..."
+	@echo "========================================"
+	cd rust && $(CARGO) test
+	@echo ""
+	@echo "========================================"
+	@echo "All tests passed!"
+	@echo "========================================"
+
 # Help
 help:
 	@echo "zlob - faster and more correct glob library, 100% POSIX compatible"
 	@echo ""
 	@echo "Targets:"
-	@echo "  make              - Build the shared library"
+	@echo "  make              - Build the shared library (release)"
 	@echo "  make install      - Install library and headers (may require sudo)"
-	@echo "  make test         - Run minimal C API tests"
-	@echo "  make make-cli     - Build the CLI executable"
+	@echo "  make test         - Run C API tests only"
+	@echo "  make cli          - Build the CLI executable"
 	@echo "  make install-cli  - Install CLI executable (may require sudo)"
 	@echo "  make clean        - Remove build artifacts"
-	@echo "  make help         - Show this help message"
+	@echo ""
+	@echo "Development:"
+	@echo "  make dev          - Build all: Zig, C, and Rust"
+	@echo "  make dev-test     - Run all tests: Zig, C, and Rust"
 	@echo ""
 	@echo "Variables:"
 	@echo "  PREFIX        - Installation prefix (default: /usr/local)"
 	@echo "  CC            - C compiler (default: gcc)"
+	@echo "  CARGO         - Cargo command (default: cargo)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make"
-	@echo "  make test"
+	@echo "  make dev-test"
 	@echo "  sudo make install"
-	@echo "  make make-cli && sudo make install-cli"
+	@echo "  make cli && sudo make install-cli"
 	@echo "  sudo make PREFIX=/usr install"

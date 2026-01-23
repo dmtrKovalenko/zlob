@@ -223,51 +223,23 @@ pub const GlobFlags = packed struct(u32) {
     // Padding to fill 32 bits
     _padding: u16 = 0,
 
-    /// Convert to c_int for C API compatibility.
-    /// The C API uses standard integer flags that can be OR'd together.
     pub fn toInt(self: GlobFlags) c_int {
         return @bitCast(self);
     }
 
-    /// Create GlobFlags from a c_int (for C API compatibility).
-    /// Accepts flags passed from C code using ZLOB_* macros.
     pub fn fromInt(flags: c_int) GlobFlags {
         return @bitCast(flags);
     }
 
-    /// Create GlobFlags from a u32 (for internal Zig usage).
     pub fn fromU32(flags: u32) GlobFlags {
         return @bitCast(flags);
     }
 
-    /// Convert to u32 for internal usage.
     pub fn toU32(self: GlobFlags) u32 {
         return @bitCast(self);
     }
 
-    /// Combine two flag sets (equivalent to bitwise OR).
-    pub fn with(self: GlobFlags, other: GlobFlags) GlobFlags {
-        return fromU32(self.toU32() | other.toU32());
-    }
-
-    /// Remove flags (equivalent to bitwise AND with complement).
-    pub fn without(self: GlobFlags, other: GlobFlags) GlobFlags {
-        return fromU32(self.toU32() & ~other.toU32());
-    }
-
-    /// Check if any of the specified flags are set.
-    pub fn hasAny(self: GlobFlags, other: GlobFlags) bool {
-        return (self.toU32() & other.toU32()) != 0;
-    }
-
-    /// Check if all of the specified flags are set.
-    pub fn hasAll(self: GlobFlags, other: GlobFlags) bool {
-        const mask = other.toU32();
-        return (self.toU32() & mask) == mask;
-    }
-
     comptime {
-        // Verify the packed struct matches u32/c_int size
         std.debug.assert(@sizeOf(GlobFlags) == @sizeOf(u32));
         std.debug.assert(@bitSizeOf(GlobFlags) == @bitSizeOf(u32));
     }
@@ -982,8 +954,10 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     // FAST PATH: Literal pattern optimization (no wildcards)
     // This is the most common case and libc glob optimizes it to a single stat() call
     // NOTE: Skip if pattern starts with tilde (needs tilde expansion first)
+    // NOTE: Skip if we have brace alternatives - they need to be expanded
     const needs_tilde_expansion = effective_pattern.len > 0 and effective_pattern[0] == '~';
-    if (!hasWildcardsSIMD(effective_pattern) and !needs_tilde_expansion) {
+    const has_brace_alternatives = brace_parsed != null;
+    if (!hasWildcardsSIMD(effective_pattern) and !needs_tilde_expansion and !has_brace_alternatives) {
         // Check gitignore for literal path
         if (gitignore_filter) |gi| {
             const cwd = std.fs.cwd();
@@ -1012,7 +986,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
 
     // Fast path: simple pattern with literal prefix (e.g., "src/foo/*.txt")
     if (info.simple_extension != null and info.literal_prefix.len > 0) {
-        return globInDirFiltered(allocator, info.wildcard_suffix, info.literal_prefix, effective_flags, errfunc, pzlob, info.directories_only, gitignore_filter);
+        return globInDirFiltered(allocator, info.wildcard_suffix, info.literal_prefix, effective_flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed);
     }
 
     if (mem.indexOf(u8, effective_pattern, "**")) |double_star_pos| {
@@ -1101,7 +1075,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
         return globRecursive(allocator, filename_pattern, dirname, effective_flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter);
     }
 
-    return globInDirFiltered(allocator, filename_pattern, dirname, effective_flags, errfunc, pzlob, info.directories_only, gitignore_filter);
+    return globInDirFiltered(allocator, filename_pattern, dirname, effective_flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed);
 }
 
 /// Helper to return pattern as result (for ZLOB_NOCHECK)
@@ -1246,7 +1220,12 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
                     gitignore_ptr,
                 );
             },
-            .fallback, .no_braces => return try globBraceExpand(allocator, pattern_slice, flags, errfunc, pzlob, gitignore_ptr),
+            .fallback => {
+                return try globBraceExpand(allocator, pattern_slice, flags, errfunc, pzlob, gitignore_ptr);
+            },
+            .no_braces => {
+                return try globBraceExpand(allocator, pattern_slice, flags, errfunc, pzlob, gitignore_ptr);
+            },
         }
     }
 
@@ -1374,7 +1353,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     const info = analyzePattern(pattern, flags);
 
     // Split pattern at **
-    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInDirFiltered(allocator, pattern, dirname, flags, errfunc, pzlob, directories_only, gitignore_filter);
+    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInDirFiltered(allocator, pattern, dirname, flags, errfunc, pzlob, directories_only, gitignore_filter, brace_parsed);
 
     var after_double_star = pattern[double_star_pos + 2 ..];
 
@@ -2259,7 +2238,20 @@ pub inline fn maybeAppendSlash(allocator: std.mem.Allocator, path: [*c]u8, path_
     return @ptrCast(new_slice.ptr);
 }
 
-fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore) !?void {
+fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern) !?void {
+    // If we have brace alternatives for the filename pattern, use them for matching
+    // e.g., "*.{toml,lock}" -> alternatives = ["*.toml", "*.lock"]
+    const file_alternatives: ?[]const PatternContext = if (brace_parsed) |bp| blk: {
+        // Find the last component (should be the filename pattern)
+        if (bp.components.len > 0) {
+            const last_comp = bp.components[bp.components.len - 1];
+            if (last_comp.is_last and last_comp.pattern_contexts != null) {
+                break :blk last_comp.pattern_contexts;
+            }
+        }
+        break :blk null;
+    } else null;
+
     const pattern_ctx = PatternContext.init(pattern);
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
 
@@ -2292,8 +2284,18 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         const name = mem.sliceTo(&entry.name, 0);
         if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
 
-        // Fast path: use optimized suffix matching for *.ext patterns
-        const matches = if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+        // Match using brace alternatives if available, otherwise use single pattern
+        const matches = if (file_alternatives) |alts| blk: {
+            // Try each alternative pattern
+            for (alts) |alt_ctx| {
+                if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
+                    if (batched_suffix_match.matchSuffix(name)) break :blk true;
+                } else if (fnmatchWithContext(&alt_ctx, name)) {
+                    break :blk true;
+                }
+            }
+            break :blk false;
+        } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
             batched_suffix_match.matchSuffix(name)
         else
             fnmatchWithContext(&pattern_ctx, name);
@@ -2743,40 +2745,6 @@ test "GlobFlags roundtrip conversion" {
 
     const from_cint = GlobFlags.fromInt(flags.toInt());
     try testing.expectEqual(combined, from_cint.toU32());
-}
-
-test "GlobFlags with/without operations" {
-    const testing = std.testing;
-
-    const base = GlobFlags{ .mark = true, .nosort = true };
-
-    // Test with() - add flags
-    const with_brace = base.with(.{ .brace = true });
-    try testing.expect(with_brace.mark);
-    try testing.expect(with_brace.nosort);
-    try testing.expect(with_brace.brace);
-
-    // Test without() - remove flags
-    const without_nosort = with_brace.without(.{ .nosort = true });
-    try testing.expect(without_nosort.mark);
-    try testing.expect(!without_nosort.nosort);
-    try testing.expect(without_nosort.brace);
-}
-
-test "GlobFlags hasAny/hasAll" {
-    const testing = std.testing;
-
-    const flags = GlobFlags{ .mark = true, .nosort = true, .brace = true };
-
-    // hasAny - returns true if any specified flag is set
-    try testing.expect(flags.hasAny(.{ .mark = true }));
-    try testing.expect(flags.hasAny(.{ .mark = true, .period = true })); // mark is set
-    try testing.expect(!flags.hasAny(.{ .period = true, .gitignore = true }));
-
-    // hasAll - returns true only if all specified flags are set
-    try testing.expect(flags.hasAll(.{ .mark = true }));
-    try testing.expect(flags.hasAll(.{ .mark = true, .nosort = true }));
-    try testing.expect(!flags.hasAll(.{ .mark = true, .period = true })); // period not set
 }
 
 test "DirIterator with standard filesystem" {

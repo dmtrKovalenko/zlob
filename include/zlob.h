@@ -94,6 +94,7 @@ typedef struct {
 #define ZLOB_TILDE      (1 << 12) /* 0x1000 - Expand ~user and ~ to home directories */
 #define ZLOB_ONLYDIR    (1 << 13) /* 0x2000 - Match only directories */
 #define ZLOB_TILDE_CHECK (1 << 14) /* 0x4000 - Like ZLOB_TILDE but return error if user name not available */
+#define ZLOB_GITIGNORE  (1 << 15) /* 0x8000 - Respect .gitignore files (zlob extension) */
 
 /* Error codes returned by glob() */
 #define ZLOB_NOSPACE    1  /* Out of memory */
@@ -152,10 +153,6 @@ int glob(const char *restrict pattern, int flags,
  *
  * It is safe to call globfree() on a zlob_t that has already been freed,
  * or on an uninitialized zlob_t with gl_pathv set to NULL.
- *
- * NOTE: This function automatically detects whether it's freeing results from
- * glob() or zlob_match_paths_*() and handles them correctly. You can safely
- * use this for all zlob_t structures.
  */
 void globfree(zlob_t *pzlob);
 
@@ -189,26 +186,8 @@ typedef struct {
  * the caller's original memory.
  *
  * IMPORTANT:
- * - Caller must keep the original paths alive until zlob_match_paths_free() is called
- * - Use zlob_match_paths_free(), NOT globfree(), to clean up results
- *
- * Rust example:
- *   let paths = vec!["foo.txt", "bar.c", "baz.txt"];
- *   let path_slices: Vec<_> = paths.iter().map(|s| zlob_slice_t {
- *       ptr: s.as_ptr(), len: s.len()
- *   }).collect();
- *   let pattern = zlob_slice_t { ptr: b"*.txt".as_ptr() as *const u8, len: 5 };
- *   let mut pzlob: zlob_t = unsafe { std::mem::zeroed() };
- *   let result = zlob_match_paths_slice(&pattern, path_slices.as_ptr(), paths.len(), 0, &mut pzlob);
- *   if result == 0 {
- *       for i in 0..pzlob.gl_pathc {
- *           let path = unsafe { std::slice::from_raw_parts(
- *               pzlob.gl_pathv.add(i).read() as *const u8, pzlob.gl_pathlen.add(i).read()
- *           )};
- *           println!("{}", std::str::from_utf8(path).unwrap());
- *       }
- *       globfree(&mut pzlob);
- *   }
+ * - Caller must keep the original paths alive until globfree() is called
+ * - Use globfree() to clean up results
  */
 int zlob_match_paths_slice(
     const zlob_slice_t *pattern,
@@ -233,19 +212,8 @@ int zlob_match_paths_slice(
  * the caller's original memory.
  *
  * IMPORTANT:
- * - Caller must keep the original paths alive until zlob_match_paths_free() is called
- * - Use zlob_match_paths_free(), NOT globfree(), to clean up results
- *
- * C example:
- *   const char *paths[] = {"foo.txt", "bar.c", "baz.txt"};
- *   zlob_t pzlob;
- *   int result = zlob_match_paths("*.txt", paths, 3, 0, &pzlob);
- *   if (result == 0) {
- *       for (size_t i = 0; i < pzlob.gl_pathc; i++) {
- *           printf("%s (len=%zu)\n", pzlob.gl_pathv[i], pzlob.gl_pathlen[i]);
- *       }
- *       zlob_match_paths_free(&pzlob);  // NOT globfree()!
- *   }
+ * - Caller must keep the original paths alive until globfree() is called
+ * - Use globfree() to clean up results
  */
 int zlob_match_paths(
     const char *pattern,

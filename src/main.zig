@@ -1,10 +1,11 @@
 const std = @import("std");
 const zlob = @import("zlob");
+const build_options = @import("build_options");
 const posix = std.posix;
 const fs = std.fs;
 const Io = std.Io;
 
-const version = "0.1.0";
+const version = build_options.version;
 
 const Options = struct {
     pattern: ?[]const u8 = null,
