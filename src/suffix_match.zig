@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = std.c;
 const mem = std.mem;
-const glob = @import("glob.zig");
+const glob = @import("zlob.zig");
 const assert = std.debug.assert;
 
 const PatternContext = glob.PatternContext;
@@ -59,10 +59,8 @@ pub const SuffixMatch = struct {
         if (actualSuffix.len <= 16) {
             @branchHint(.likely);
             if (actualSuffix.len < 4) {
-                const xor = 
-                    (actualSuffix[0] ^ patternSuffix[0]) 
-                    | (actualSuffix[actualSuffix.len - 1] ^ patternSuffix[actualSuffix.len - 1]) 
-                    | (actualSuffix[actualSuffix.len / 2] ^ patternSuffix[actualSuffix.len / 2]);
+                const xor =
+                    (actualSuffix[0] ^ patternSuffix[0]) | (actualSuffix[actualSuffix.len - 1] ^ patternSuffix[actualSuffix.len - 1]) | (actualSuffix[actualSuffix.len / 2] ^ patternSuffix[actualSuffix.len / 2]);
 
                 return xor == 0;
             }

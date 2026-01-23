@@ -6,7 +6,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
-const glob = @import("glob.zig");
+const glob = @import("zlob.zig");
 const path_matcher = @import("path_matcher.zig");
 
 /// A single gitignore pattern with pre-computed metadata

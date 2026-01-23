@@ -1,18 +1,20 @@
 const std = @import("std");
-const zlob_impl = @import("glob");
+const zlob_impl = @import("zlob");
 
 const mem = std.mem;
 
-// Re-export for C API compatibility
 pub const zlob_t = zlob_impl.zlob_t;
+pub const zlob_dirent_t = zlob_impl.zlob_dirent_t;
+pub const DirIterator = zlob_impl.DirIterator;
 
-// FFI helper type for languages that support Zig ABI
+/// Zig or Rust compatible string slice type
 pub const zlob_slice_t = extern struct {
     ptr: [*]const u8,
     len: usize,
 };
 
-// Re-export glob flags for tests
+pub const ZlobFlags = zlob_impl.GlobFlags;
+
 pub const ZLOB_ERR = zlob_impl.ZLOB_ERR;
 pub const ZLOB_MARK = zlob_impl.ZLOB_MARK;
 pub const ZLOB_NOSORT = zlob_impl.ZLOB_NOSORT;
@@ -30,23 +32,14 @@ pub const ZLOB_ONLYDIR = zlob_impl.ZLOB_ONLYDIR;
 pub const ZLOB_TILDE_CHECK = zlob_impl.ZLOB_TILDE_CHECK;
 pub const ZLOB_GITIGNORE = zlob_impl.ZLOB_GITIGNORE;
 
-// Re-export error codes for tests
+// error codes
 pub const ZLOB_NOSPACE = zlob_impl.ZLOB_NOSPACE;
 pub const ZLOB_ABORTED = zlob_impl.ZLOB_ABORTED;
 pub const ZLOB_NOMATCH = zlob_impl.ZLOB_NOMATCH;
 
-// Internal constants
 const ZLOB_FLAGS_SHARED_STRINGS = zlob_impl.ZLOB_FLAGS_SHARED_STRINGS;
 
-// ============================================================================
-// C API - POSIX-compatible glob functions
-// ============================================================================
-
-/// POSIX glob() - Match pattern against filesystem
-///
-/// This is the standard C-compatible glob function that uses c_allocator.
-/// For Zig code with custom allocators, use the Zig API in lib.zig instead.
-pub export fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) c_int {
+pub export fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) c_int {
     const allocator = std.heap.c_allocator;
 
     if (zlob_impl.glob(allocator, pattern, flags, errfunc, pzlob)) |opt_result| {
@@ -63,23 +56,12 @@ pub export fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob
     }
 }
 
-/// POSIX globfree() - Free memory allocated by glob()
-///
-/// This is the standard C-compatible globfree function.
-pub export fn globfree(pzlob: *zlob_t) void {
+pub export fn zlobfree(pzlob: *zlob_t) void {
     zlob_impl.globfreeInternal(std.heap.c_allocator, pzlob);
 }
 
-// ============================================================================
-// Extended C API - Additional functionality
-// ============================================================================
-
-/// Match glob pattern against array of paths (C-compatible).
-///
-/// Populates zlob_t with matches found in the provided array of path strings.
-/// The paths are owned by the caller and must remain valid until globfree() is called.
-///
-/// This is a zero-copy operation - the returned zlob_t points to caller's memory.
+/// Extnesion to the standard C api allowing to match the pattern against the flat list of paths
+/// and do not access the filesystem at all.
 pub export fn zlob_match_paths(
     pattern: [*:0]const u8,
     paths: [*]const [*:0]const u8,
@@ -137,12 +119,8 @@ pub export fn zlob_match_paths(
     return 0;
 }
 
-/// Match glob pattern against array of paths (slice-based FFI).
-///
-/// This function uses Zig slices for pattern and paths, which relies on the
-/// Zig ABI. Only use this from languages that understand Zig ABI (unstable).
-///
-/// For stable C API, use zlob_match_paths() instead.
+/// The same as `zlob_match_paths` but using specific string slice type with a known length.
+/// Used primarily for FFI compatiblitiy with languates with normal string type as first-class citizens.
 pub export fn zlob_match_paths_slice(
     pattern: *const zlob_slice_t,
     paths: [*]const zlob_slice_t,

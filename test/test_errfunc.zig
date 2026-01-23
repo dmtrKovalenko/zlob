@@ -66,8 +66,8 @@ test "errfunc is called on directory access error" {
     defer allocator.free(pattern);
 
     var pzlob: c_lib.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, testErrorCallback, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, testErrorCallback, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Should succeed but errfunc should have been called
     // We can't easily verify the callback was called without thread-local storage
@@ -107,8 +107,8 @@ test "errfunc returning non-zero causes ZLOB_ABORTED" {
     defer allocator.free(pattern);
 
     var pzlob: c_lib.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, testErrorCallbackAbort, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, testErrorCallbackAbort, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Should return ZLOB_ABORTED if errfunc returned non-zero (when error occurs)
     // Note: The test creates a restricted directory that should fail opendir()
@@ -148,8 +148,8 @@ test "ZLOB_ERR flag causes abort on directory error" {
     defer allocator.free(pattern);
 
     var pzlob: c_lib.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, ZLOB_ERR, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, ZLOB_ERR, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Should return ZLOB_ABORTED when ZLOB_ERR is set and error occurs
     try testing.expect(result == ZLOB_ABORTED);
@@ -183,8 +183,8 @@ test "errfunc NULL with ZLOB_ERR still aborts" {
     defer allocator.free(pattern);
 
     var pzlob: c_lib.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, ZLOB_ERR, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, ZLOB_ERR, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Should abort even with NULL errfunc when ZLOB_ERR is set
     try testing.expect(result == ZLOB_ABORTED);

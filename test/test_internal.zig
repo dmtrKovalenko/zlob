@@ -140,7 +140,6 @@ test "SIMD - newline character" {
     try testing.expect(result.? == 5);
 }
 
-
 // matchPaths() API Tests
 // These tests verify the in-memory path matching API with recursive ** support
 

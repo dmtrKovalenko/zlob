@@ -15,9 +15,9 @@ pub fn main() !void {
     while (i < iterations) : (i += 1) {
         var pzlob: zlob_t = undefined;
         // Use a pattern that matches many files
-        const result = c_lib.glob("drivers/*.c", 0, null, &pzlob);
+        const result = c_lib.zlob("drivers/*.c", 0, null, &pzlob);
         if (result == 0) {
-            c_lib.globfree(&pzlob);
+            c_lib.zlobfree(&pzlob);
         }
     }
 

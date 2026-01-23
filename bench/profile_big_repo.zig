@@ -68,10 +68,10 @@ pub fn main() !void {
         // Warmup run to avoid cold cache
         {
             var pzlob: zlob_t = undefined;
-            const result = c_lib.glob(tc.pattern.ptr, flags, null, &pzlob);
+            const result = c_lib.zlob(tc.pattern.ptr, flags, null, &pzlob);
             if (result == 0) {
                 std.debug.print("  Matches: {d}\n", .{pzlob.gl_pathc});
-                c_lib.globfree(&pzlob);
+                c_lib.zlobfree(&pzlob);
             } else {
                 std.debug.print("  Matches: 0 (error code: {d})\n", .{result});
             }
@@ -85,10 +85,10 @@ pub fn main() !void {
         var matches_this_test: usize = 0;
         while (i < tc.iterations) : (i += 1) {
             var pzlob: zlob_t = undefined;
-            const result = c_lib.glob(tc.pattern.ptr, flags, null, &pzlob);
+            const result = c_lib.zlob(tc.pattern.ptr, flags, null, &pzlob);
             if (result == 0) {
                 matches_this_test = pzlob.gl_pathc;
-                c_lib.globfree(&pzlob);
+                c_lib.zlobfree(&pzlob);
             }
         }
 

@@ -5,7 +5,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
-const glob = @import("glob.zig");
+const glob = @import("zlob.zig");
 const suffix_match = @import("suffix_match.zig");
 
 const hasWildcardsSIMD = glob.hasWildcardsSIMD;

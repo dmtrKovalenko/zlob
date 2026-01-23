@@ -37,9 +37,9 @@ fn benchmarkZlobGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
         var zlob_buf: c_lib.zlob_t = undefined;
-        const result = c_lib.glob(pattern, 0, null, &zlob_buf);
+        const result = c_lib.zlob(pattern, 0, null, &zlob_buf);
         if (result == 0) {
-            c_lib.globfree(&zlob_buf);
+            c_lib.zlobfree(&zlob_buf);
         }
     }
 
@@ -91,10 +91,10 @@ pub fn main() !void {
 
     var zlob_count: usize = 0;
     var zlob_buf2: c_lib.zlob_t = undefined;
-    const zlob_result = c_lib.glob(pattern_z.ptr, 0, null, &zlob_buf2);
+    const zlob_result = c_lib.zlob(pattern_z.ptr, 0, null, &zlob_buf2);
     if (zlob_result == 0) {
         zlob_count = zlob_buf2.gl_pathc;
-        c_lib.globfree(&zlob_buf2);
+        c_lib.zlobfree(&zlob_buf2);
     }
 
     std.debug.print("Match count: libc={d}, zlob={d}\n\n", .{ libc_count, zlob_count });

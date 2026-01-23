@@ -15,6 +15,17 @@ const pwd = @cImport({
     @cInclude("pwd.h");
 });
 
+/// Directory entry returned by gl_readdir callback
+pub const zlob_dirent_t = extern struct {
+    d_name: [*:0]const u8, // Null-terminated entry name
+    d_type: u8, // Entry type: DT_DIR, DT_REG, DT_UNKNOWN, etc.
+};
+
+/// Function pointer types for custom directory access (matches glibc glob_t)
+pub const gl_opendir_t = ?*const fn (path: [*:0]const u8) callconv(.c) ?*anyopaque;
+pub const gl_readdir_t = ?*const fn (dir: ?*anyopaque) callconv(.c) ?*zlob_dirent_t;
+pub const gl_closedir_t = ?*const fn (dir: ?*anyopaque) callconv(.c) void;
+
 // Internal glob result structure (C-style, used internally during refactoring)
 // TODO: Remove this entirely once refactoring to pure Zig slices is complete
 pub const zlob_t = extern struct {
@@ -23,6 +34,99 @@ pub const zlob_t = extern struct {
     gl_offs: usize,
     gl_pathlen: [*]usize, // Array of path lengths (parallel to gl_pathv, for efficient FFI)
     gl_flags: c_int, // Internal flags (not exposed in C header)
+
+    // ALTDIRFUNC: Custom directory access functions (GNU extension)
+    // These are only used when ZLOB_ALTDIRFUNC flag is set
+    gl_opendir: gl_opendir_t = null,
+    gl_readdir: gl_readdir_t = null,
+    gl_closedir: gl_closedir_t = null,
+};
+
+/// Directory iterator abstraction - wraps either std.fs.Dir or custom ALTDIRFUNC
+pub const DirIterator = struct {
+    // For std.fs mode
+    std_dir: ?std.fs.Dir = null,
+    std_iter: ?std.fs.Dir.Iterator = null,
+
+    // For ALTDIRFUNC mode
+    custom_handle: ?*anyopaque = null,
+    readdir_fn: gl_readdir_t = null,
+    closedir_fn: gl_closedir_t = null,
+
+    // Shared state
+    is_altdirfunc: bool = false,
+
+    pub const Entry = struct {
+        name: []const u8,
+        kind: std.fs.Dir.Entry.Kind,
+    };
+
+    pub fn open(path: []const u8, flags: c_int, pzlob: *const zlob_t) !DirIterator {
+        const use_altdirfunc = (flags & ZLOB_ALTDIRFUNC) != 0 and
+            pzlob.gl_opendir != null and
+            pzlob.gl_readdir != null and
+            pzlob.gl_closedir != null;
+
+        if (use_altdirfunc) {
+            // Use custom directory functions
+            var path_buf: [4096:0]u8 = undefined;
+            if (path.len >= 4096) return error.NameTooLong;
+            @memcpy(path_buf[0..path.len], path);
+            path_buf[path.len] = 0;
+
+            const handle = pzlob.gl_opendir.?(&path_buf);
+            if (handle == null) return error.FileNotFound;
+
+            return DirIterator{
+                .is_altdirfunc = true,
+                .custom_handle = handle,
+                .readdir_fn = pzlob.gl_readdir,
+                .closedir_fn = pzlob.gl_closedir,
+            };
+        } else {
+            // Use standard filesystem
+            var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch |err| {
+                return err;
+            };
+            return DirIterator{
+                .is_altdirfunc = false,
+                .std_dir = dir,
+                .std_iter = dir.iterate(),
+            };
+        }
+    }
+
+    pub fn next(self: *DirIterator) ?Entry {
+        if (self.is_altdirfunc) {
+            const dir_entry = self.readdir_fn.?(self.custom_handle) orelse return null;
+            const name = mem.sliceTo(dir_entry.d_name, 0);
+            const kind: std.fs.Dir.Entry.Kind = switch (dir_entry.d_type) {
+                4 => .directory, // DT_DIR
+                8 => .file, // DT_REG
+                10 => .sym_link, // DT_LNK
+                else => .unknown,
+            };
+            return Entry{ .name = name, .kind = kind };
+        } else {
+            const entry = self.std_iter.?.next() catch return null;
+            if (entry) |e| {
+                return Entry{ .name = e.name, .kind = e.kind };
+            }
+            return null;
+        }
+    }
+
+    pub fn close(self: *DirIterator) void {
+        if (self.is_altdirfunc) {
+            if (self.closedir_fn) |closedir| {
+                closedir(self.custom_handle);
+            }
+        } else {
+            if (self.std_dir) |*dir| {
+                dir.close();
+            }
+        }
+    }
 };
 
 pub const ZLOB_FLAGS_SHARED_STRINGS: c_int = 0;
@@ -92,6 +196,82 @@ pub const ZLOB_TILDE_CHECK = 1 << 14; // 0x4000 - Like ZLOB_TILDE but return err
 
 // zlob extensions
 pub const ZLOB_GITIGNORE = 1 << 15; // 0x8000 - Filter results using .gitignore from cwd
+
+pub const GlobFlags = packed struct(u32) {
+    // Standard POSIX glob flags (bits 0-7)
+    err: bool = false, // Return on read errors
+    mark: bool = false, // Append a slash to each directory name
+    nosort: bool = false, // Don't sort the names
+    dooffs: bool = false, // Insert gl_offs NULLs at beginning
+    nocheck: bool = false, // If nothing matches, return the pattern
+    append: bool = false, // Append to results of a previous call
+    noescape: bool = false, // Backslashes don't quote metacharacters
+    period: bool = false, // Leading '.' can be matched by metachars
+
+    // GNU extensions (bits 8-14)
+    magchar: bool = false, // Set in gl_flags if any metachars seen (OUTPUT only)
+    altdirfunc: bool = false, // Use gl_opendir/gl_readdir/gl_closedir functions
+    brace: bool = false, // Expand "{a,b}" to "a" "b"
+    nomagic: bool = false, // If no magic chars, return the pattern
+    tilde: bool = false, // Expand ~user and ~ to home directories
+    onlydir: bool = false, // Match only directories
+    tilde_check: bool = false, // Like tilde but return error if user not available
+
+    // zlob extensions (bit 15)
+    gitignore: bool = false, // Filter results using .gitignore from cwd
+
+    // Padding to fill 32 bits
+    _padding: u16 = 0,
+
+    /// Convert to c_int for C API compatibility.
+    /// The C API uses standard integer flags that can be OR'd together.
+    pub fn toInt(self: GlobFlags) c_int {
+        return @bitCast(self);
+    }
+
+    /// Create GlobFlags from a c_int (for C API compatibility).
+    /// Accepts flags passed from C code using ZLOB_* macros.
+    pub fn fromInt(flags: c_int) GlobFlags {
+        return @bitCast(flags);
+    }
+
+    /// Create GlobFlags from a u32 (for internal Zig usage).
+    pub fn fromU32(flags: u32) GlobFlags {
+        return @bitCast(flags);
+    }
+
+    /// Convert to u32 for internal usage.
+    pub fn toU32(self: GlobFlags) u32 {
+        return @bitCast(self);
+    }
+
+    /// Combine two flag sets (equivalent to bitwise OR).
+    pub fn with(self: GlobFlags, other: GlobFlags) GlobFlags {
+        return fromU32(self.toU32() | other.toU32());
+    }
+
+    /// Remove flags (equivalent to bitwise AND with complement).
+    pub fn without(self: GlobFlags, other: GlobFlags) GlobFlags {
+        return fromU32(self.toU32() & ~other.toU32());
+    }
+
+    /// Check if any of the specified flags are set.
+    pub fn hasAny(self: GlobFlags, other: GlobFlags) bool {
+        return (self.toU32() & other.toU32()) != 0;
+    }
+
+    /// Check if all of the specified flags are set.
+    pub fn hasAll(self: GlobFlags, other: GlobFlags) bool {
+        const mask = other.toU32();
+        return (self.toU32() & mask) == mask;
+    }
+
+    comptime {
+        // Verify the packed struct matches u32/c_int size
+        std.debug.assert(@sizeOf(GlobFlags) == @sizeOf(u32));
+        std.debug.assert(@bitSizeOf(GlobFlags) == @bitSizeOf(u32));
+    }
+};
 
 // Error codes (C-style codes for compatibility)
 pub const ZLOB_NOSPACE = 1;
@@ -2496,3 +2676,219 @@ pub const GlobResults = struct {
         return result;
     }
 };
+
+// ============================================================================
+// Tests for GlobFlags packed struct
+// ============================================================================
+
+test "GlobFlags bit positions match integer constants" {
+    const testing = std.testing;
+
+    // Verify each flag maps to the correct bit position
+    const f_err = GlobFlags{ .err = true };
+    const f_mark = GlobFlags{ .mark = true };
+    const f_nosort = GlobFlags{ .nosort = true };
+    const f_dooffs = GlobFlags{ .dooffs = true };
+    const f_nocheck = GlobFlags{ .nocheck = true };
+    const f_append = GlobFlags{ .append = true };
+    const f_noescape = GlobFlags{ .noescape = true };
+    const f_period = GlobFlags{ .period = true };
+    const f_magchar = GlobFlags{ .magchar = true };
+    const f_altdirfunc = GlobFlags{ .altdirfunc = true };
+    const f_brace = GlobFlags{ .brace = true };
+    const f_nomagic = GlobFlags{ .nomagic = true };
+    const f_tilde = GlobFlags{ .tilde = true };
+    const f_onlydir = GlobFlags{ .onlydir = true };
+    const f_tilde_check = GlobFlags{ .tilde_check = true };
+    const f_gitignore = GlobFlags{ .gitignore = true };
+
+    try testing.expectEqual(@as(u32, ZLOB_ERR), f_err.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_MARK), f_mark.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_NOSORT), f_nosort.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_DOOFFS), f_dooffs.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_NOCHECK), f_nocheck.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_APPEND), f_append.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_NOESCAPE), f_noescape.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_PERIOD), f_period.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_MAGCHAR), f_magchar.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_ALTDIRFUNC), f_altdirfunc.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_BRACE), f_brace.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_NOMAGIC), f_nomagic.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_TILDE), f_tilde.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_ONLYDIR), f_onlydir.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_TILDE_CHECK), f_tilde_check.toU32());
+    try testing.expectEqual(@as(u32, ZLOB_GITIGNORE), f_gitignore.toU32());
+}
+
+test "GlobFlags roundtrip conversion" {
+    const testing = std.testing;
+
+    // Test multiple flags combined
+    const combined: u32 = ZLOB_MARK | ZLOB_NOSORT | ZLOB_BRACE | ZLOB_GITIGNORE;
+    const flags = GlobFlags.fromU32(combined);
+
+    try testing.expect(flags.mark);
+    try testing.expect(flags.nosort);
+    try testing.expect(flags.brace);
+    try testing.expect(flags.gitignore);
+    try testing.expect(!flags.err);
+    try testing.expect(!flags.period);
+
+    // Roundtrip back to integer
+    try testing.expectEqual(combined, flags.toU32());
+
+    // Test c_int conversion
+    const combined_cint: c_int = @bitCast(combined);
+    try testing.expectEqual(combined_cint, flags.toInt());
+
+    const from_cint = GlobFlags.fromInt(flags.toInt());
+    try testing.expectEqual(combined, from_cint.toU32());
+}
+
+test "GlobFlags with/without operations" {
+    const testing = std.testing;
+
+    const base = GlobFlags{ .mark = true, .nosort = true };
+
+    // Test with() - add flags
+    const with_brace = base.with(.{ .brace = true });
+    try testing.expect(with_brace.mark);
+    try testing.expect(with_brace.nosort);
+    try testing.expect(with_brace.brace);
+
+    // Test without() - remove flags
+    const without_nosort = with_brace.without(.{ .nosort = true });
+    try testing.expect(without_nosort.mark);
+    try testing.expect(!without_nosort.nosort);
+    try testing.expect(without_nosort.brace);
+}
+
+test "GlobFlags hasAny/hasAll" {
+    const testing = std.testing;
+
+    const flags = GlobFlags{ .mark = true, .nosort = true, .brace = true };
+
+    // hasAny - returns true if any specified flag is set
+    try testing.expect(flags.hasAny(.{ .mark = true }));
+    try testing.expect(flags.hasAny(.{ .mark = true, .period = true })); // mark is set
+    try testing.expect(!flags.hasAny(.{ .period = true, .gitignore = true }));
+
+    // hasAll - returns true only if all specified flags are set
+    try testing.expect(flags.hasAll(.{ .mark = true }));
+    try testing.expect(flags.hasAll(.{ .mark = true, .nosort = true }));
+    try testing.expect(!flags.hasAll(.{ .mark = true, .period = true })); // period not set
+}
+
+test "DirIterator with standard filesystem" {
+    const testing = std.testing;
+
+    // Test that DirIterator works with standard filesystem (no ALTDIRFUNC)
+    var pzlob = zlob_t{
+        .gl_pathc = 0,
+        .gl_pathv = null,
+        .gl_offs = 0,
+        .gl_pathlen = undefined,
+        .gl_flags = 0,
+    };
+
+    // Open current directory without ALTDIRFUNC
+    var iter = DirIterator.open(".", 0, &pzlob) catch |err| {
+        std.debug.print("Failed to open directory: {}\n", .{err});
+        return err;
+    };
+    defer iter.close();
+
+    // Should be able to iterate
+    var count: usize = 0;
+    while (iter.next()) |entry| {
+        _ = entry;
+        count += 1;
+        if (count > 100) break; // Safety limit
+    }
+
+    // Current directory should have at least some entries
+    try testing.expect(count > 0);
+}
+
+test "DirIterator with ALTDIRFUNC" {
+    const testing = std.testing;
+
+    // Mock directory state - must be at file scope for C callbacks
+    const MockDir = struct {
+        const Entry = struct {
+            name: [:0]const u8,
+            d_type: u8,
+        };
+
+        const entries = [_]Entry{
+            .{ .name = "file1.txt", .d_type = 8 }, // DT_REG
+            .{ .name = "file2.zig", .d_type = 8 },
+            .{ .name = "subdir", .d_type = 4 }, // DT_DIR
+        };
+
+        var index: usize = 0;
+        var dirent_storage: zlob_dirent_t = undefined;
+
+        fn opendir(_: [*:0]const u8) callconv(.c) ?*anyopaque {
+            index = 0;
+            // Return non-null to indicate success
+            return @ptrFromInt(0x12345678);
+        }
+
+        fn readdir(_: ?*anyopaque) callconv(.c) ?*zlob_dirent_t {
+            if (index >= entries.len) return null;
+            dirent_storage.d_name = entries[index].name.ptr;
+            dirent_storage.d_type = entries[index].d_type;
+            index += 1;
+            return &dirent_storage;
+        }
+
+        fn closedir(_: ?*anyopaque) callconv(.c) void {
+            index = 0;
+        }
+    };
+
+    // Set up zlob_t with ALTDIRFUNC callbacks
+    var pzlob = zlob_t{
+        .gl_pathc = 0,
+        .gl_pathv = null,
+        .gl_offs = 0,
+        .gl_pathlen = undefined,
+        .gl_flags = 0,
+        .gl_opendir = MockDir.opendir,
+        .gl_readdir = MockDir.readdir,
+        .gl_closedir = MockDir.closedir,
+    };
+
+    // Open with ALTDIRFUNC flag
+    var iter = DirIterator.open("mock_path", ZLOB_ALTDIRFUNC, &pzlob) catch |err| {
+        std.debug.print("Failed to open mock directory: {}\n", .{err});
+        return err;
+    };
+    defer iter.close();
+
+    // Verify we get the mock entries
+    var found_file1 = false;
+    var found_file2 = false;
+    var found_subdir = false;
+    var count: usize = 0;
+
+    while (iter.next()) |entry| {
+        if (mem.eql(u8, entry.name, "file1.txt")) {
+            found_file1 = true;
+            try testing.expectEqual(std.fs.Dir.Entry.Kind.file, entry.kind);
+        } else if (mem.eql(u8, entry.name, "file2.zig")) {
+            found_file2 = true;
+            try testing.expectEqual(std.fs.Dir.Entry.Kind.file, entry.kind);
+        } else if (mem.eql(u8, entry.name, "subdir")) {
+            found_subdir = true;
+            try testing.expectEqual(std.fs.Dir.Entry.Kind.directory, entry.kind);
+        }
+        count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 3), count);
+    try testing.expect(found_file1);
+    try testing.expect(found_file2);
+    try testing.expect(found_subdir);
+}

@@ -200,16 +200,17 @@ pub fn main() !void {
         full_pattern = pattern;
     }
 
-    // reasonable defaults
-    var flags: u32 = zlob.ZLOB_NOSORT | zlob.ZLOB_BRACE | zlob.ZLOB_GITIGNORE;
-
-    if (opts.sorted) flags &= ~@as(u32, zlob.ZLOB_NOSORT);
-    if (opts.no_brace) flags &= ~@as(u32, zlob.ZLOB_BRACE);
-    if (opts.no_gitignore) flags &= ~@as(u32, zlob.ZLOB_GITIGNORE);
-    if (opts.mark_dirs) flags |= zlob.ZLOB_MARK;
-    if (opts.no_escape) flags |= zlob.ZLOB_NOESCAPE;
-    if (opts.hidden) flags |= zlob.ZLOB_PERIOD;
-    if (opts.dirs_only) flags |= zlob.ZLOB_ONLYDIR;
+    // Build flags using the type-safe GlobFlags struct
+    var flags = zlob.GlobFlags{
+        .nosort = !opts.sorted, // Default: unsorted (faster)
+        .brace = !opts.no_brace, // Default: brace expansion enabled
+        .gitignore = !opts.no_gitignore, // Default: respect .gitignore
+        .mark = opts.mark_dirs,
+        .noescape = opts.no_escape,
+        .period = opts.hidden,
+        .onlydir = opts.dirs_only,
+    };
+    _ = &flags; // suppress unused warning if match accepts anytype
 
     var match_result = zlob.match(allocator, full_pattern, flags) catch |err| {
         stderr.print("error: glob failed: {}\n", .{err}) catch {};

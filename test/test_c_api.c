@@ -196,12 +196,13 @@ int main(void) {
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
     zlob_t pzlob;
-    int result = zlob_match_paths("{short, long}.c", paths, path_count, 0, &pzlob);
+    // Note: no space after comma in brace pattern
+    int result = zlob_match_paths("{short,long}.c", paths, path_count, ZLOB_BRACE, &pzlob);
 
     if (result != 0)
       FAIL("zlob_match_paths() failed");
 
-    if pzlob.gl_pathc != 2
+    if (pzlob.gl_pathc != 2)
       FAIL("Expected 2 matches");
 
     printf("    All lengths correct (avoiding strlen overhead)\n");

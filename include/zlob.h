@@ -35,11 +35,32 @@ extern "C" {
 #include <stddef.h>
 
 /**
+ * zlob_dirent_t - Directory entry for ALTDIRFUNC callbacks
+ *
+ * Used with gl_readdir when ZLOB_ALTDIRFUNC is set.
+ */
+typedef struct {
+    const char *d_name;   /* Null-terminated entry name */
+    unsigned char d_type; /* Entry type: DT_DIR=4, DT_REG=8, DT_LNK=10, DT_UNKNOWN=0 */
+} zlob_dirent_t;
+
+/* Directory entry types for zlob_dirent_t.d_type */
+#define ZLOB_DT_UNKNOWN 0
+#define ZLOB_DT_DIR     4
+#define ZLOB_DT_REG     8
+#define ZLOB_DT_LNK     10
+
+/**
  * zlob_t - Result structure for glob pattern matching
  *
  * This structure contains the results of a glob() call.
  * The gl_pathlen field is a zlob extension for efficient FFI - it provides
  * O(1) access to path lengths without needing strlen() calls.
+ *
+ * ALTDIRFUNC Support (GNU extension):
+ *   When ZLOB_ALTDIRFUNC flag is set, the gl_opendir, gl_readdir, and gl_closedir
+ *   function pointers are used instead of the standard filesystem functions.
+ *   This allows globbing over virtual filesystems or custom data sources.
  */
 typedef struct {
     size_t gl_pathc;      /* Count of matched paths */
@@ -47,6 +68,12 @@ typedef struct {
     size_t gl_offs;       /* Number of NULL entries to reserve at beginning of gl_pathv */
     size_t *gl_pathlen;   /* Array of path lengths (zlob extension for efficient FFI) */
     int _reserved;        /* Internal use only - do not access */
+
+    /* ALTDIRFUNC: Custom directory access functions (GNU extension)
+     * Set these before calling glob() with ZLOB_ALTDIRFUNC flag */
+    void *(*gl_opendir)(const char *path);           /* Returns opaque dir handle, NULL on error */
+    zlob_dirent_t *(*gl_readdir)(void *dir);         /* Returns next entry, NULL when done */
+    void (*gl_closedir)(void *dir);                  /* Closes directory handle */
 } zlob_t;
 
 /* POSIX glob flags */
@@ -61,7 +88,7 @@ typedef struct {
 
 /* GNU extensions */
 #define ZLOB_MAGCHAR    (1 << 8)  /* 0x0100 - Set in gl_flags if any metachars seen (OUTPUT only) */
-#define ZLOB_ALTDIRFUNC (1 << 9)  /* 0x0200 - Use gl_opendir et al functions (NOT IMPLEMENTED) */
+#define ZLOB_ALTDIRFUNC (1 << 9)  /* 0x0200 - Use gl_opendir/gl_readdir/gl_closedir functions */
 #define ZLOB_BRACE      (1 << 10) /* 0x0400 - Expand "{a,b}" to "a" "b" */
 #define ZLOB_NOMAGIC    (1 << 11) /* 0x0800 - If no magic chars, return the pattern */
 #define ZLOB_TILDE      (1 << 12) /* 0x1000 - Expand ~user and ~ to home directories */

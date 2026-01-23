@@ -28,13 +28,14 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    // glob module (for direct access to glob implementation in tests)
-    const zlob_mod = b.addModule("glob", .{
-        .root_source_file = b.path("src/glob.zig"),
+    // zlob core module (for internal use - the actual implementation in zlob.zig)
+    const zlob_core_mod = b.addModule("zlob_core", .{
+        .root_source_file = b.path("src/zlob.zig"),
         .target = target,
         .link_libc = true,
     });
 
+    // Main zlob module (public API via lib.zig)
     const mod = b.addModule("zlob", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
@@ -48,17 +49,17 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "glob", .module = zlob_mod },
+            .{ .name = "zlob", .module = zlob_core_mod },
         },
     });
 
-    // C-compatible module (for C exports, depends on glob)
+    // C-compatible module (for C exports, depends on zlob core)
     const c_lib_mod = b.addModule("c_lib", .{
         .root_source_file = b.path("src/c_lib.zig"),
         .target = target,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "glob", .module = zlob_mod },
+            .{ .name = "zlob", .module = zlob_core_mod },
         },
     });
 
@@ -73,7 +74,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "glob", .module = zlob_mod },
+                .{ .name = "zlob", .module = zlob_core_mod },
             },
         }),
     });
@@ -182,7 +183,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "zlob", .module = mod },
-                    .{ .name = "glob", .module = zlob_mod },
+                    .{ .name = "zlob_core", .module = zlob_core_mod },
                     .{ .name = "c_lib", .module = c_lib_mod },
                 },
             }),

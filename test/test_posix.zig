@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const glob = @import("glob");
+const glob = @import("zlob");
 const c_lib = @import("c_lib");
 const c = std.c;
 
@@ -84,8 +84,8 @@ test "ZLOB_MARK - appends slash to directories" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pzlob.gl_pathc >= 3); // At least 3 directories
@@ -127,8 +127,8 @@ test "ZLOB_MARK - does not append slash to files" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pzlob.gl_pathc >= 1);
@@ -163,8 +163,8 @@ test "ZLOB_MARK - works with recursive glob" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expect(result == 0 or result == glob.ZLOB_NOMATCH);
     if (result == 0) {
@@ -205,8 +205,8 @@ test "ZLOB_DOOFFS - reserves offset slots at beginning" {
     var pzlob: glob.zlob_t = undefined;
     pzlob.gl_offs = 3; // Request 3 offset slots
 
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_DOOFFS, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOOFFS, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pzlob.gl_pathc >= 1);
@@ -249,15 +249,15 @@ test "ZLOB_DOOFFS - works with ZLOB_APPEND" {
     // First glob
     const pattern1 = try allocator.dupeZ(u8, "*.txt");
     defer allocator.free(pattern1);
-    const result1 = c_lib.glob(pattern1.ptr, glob.ZLOB_DOOFFS, null, &pzlob);
+    const result1 = c_lib.zlob(pattern1.ptr, glob.ZLOB_DOOFFS, null, &pzlob);
     try testing.expectEqual(@as(c_int, 0), result1);
     const first_count = pzlob.gl_pathc;
 
     // Second glob with APPEND
     const pattern2 = try allocator.dupeZ(u8, "*.c");
     defer allocator.free(pattern2);
-    const result2 = c_lib.glob(pattern2.ptr, glob.ZLOB_DOOFFS | glob.ZLOB_APPEND, null, &pzlob);
-    defer c_lib.globfree(&pzlob);
+    const result2 = c_lib.zlob(pattern2.ptr, glob.ZLOB_DOOFFS | glob.ZLOB_APPEND, null, &pzlob);
+    defer c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result2);
     try testing.expect(pzlob.gl_pathc > first_count);
@@ -297,8 +297,8 @@ test "ZLOB_PERIOD - matches hidden files with wildcard" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, ZLOB_PERIOD, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, ZLOB_PERIOD, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -338,8 +338,8 @@ test "ZLOB_PERIOD - without flag does not match hidden files" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -373,8 +373,8 @@ test "ZLOB_PERIOD - explicit dot still matches" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -411,8 +411,8 @@ test "ZLOB_TILDE - expands tilde to home directory" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
@@ -443,8 +443,8 @@ test "ZLOB_TILDE - expands ~username to user home" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
@@ -460,8 +460,8 @@ test "ZLOB_TILDE - without flag treats tilde as literal" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Without ZLOB_TILDE, should try to find literal ~ directory
     // Most likely ZLOB_NOMATCH or ZLOB_ABORTED
@@ -479,8 +479,8 @@ test "ZLOB_TILDE_CHECK - errors on nonexistent username" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_TILDE | glob.ZLOB_TILDE_CHECK, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_TILDE | glob.ZLOB_TILDE_CHECK, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Should return ZLOB_NOMATCH for nonexistent user
     try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
@@ -493,8 +493,8 @@ test "ZLOB_TILDE_CHECK - without flag returns tilde literal on unknown user" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_TILDE | glob.ZLOB_NOCHECK, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_TILDE | glob.ZLOB_NOCHECK, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Without ZLOB_TILDE_CHECK, should fall back to literal tilde
     try testing.expectEqual(@as(c_int, 0), result);
@@ -534,7 +534,7 @@ test "ZLOB_NOMAGIC - returns NOMATCH for literal with no match" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, ZLOB_NOMAGIC, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, ZLOB_NOMAGIC, null, &pzlob);
 
     try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
 }
@@ -565,7 +565,7 @@ test "ZLOB_NOMAGIC - returns NOMATCH for wildcard pattern with no match" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, ZLOB_NOMAGIC, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, ZLOB_NOMAGIC, null, &pzlob);
 
     // Has metacharacters, so still returns NOMATCH
     try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
@@ -596,8 +596,8 @@ test "ZLOB_NOMAGIC - succeeds for literal that exists" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, ZLOB_NOMAGIC, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, ZLOB_NOMAGIC, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
@@ -632,8 +632,8 @@ test "ZLOB_MARK and ZLOB_PERIOD together" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK | ZLOB_PERIOD, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK | ZLOB_PERIOD, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -670,8 +670,8 @@ test "ZLOB_TILDE with recursive glob" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expect(pzlob.gl_pathc >= 1);
@@ -705,8 +705,8 @@ test "ZLOB_PERIOD - recursive glob should not match hidden files by default" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -759,8 +759,8 @@ test "ZLOB_PERIOD - recursive glob matches hidden files with flag" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, ZLOB_PERIOD, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, ZLOB_PERIOD, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -816,8 +816,8 @@ test "ZLOB_PERIOD - explicit dot pattern still matches without flag in recursive
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
 
@@ -853,8 +853,8 @@ test "literal path - file exists" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
@@ -881,8 +881,8 @@ test "literal path - directory exists" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
@@ -908,8 +908,8 @@ test "literal path - ZLOB_ONLYDIR with directory" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_ONLYDIR, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_ONLYDIR, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
@@ -935,8 +935,8 @@ test "literal path - ZLOB_ONLYDIR with file (should fail)" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_ONLYDIR, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_ONLYDIR, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
 }
@@ -960,8 +960,8 @@ test "literal path - ZLOB_MARK with directory" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
@@ -989,8 +989,8 @@ test "literal path - ZLOB_MARK with file (no slash)" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
@@ -1017,8 +1017,8 @@ test "literal path - ./ prefix normalization" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
@@ -1045,8 +1045,8 @@ test "literal path - ZLOB_NOCHECK returns pattern when not found" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_NOCHECK, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_NOCHECK, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
@@ -1073,8 +1073,8 @@ test "literal path - not found without ZLOB_NOCHECK" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, 0, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
 }
@@ -1098,8 +1098,8 @@ test "literal path - ZLOB_MARK and ZLOB_ONLYDIR together" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.glob(pattern.ptr, glob.ZLOB_MARK | glob.ZLOB_ONLYDIR, null, &pzlob);
-    defer if (result == 0) c_lib.globfree(&pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK | glob.ZLOB_ONLYDIR, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
     try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
