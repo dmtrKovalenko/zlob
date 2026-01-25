@@ -201,8 +201,8 @@ pub fn main() !void {
         full_pattern = pattern;
     }
 
-    // Build flags using the type-safe GlobFlags struct
-    var flags = zlob.GlobFlags{
+    // Build flags using the type-safe ZlobFlags struct
+    var flags = zlob.ZlobFlags{
         .nosort = !opts.sorted, // Default: unsorted (faster)
         .brace = !opts.no_brace, // Default: brace expansion enabled
         .gitignore = !opts.no_gitignore, // Default: respect .gitignore

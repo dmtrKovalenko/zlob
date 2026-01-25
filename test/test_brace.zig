@@ -89,7 +89,7 @@ test "ZLOB_BRACE - recursive" {
         "a/b/c/d/e/readme.md",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "**/*.{md,log}", &files, zlob.ZLOB_BRACE);
+    var result = try zlob.matchPaths(testing.allocator, "**/*.{md,log}", &files, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 6), result.match_count);
@@ -605,7 +605,7 @@ test "ZLOB_BRACE filesystem - recursive with extension alternatives" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -643,7 +643,7 @@ test "ZLOB_BRACE filesystem - recursive with directory alternatives" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -671,7 +671,7 @@ test "ZLOB_BRACE filesystem - complex pattern with multiple brace groups" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -971,7 +971,7 @@ test "ZLOB_BRACE filesystem - many files with brace pattern" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -1030,7 +1030,7 @@ test "ZLOB_BRACE filesystem - documentation pattern" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -1111,7 +1111,7 @@ test "ZLOB_BRACE filesystem - header files in multiple directories" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);

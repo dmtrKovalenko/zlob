@@ -10,62 +10,50 @@
 
 const std = @import("std");
 
-pub const glob = @import("zlob");
-pub const GlobResults = glob.GlobResults;
-pub const GlobError = glob.GlobError;
-pub const zlob_t = glob.zlob_t;
-pub const analyzePattern = glob.analyzePattern;
-pub const simdFindChar = glob.simdFindChar;
-pub const hasWildcardsSIMD = glob.hasWildcardsSIMD;
+const glob_impl = @import("zlob");
 
-/// This is a zig wrapper around the bitflags exposed by posix/gnu/zlob
-pub const GlobFlags = glob.GlobFlags;
+pub const GlobResults = glob_impl.GlobResults;
+pub const GlobError = glob_impl.GlobError;
+pub const zlob_t = glob_impl.zlob_t;
+pub const analyzePattern = glob_impl.analyzePattern;
+pub const simdFindChar = glob_impl.simdFindChar;
+pub const hasWildcardsSIMD = glob_impl.hasWildcardsSIMD;
+
+/// ZlobFlags is a packed struct for type-safe flag handling.
+/// Use this instead of raw integer constants for better ergonomics.
+pub const ZlobFlags = glob_impl.ZlobFlags;
+
+/// Internal glob module - exposed for tests that need low-level access.
+/// Not part of the stable public API.
+pub const glob = glob_impl;
 
 // Legacy integer flag constants (for backward compatibility and C interop)
-pub const ZLOB_APPEND = glob.ZLOB_APPEND;
-pub const ZLOB_DOOFFS = glob.ZLOB_DOOFFS;
-pub const ZLOB_ERR = glob.ZLOB_ERR;
-pub const ZLOB_MARK = glob.ZLOB_MARK;
-pub const ZLOB_NOCHECK = glob.ZLOB_NOCHECK;
-pub const ZLOB_NOSORT = glob.ZLOB_NOSORT;
-pub const ZLOB_NOESCAPE = glob.ZLOB_NOESCAPE;
-pub const ZLOB_MAGCHAR = glob.ZLOB_MAGCHAR;
-pub const ZLOB_NOMAGIC = glob.ZLOB_NOMAGIC;
-pub const ZLOB_TILDE = glob.ZLOB_TILDE;
-pub const ZLOB_BRACE = glob.ZLOB_BRACE;
-pub const ZLOB_PERIOD = glob.ZLOB_PERIOD;
-pub const ZLOB_ONLYDIR = glob.ZLOB_ONLYDIR;
-pub const ZLOB_TILDE_CHECK = glob.ZLOB_TILDE_CHECK;
-pub const ZLOB_GITIGNORE = glob.ZLOB_GITIGNORE;
-pub const ZLOB_NOSPACE = glob.ZLOB_NOSPACE;
-pub const ZLOB_ABORTED = glob.ZLOB_ABORTED;
-pub const ZLOB_NOMATCH = glob.ZLOB_NOMATCH;
-
-/// Flags parameter type - accepts either GlobFlags or u32 for backward compatibility.
-pub const FlagsParam = union(enum) {
-    flags: GlobFlags,
-    int: u32,
-
-    pub fn toGlobFlags(self: FlagsParam) GlobFlags {
-        return switch (self) {
-            .flags => |f| f,
-            .int => |i| GlobFlags.fromU32(i),
-        };
-    }
-
-    pub fn toU32(self: FlagsParam) u32 {
-        return switch (self) {
-            .flags => |f| f.toU32(),
-            .int => |i| i,
-        };
-    }
-};
+pub const ZLOB_APPEND = glob_impl.ZLOB_APPEND;
+pub const ZLOB_DOOFFS = glob_impl.ZLOB_DOOFFS;
+pub const ZLOB_ERR = glob_impl.ZLOB_ERR;
+pub const ZLOB_MARK = glob_impl.ZLOB_MARK;
+pub const ZLOB_NOCHECK = glob_impl.ZLOB_NOCHECK;
+pub const ZLOB_NOSORT = glob_impl.ZLOB_NOSORT;
+pub const ZLOB_NOESCAPE = glob_impl.ZLOB_NOESCAPE;
+pub const ZLOB_MAGCHAR = glob_impl.ZLOB_MAGCHAR;
+pub const ZLOB_NOMAGIC = glob_impl.ZLOB_NOMAGIC;
+pub const ZLOB_TILDE = glob_impl.ZLOB_TILDE;
+pub const ZLOB_BRACE = glob_impl.ZLOB_BRACE;
+pub const ZLOB_PERIOD = glob_impl.ZLOB_PERIOD;
+pub const ZLOB_ONLYDIR = glob_impl.ZLOB_ONLYDIR;
+pub const ZLOB_TILDE_CHECK = glob_impl.ZLOB_TILDE_CHECK;
+pub const ZLOB_GITIGNORE = glob_impl.ZLOB_GITIGNORE;
+pub const ZLOB_DOUBLESTAR_RECURSIVE = glob_impl.ZLOB_DOUBLESTAR_RECURSIVE;
+pub const ZLOB_RECOMMENDED = glob_impl.ZLOB_RECOMMENDED;
+pub const ZLOB_NOSPACE = glob_impl.ZLOB_NOSPACE;
+pub const ZLOB_ABORTED = glob_impl.ZLOB_ABORTED;
+pub const ZLOB_NOMATCH = glob_impl.ZLOB_NOMATCH;
 
 /// Perform file system walking and collect matching results to GlobResults
 ///
-/// Example with GlobFlags (recommended):
+/// Example with ZlobFlags (recommended):
 /// ```zig
-/// const flags = zlob.GlobFlags{ .brace = true, .gitignore = true };
+/// const flags = zlob.ZlobFlags{ .brace = true, .gitignore = true };
 /// if (try zlob.match(allocator, "**/*.zig", flags)) |*result| {
 ///     defer result.deinit();
 ///     for (result.paths) |path| {
@@ -83,14 +71,13 @@ pub const FlagsParam = union(enum) {
 ///     }
 /// }
 /// ```
-pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: anytype) !?GlobResults {
-    const flags_u32 = flagsToU32(flags);
-
+pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: anytype) !?GlobResults {
+    const zflags = flagsToZlobFlags(flags_param);
     const pattern_z = try allocator.dupeZ(u8, pattern);
     defer allocator.free(pattern_z);
 
     var pzlob: zlob_t = undefined;
-    const opt_result = try glob.glob(allocator, pattern_z.ptr, @intCast(flags_u32), null, &pzlob);
+    const opt_result = try glob.glob(allocator, pattern_z.ptr, zflags.toInt(), null, &pzlob);
 
     if (opt_result) |_| {
         var paths = try allocator.alloc([]const u8, pzlob.gl_pathc);
@@ -110,8 +97,7 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: anytype) 
             .pzlob = pzlob,
         };
     } else {
-        const gf = GlobFlags.fromU32(flags_u32);
-        if (gf.nocheck) {
+        if (zflags.nocheck) {
             var paths = try allocator.alloc([]const u8, 1);
             errdefer allocator.free(paths);
             paths[0] = try allocator.dupe(u8, pattern);
@@ -136,7 +122,7 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: anytype) 
 /// - `/users/**/code/*.zig` - All .zig files in any 'code' directory under /users
 /// - `src/**/test_*.zig` - All test files under src/
 ///
-/// Example with GlobFlags (recommended):
+/// Example with ZlobFlags (recommended):
 /// ```zig
 /// const paths = [_][]const u8{
 ///     "/users/alice/code/main.c",
@@ -161,77 +147,85 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags: anytype) 
 /// Requirements:
 /// - Input paths MUST be normalized (no consecutive slashes like //)
 /// - Paths from filesystem operations are typically already normalized
-pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags: anytype) !GlobResults {
-    return glob.internalMatchPaths(allocator, pattern, paths, flagsToU32(flags));
+pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !GlobResults {
+    const zflags = flagsToZlobFlags(flags_param);
+    return glob_impl.path_matcher.matchPaths(allocator, pattern, paths, zflags.toU32());
 }
 
-/// Convert any supported flags type to u32.
-/// Supports: GlobFlags, u32, comptime_int, or struct literals like .{ .mark = true }
-fn flagsToU32(flags: anytype) u32 {
-    const T = @TypeOf(flags);
-    if (T == GlobFlags) {
-        return flags.toU32();
-    } else if (T == u32 or T == comptime_int) {
-        return @intCast(flags);
-    } else if (@typeInfo(T) == .@"struct") {
-        // Handle anonymous struct literals like .{ .mark = true }
-        const gf: GlobFlags = flags;
-        return gf.toU32();
+/// Perform file system walking within a specified base directory and collect matching results.
+///
+/// This is similar to `match()` but operates relative to the given `base_path` instead of
+/// the current working directory. The `base_path` must be an absolute path.
+///
+/// Example:
+/// ```zig
+/// // Find all .zig files under /home/user/project
+/// if (try zlob.matchAt(allocator, "/home/user/project", "**/*.zig", .{ .brace = true })) |*result| {
+///     defer result.deinit();
+///     for (result.paths) |path| {
+///         std.debug.print("{s}\n", .{path});
+///     }
+/// }
+/// ```
+///
+/// Returns `error.Aborted` if `base_path` is not an absolute path (doesn't start with '/').
+pub fn matchAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, flags_param: anytype) !?GlobResults {
+    const zflags = flagsToZlobFlags(flags_param);
+    const pattern_z = try allocator.dupeZ(u8, pattern);
+    defer allocator.free(pattern_z);
+
+    var pzlob: zlob_t = undefined;
+    const opt_result = try glob.globAt(allocator, base_path, pattern_z.ptr, zflags.toInt(), null, &pzlob);
+
+    if (opt_result) |_| {
+        var paths = try allocator.alloc([]const u8, pzlob.gl_pathc);
+        errdefer allocator.free(paths);
+
+        var i: usize = 0;
+        while (i < pzlob.gl_pathc) : (i += 1) {
+            const c_path = pzlob.gl_pathv[i];
+            const path_len = pzlob.gl_pathlen[i];
+            paths[i] = c_path[0..path_len];
+        }
+
+        return GlobResults{
+            .paths = paths,
+            .match_count = pzlob.gl_pathc,
+            .allocator = allocator,
+            .pzlob = pzlob,
+        };
     } else {
-        @compileError("flags must be GlobFlags, u32, or a struct literal");
+        if (zflags.nocheck) {
+            var paths = try allocator.alloc([]const u8, 1);
+            errdefer allocator.free(paths);
+            paths[0] = try allocator.dupe(u8, pattern);
+            return GlobResults{
+                .paths = paths,
+                .match_count = 1,
+                .allocator = allocator,
+            };
+        }
+        return null;
     }
 }
 
-test {
-    // Import all tests from glob module
-    std.testing.refAllDecls(@This());
-}
-
-test "GlobFlags conversion" {
-    const testing = std.testing;
-
-    // Test basic flag creation
-    const flags = GlobFlags{ .mark = true, .nosort = true };
-    try testing.expect(flags.mark);
-    try testing.expect(flags.nosort);
-    try testing.expect(!flags.brace);
-
-    // Test toU32/fromU32 roundtrip
-    const as_int = flags.toU32();
-    const expected: u32 = ZLOB_MARK | ZLOB_NOSORT;
-    try testing.expectEqual(expected, as_int);
-
-    const back = GlobFlags.fromU32(as_int);
-    try testing.expect(back.mark);
-    try testing.expect(back.nosort);
-
-    // Test with/without
-    const with_brace = flags.with(.{ .brace = true });
-    try testing.expect(with_brace.mark);
-    try testing.expect(with_brace.nosort);
-    try testing.expect(with_brace.brace);
-
-    const without_mark = with_brace.without(.{ .mark = true });
-    try testing.expect(!without_mark.mark);
-    try testing.expect(without_mark.nosort);
-    try testing.expect(without_mark.brace);
-}
-
-test "flagsToU32 accepts multiple types" {
-    const testing = std.testing;
-
-    // GlobFlags
-    const mark_flag = GlobFlags{ .mark = true };
-    const mark_expected: u32 = ZLOB_MARK;
-    try testing.expectEqual(mark_expected, flagsToU32(mark_flag));
-
-    // u32
-    try testing.expectEqual(mark_expected, flagsToU32(@as(u32, ZLOB_MARK)));
-
-    // comptime_int
-    try testing.expectEqual(@as(u32, 0), flagsToU32(0));
-
-    // Anonymous struct literal
-    const mark_brace_expected: u32 = ZLOB_MARK | ZLOB_BRACE;
-    try testing.expectEqual(mark_brace_expected, flagsToU32(.{ .mark = true, .brace = true }));
+/// Convert any supported flags type to ZlobFlags.
+/// Supports: ZlobFlags, u32, c_int, comptime_int, or struct literals like .{ .mark = true }
+fn flagsToZlobFlags(flags_param: anytype) ZlobFlags {
+    const T = @TypeOf(flags_param);
+    if (T == ZlobFlags) {
+        return flags_param;
+    } else if (T == u32) {
+        return ZlobFlags.fromU32(flags_param);
+    } else if (T == c_int) {
+        return ZlobFlags.fromInt(flags_param);
+    } else if (T == comptime_int) {
+        return ZlobFlags.fromU32(@intCast(flags_param));
+    } else if (@typeInfo(T) == .@"struct") {
+        // Handle anonymous struct literals like .{ .mark = true }
+        const gf: ZlobFlags = flags_param;
+        return gf;
+    } else {
+        @compileError("flags must be ZlobFlags, u32, c_int, or a struct literal");
+    }
 }

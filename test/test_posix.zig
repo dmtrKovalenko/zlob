@@ -163,7 +163,7 @@ test "ZLOB_MARK - works with recursive glob" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK | glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expect(result == 0 or result == glob.ZLOB_NOMATCH);
@@ -670,7 +670,7 @@ test "ZLOB_TILDE with recursive glob" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_TILDE | glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -705,7 +705,7 @@ test "ZLOB_PERIOD - recursive glob should not match hidden files by default" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -759,7 +759,7 @@ test "ZLOB_PERIOD - recursive glob matches hidden files with flag" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, ZLOB_PERIOD, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, ZLOB_PERIOD | glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -816,7 +816,9 @@ test "ZLOB_PERIOD - explicit dot pattern still matches without flag in recursive
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    // Note: ZLOB_DOUBLESTAR_RECURSIVE is needed for ** to recurse, but ZLOB_PERIOD is NOT needed
+    // because the pattern explicitly contains a dot prefix in the filename portion
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);

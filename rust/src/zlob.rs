@@ -237,7 +237,7 @@ impl std::iter::FusedIterator for ZlobIter<'_> {}
 /// use zlob::{zlob, ZlobFlags};
 ///
 /// // Find all Rust files recursively
-/// if let Some(result) = zlob("**/*.rs", ZlobFlags::empty())? {
+/// if let Some(result) = zlob("**/*.rs", ZlobFlags::RECOMMENDED)? {
 ///     for path in &result {
 ///         println!("{}", path);
 ///     }
@@ -245,15 +245,19 @@ impl std::iter::FusedIterator for ZlobIter<'_> {}
 ///     println!("No matches found");
 /// }
 ///
-/// // Use brace expansion
-/// let result = zlob("src/{lib,main}.rs", ZlobFlags::BRACE)?;
+/// // Enable git ignore support
+/// let result = zlob("src/{lib,main}.rs", ZlobFlags::RECOMMENDED | ZlobFlags::GITIGNORE)?;
 ///
-/// // Filter with .gitignore
-/// let result = zlob("**/*", ZlobFlags::GITIGNORE)?;
+/// assert!(result.is_some());
 /// # Ok::<(), zlob::ZlobError>(())
 /// ```
 ///
 /// # Supported Patterns
+///
+/// We support all the varieties of glob pattern supported by rust's `glob` crate, posix `glob(3)`,
+/// glibc `glob()` implementation and many more.
+///
+/// Here are some of the most common patterns:
 ///
 /// | Pattern | Description |
 /// |---------|-------------|
@@ -270,6 +274,63 @@ pub fn zlob(pattern: &str, flags: ZlobFlags) -> Result<Option<Zlob>, ZlobError> 
     let mut inner = ffi::zlob_t::default();
 
     let result = unsafe { ffi::zlob(pattern_c.as_ptr(), flags.bits(), None, &mut inner) };
+
+    match ZlobError::from_code(result) {
+        Ok(true) => Ok(Some(Zlob { inner })),
+        Ok(false) => Ok(None), // No matches
+        Err(err) => Err(err),
+    }
+}
+
+/// Perform glob pattern matching within a specific base directory.
+///
+/// This function is similar to `zlob()` but operates relative to the specified
+/// `base_path` instead of the current working directory.
+///
+/// # Arguments
+///
+/// * `base_path` - Absolute path to the base directory (must start with '/')
+/// * `pattern` - The glob pattern to match (relative to base_path)
+/// * `flags` - Flags controlling the matching behavior
+///
+/// # Returns
+///
+/// * `Ok(Some(Zlob))` - Matches were found
+/// * `Ok(None)` - No matches found (pattern is valid but no files match)
+/// * `Err(ZlobError::Aborted)` - base_path is not an absolute path, or another error occurred
+/// * `Err(ZlobError::NoSpace)` - Out of memory
+///
+/// # Example
+///
+/// ```no_run
+/// use zlob::{zlob_at, ZlobFlags};
+///
+/// // Find all Rust files in /home/user/project
+/// if let Some(result) = zlob_at("/home/user/project", "**/*.rs", ZlobFlags::RECOMMENDED)? {
+///     for path in &result {
+///         println!("{}", path);  // Paths are relative to /home/user/project
+///     }
+/// }
+/// # Ok::<(), zlob::ZlobError>(())
+/// ```
+pub fn zlob_at(
+    base_path: &str,
+    pattern: &str,
+    flags: ZlobFlags,
+) -> Result<Option<Zlob>, ZlobError> {
+    let base_path_c = CString::new(base_path).map_err(|_| ZlobError::Aborted)?;
+    let pattern_c = CString::new(pattern).map_err(|_| ZlobError::Aborted)?;
+    let mut inner = ffi::zlob_t::default();
+
+    let result = unsafe {
+        ffi::zlob_at(
+            base_path_c.as_ptr(),
+            pattern_c.as_ptr(),
+            flags.bits(),
+            None,
+            &mut inner,
+        )
+    };
 
     match ZlobError::from_code(result) {
         Ok(true) => Ok(Some(Zlob { inner })),
@@ -311,24 +372,28 @@ mod tests {
     #[test]
     fn test_zlob_double_ended_iterator() {
         let result = zlob("*.toml", ZlobFlags::empty()).unwrap().unwrap();
-        if result.len() > 0 {
-            let mut iter = result.iter();
-            let first = iter.next();
-            let last = iter.next_back();
-            assert!(first.is_some());
-            // last might be None if there's only one element
-            if result.len() > 1 {
-                assert!(last.is_some());
-                assert_ne!(first, last);
-            }
-        }
+        let mut iter = result.iter();
+        let first = iter.next();
+        let last = iter.next_back();
+
+        assert!(first.is_some());
+        assert!(last.is_none()); // only single toml file
+
+        let result = zlob("src/*.rs", ZlobFlags::empty()).unwrap().unwrap();
+        let mut iter = result.iter();
+
+        let first = iter.next().unwrap();
+        let last = iter.next_back().unwrap();
+
+        assert_ne!(first, last);
     }
 
     #[test]
     fn test_zlob_exact_size_iterator() {
         let result = zlob("*.toml", ZlobFlags::empty()).unwrap().unwrap();
         let iter = result.iter();
-        assert_eq!(iter.len(), result.len());
+        assert_eq!(iter.len(), 1);
+        assert_eq!(result.len(), 1);
     }
 
     #[test]
@@ -350,7 +415,13 @@ mod tests {
     #[test]
     fn test_recursive_globbing() {
         // based on the rust/ folder contents
-        let result = zlob("**/*.{rs,toml}", ZlobFlags::BRACE).unwrap().unwrap();
+        // Need DOUBLESTAR_RECURSIVE for ** to work recursively
+        let result = zlob(
+            "**/*.{rs,toml}",
+            ZlobFlags::BRACE | ZlobFlags::DOUBLESTAR_RECURSIVE,
+        )
+        .unwrap()
+        .unwrap();
 
         for path in &result {
             println!("{}", path);

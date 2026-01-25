@@ -1,6 +1,7 @@
 const std = @import("std");
-const zlob = @import("zlob");
 const time = std.time;
+
+const zlob = @import("zlob");
 
 // Benchmark configuration
 const ITERATIONS = 1000;
@@ -14,7 +15,7 @@ fn benchmark(
 ) !void {
     // Warmup
     for (0..WARMUP_ITERATIONS) |_| {
-        var result = try zlob.matchPaths(allocator, pattern, paths, 0);
+        var result = try zlob.matchPaths(allocator, pattern, paths, zlob.ZlobFlags.recommended());
         result.deinit();
     }
 

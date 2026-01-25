@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const suffix_match = @import("suffix_match.zig");
 const brace_optimizer = @import("brace_optimizer.zig");
 const pattern_context_mod = @import("pattern_context.zig");
+const flags_mod = @import("flags.zig");
 
 pub const PatternContext = pattern_context_mod.PatternContext;
 pub const hasWildcardsSIMD = pattern_context_mod.hasWildcardsSIMD;
@@ -62,13 +63,19 @@ pub const DirIterator = struct {
     };
 
     pub fn open(path: []const u8, flags: c_int, pzlob: *const zlob_t) !DirIterator {
+        return openAt(path, flags, pzlob, null);
+    }
+
+    /// Open a directory iterator, optionally relative to a base directory.
+    /// If base_dir is null, uses cwd(). ALTDIRFUNC takes precedence if set.
+    pub fn openAt(path: []const u8, flags: c_int, pzlob: *const zlob_t, base_dir: ?std.fs.Dir) !DirIterator {
         const use_altdirfunc = (flags & ZLOB_ALTDIRFUNC) != 0 and
             pzlob.gl_opendir != null and
             pzlob.gl_readdir != null and
             pzlob.gl_closedir != null;
 
         if (use_altdirfunc) {
-            // Use custom directory functions
+            // ALTDIRFUNC takes precedence over base_dir
             var path_buf: [4096:0]u8 = undefined;
             if (path.len >= 4096) return error.NameTooLong;
             @memcpy(path_buf[0..path.len], path);
@@ -84,8 +91,9 @@ pub const DirIterator = struct {
                 .closedir_fn = pzlob.gl_closedir,
             };
         } else {
-            // Use standard filesystem
-            var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch |err| {
+            // Use base_dir if provided, otherwise use cwd
+            const root = base_dir orelse std.fs.cwd();
+            var dir = root.openDir(path, .{ .iterate = true }) catch |err| {
                 return err;
             };
             return DirIterator{
@@ -129,17 +137,14 @@ pub const DirIterator = struct {
     }
 };
 
-pub const ZLOB_FLAGS_SHARED_STRINGS: c_int = 0;
-pub const ZLOB_FLAGS_OWNS_STRINGS: c_int = 1 << 0;
-
-fn globLiteralPath(allocator: Allocator, path: []const u8, flags: c_int, pzlob: *zlob_t) !bool {
-    const cwd = std.fs.cwd();
-    const stat = cwd.statFile(path) catch {
+fn globLiteralPath(allocator: Allocator, path: []const u8, flags: ZlobFlags, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !bool {
+    const root = base_dir orelse std.fs.cwd();
+    const stat = root.statFile(path) catch {
         return false;
     };
 
     const is_dir = stat.kind == .directory;
-    if ((flags & ZLOB_ONLYDIR) != 0 and !is_dir) {
+    if (flags.onlydir and !is_dir) {
         return false;
     }
 
@@ -148,7 +153,7 @@ fn globLiteralPath(allocator: Allocator, path: []const u8, flags: c_int, pzlob: 
         return_path = path[2..];
     }
 
-    const needs_slash = (flags & ZLOB_MARK) != 0 and is_dir;
+    const needs_slash = flags.mark and is_dir;
     const final_len = return_path.len + (if (needs_slash) @as(usize, 1) else 0);
 
     var path_copy = try allocator.allocSentinel(u8, final_len, 0);
@@ -175,88 +180,39 @@ fn globLiteralPath(allocator: Allocator, path: []const u8, flags: c_int, pzlob: 
     return true;
 }
 
-// Standard POSIX glob flags (matching glibc values exactly)
-pub const ZLOB_ERR = 1 << 0; // 0x0001 - Return on read errors
-pub const ZLOB_MARK = 1 << 1; // 0x0002 - Append a slash to each name
-pub const ZLOB_NOSORT = 1 << 2; // 0x0004 - Don't sort the names
-pub const ZLOB_DOOFFS = 1 << 3; // 0x0008 - Insert PZLOB->gl_offs NULLs
-pub const ZLOB_NOCHECK = 1 << 4; // 0x0010 - If nothing matches, return the pattern
-pub const ZLOB_APPEND = 1 << 5; // 0x0020 - Append to results of a previous call
-pub const ZLOB_NOESCAPE = 1 << 6; // 0x0040 - Backslashes don't quote metacharacters
-pub const ZLOB_PERIOD = 1 << 7; // 0x0080 - Leading `.` can be matched by metachars
-
-// GNU extensions
-pub const ZLOB_MAGCHAR = 1 << 8; // 0x0100 - Set in gl_flags if any metachars seen
-pub const ZLOB_ALTDIRFUNC = 1 << 9; // 0x0200 - Use gl_opendir et al functions
-pub const ZLOB_BRACE = 1 << 10; // 0x0400 - Expand "{a,b}" to "a" "b"
-pub const ZLOB_NOMAGIC = 1 << 11; // 0x0800 - If no magic chars, return the pattern
-pub const ZLOB_TILDE = 1 << 12; // 0x1000 - Expand ~user and ~ to home directories
-pub const ZLOB_ONLYDIR = 1 << 13; // 0x2000 - Match only directories
-pub const ZLOB_TILDE_CHECK = 1 << 14; // 0x4000 - Like ZLOB_TILDE but return error if user name not available
-
-// zlob extensions
-pub const ZLOB_GITIGNORE = 1 << 15; // 0x8000 - Filter results using .gitignore from cwd
-
-pub const GlobFlags = packed struct(u32) {
-    // Standard POSIX glob flags (bits 0-7)
-    err: bool = false, // Return on read errors
-    mark: bool = false, // Append a slash to each directory name
-    nosort: bool = false, // Don't sort the names
-    dooffs: bool = false, // Insert gl_offs NULLs at beginning
-    nocheck: bool = false, // If nothing matches, return the pattern
-    append: bool = false, // Append to results of a previous call
-    noescape: bool = false, // Backslashes don't quote metacharacters
-    period: bool = false, // Leading '.' can be matched by metachars
-
-    // GNU extensions (bits 8-14)
-    magchar: bool = false, // Set in gl_flags if any metachars seen (OUTPUT only)
-    altdirfunc: bool = false, // Use gl_opendir/gl_readdir/gl_closedir functions
-    brace: bool = false, // Expand "{a,b}" to "a" "b"
-    nomagic: bool = false, // If no magic chars, return the pattern
-    tilde: bool = false, // Expand ~user and ~ to home directories
-    onlydir: bool = false, // Match only directories
-    tilde_check: bool = false, // Like tilde but return error if user not available
-
-    // zlob extensions (bit 15)
-    gitignore: bool = false, // Filter results using .gitignore from cwd
-
-    // Padding to fill 32 bits
-    _padding: u16 = 0,
-
-    pub fn toInt(self: GlobFlags) c_int {
-        return @bitCast(self);
-    }
-
-    pub fn fromInt(flags: c_int) GlobFlags {
-        return @bitCast(flags);
-    }
-
-    pub fn fromU32(flags: u32) GlobFlags {
-        return @bitCast(flags);
-    }
-
-    pub fn toU32(self: GlobFlags) u32 {
-        return @bitCast(self);
-    }
-
-    comptime {
-        std.debug.assert(@sizeOf(GlobFlags) == @sizeOf(u32));
-        std.debug.assert(@bitSizeOf(GlobFlags) == @bitSizeOf(u32));
-    }
-};
-
-// Error codes (C-style codes for compatibility)
-pub const ZLOB_NOSPACE = 1;
-pub const ZLOB_ABORTED = 2;
-pub const ZLOB_NOMATCH = 3;
+// ============================================================================
+// Flag constants and types - imported from flags.zig (single source of truth)
+// ============================================================================
+pub const ZLOB_ERR = flags_mod.ZLOB_ERR;
+pub const ZLOB_MARK = flags_mod.ZLOB_MARK;
+pub const ZLOB_NOSORT = flags_mod.ZLOB_NOSORT;
+pub const ZLOB_DOOFFS = flags_mod.ZLOB_DOOFFS;
+pub const ZLOB_NOCHECK = flags_mod.ZLOB_NOCHECK;
+pub const ZLOB_APPEND = flags_mod.ZLOB_APPEND;
+pub const ZLOB_NOESCAPE = flags_mod.ZLOB_NOESCAPE;
+pub const ZLOB_PERIOD = flags_mod.ZLOB_PERIOD;
+pub const ZLOB_MAGCHAR = flags_mod.ZLOB_MAGCHAR;
+pub const ZLOB_ALTDIRFUNC = flags_mod.ZLOB_ALTDIRFUNC;
+pub const ZLOB_BRACE = flags_mod.ZLOB_BRACE;
+pub const ZLOB_NOMAGIC = flags_mod.ZLOB_NOMAGIC;
+pub const ZLOB_TILDE = flags_mod.ZLOB_TILDE;
+pub const ZLOB_ONLYDIR = flags_mod.ZLOB_ONLYDIR;
+pub const ZLOB_TILDE_CHECK = flags_mod.ZLOB_TILDE_CHECK;
+pub const ZLOB_GITIGNORE = flags_mod.ZLOB_GITIGNORE;
+pub const ZLOB_DOUBLESTAR_RECURSIVE = flags_mod.ZLOB_DOUBLESTAR_RECURSIVE;
+pub const ZLOB_RECOMMENDED = flags_mod.ZLOB_RECOMMENDED;
+pub const ZLOB_FLAGS_SHARED_STRINGS = flags_mod.ZLOB_FLAGS_SHARED_STRINGS;
+pub const ZLOB_FLAGS_OWNS_STRINGS = flags_mod.ZLOB_FLAGS_OWNS_STRINGS;
+pub const ZLOB_NOSPACE = flags_mod.ZLOB_NOSPACE;
+pub const ZLOB_ABORTED = flags_mod.ZLOB_ABORTED;
+pub const ZLOB_NOMATCH = flags_mod.ZLOB_NOMATCH;
+pub const ZlobFlags = flags_mod.ZlobFlags;
+pub const GlobError = flags_mod.GlobError;
 
 pub const zlob_errfunc_t = ?*const fn (epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int;
 
-// Re-export path_matcher for c_lib to use
-pub fn internalMatchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags: u32) !GlobResults {
-    const path_matcher = @import("path_matcher.zig");
-    return path_matcher.matchPaths(allocator, pattern, paths, flags);
-}
+// Re-export path_matcher for consumers that need in-memory path matching
+pub const path_matcher = @import("path_matcher.zig");
 
 // Use Zig's cross-platform dirent structure
 pub const dirent = std.c.dirent;
@@ -266,7 +222,6 @@ pub const DT_DIR = std.c.DT.DIR;
 
 pub const ResultsList = std.array_list.AlignedManaged([*c]u8, null);
 
-// Pattern analysis structure for optimization
 const PatternInfo = struct {
     literal_prefix: []const u8, // e.g., "src/foo" from "src/foo/*.txt"
     wildcard_start_pos: usize, // Where wildcards begin in pattern
@@ -280,7 +235,7 @@ const PatternInfo = struct {
     directories_only: bool, // Only match directories (from ZLOB_ONLYDIR flag)
 };
 
-pub fn analyzePattern(pattern: []const u8, flags: c_int) PatternInfo {
+pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
     var info = PatternInfo{
         .literal_prefix = "",
         .wildcard_start_pos = 0,
@@ -291,10 +246,10 @@ pub fn analyzePattern(pattern: []const u8, flags: c_int) PatternInfo {
         .fixed_component_count = 0,
         .simple_extension = null,
         .has_dir_wildcards = false,
-        .directories_only = (flags & ZLOB_ONLYDIR) != 0,
+        .directories_only = flags.onlydir,
     };
 
-    const enable_escape = (flags & ZLOB_NOESCAPE) == 0;
+    const enable_escape = !flags.noescape;
     var i: usize = 0;
     var last_slash: usize = 0;
     var component_count: usize = 0;
@@ -317,7 +272,11 @@ pub fn analyzePattern(pattern: []const u8, flags: c_int) PatternInfo {
 
         if (ch == '*' or ch == '?') {
             if (ch == '*' and i + 1 < pattern.len and pattern[i + 1] == '*') {
-                info.has_recursive = true;
+                // Only enable recursive behavior if ZLOB_DOUBLESTAR_RECURSIVE is set
+                // Without it, ** is treated as * (glibc-compatible behavior)
+                if (flags.doublestar_recursive) {
+                    info.has_recursive = true;
+                }
             }
             break;
         }
@@ -576,7 +535,7 @@ fn buildPathInBuffer(buf: []u8, dir: []const u8, name: []const u8) []const u8 {
     return buf[0..len];
 }
 
-fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, pzlob: *zlob_t, directories_only: bool) !?void {
+fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, pzlob: *zlob_t, directories_only: bool) !?void {
     var components: [64][]const u8 = undefined;
     var component_count: usize = 0;
 
@@ -607,7 +566,7 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
     try expandWildcardComponents(allocator, ".", components[0..component_count], 0, &result_paths, directories_only);
 
     if (result_paths.items.len == 0) {
-        if (flags & ZLOB_NOCHECK != 0) {
+        if (flags.nocheck) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
             @memcpy(pat_copy[0..pattern.len], pattern);
             const path: [*c]u8 = @ptrCast(pat_copy.ptr);
@@ -629,12 +588,12 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
         return null;
     }
 
-    if (flags & ZLOB_NOSORT == 0) {
+    if (!flags.nosort) {
         qsort(@ptrCast(result_paths.items.ptr), result_paths.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
     // Handle ZLOB_APPEND flag - merge with existing results
-    if (flags & ZLOB_APPEND != 0 and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
+    if (flags.append and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
         const old_count = pzlob.gl_pathc;
         const new_count = result_paths.items.len;
         const total_count = old_count + new_count;
@@ -696,7 +655,7 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
 }
 
 // Optimized version that uses pattern info to start from literal prefix
-fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore) !?void {
+fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
     // Note: gitignore filtering is not fully implemented in this path
     // The main recursive and filtered paths handle gitignore
     _ = gitignore_filter;
@@ -743,10 +702,10 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     else
         ".";
 
-    try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc);
+    try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc, base_dir);
 
     if (result_paths.items.len == 0) {
-        if (flags & ZLOB_NOCHECK != 0) {
+        if (flags.nocheck) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
             @memcpy(pat_copy[0..pattern.len], pattern);
             const path: [*c]u8 = @ptrCast(pat_copy.ptr);
@@ -768,12 +727,12 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         return null;
     }
 
-    if (flags & ZLOB_NOSORT == 0) {
+    if (!flags.nosort) {
         qsort(@ptrCast(result_paths.items.ptr), result_paths.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
     // Handle ZLOB_APPEND flag - merge with existing results
-    if (flags & ZLOB_APPEND != 0 and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
+    if (flags.append and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
         const old_count = pzlob.gl_pathc;
         const new_count = result_paths.items.len;
         const total_count = old_count + new_count;
@@ -842,8 +801,9 @@ fn expandWildcardComponents(
     component_idx: usize,
     results: *ResultsList,
     directories_only: bool,
-    flags: c_int,
+    flags: ZlobFlags,
     errfunc: zlob_errfunc_t,
+    base_dir: ?std.fs.Dir,
 ) !void {
     if (component_idx > 65536) {
         @branchHint(.unlikely);
@@ -865,52 +825,75 @@ fn expandWildcardComponents(
 
     if (component_ctx.has_wildcards) {
         // Wildcard component - match against directory entries
-        var dirname_z: [4096:0]u8 = undefined;
-        if (current_dir.len >= 4096) return error.OutOfMemory;
-        @memcpy(dirname_z[0..current_dir.len], current_dir);
-        dirname_z[current_dir.len] = 0;
+        // If base_dir is provided, use Zig's fs; otherwise use C's opendir
+        if (base_dir) |bd| {
+            var dir = bd.openDir(current_dir, .{ .iterate = true }) catch {
+                if (flags.err) return error.Aborted;
+                return;
+            };
+            defer dir.close();
 
-        const dir = c.opendir(&dirname_z) orelse {
-            // Directory open error - call errfunc if provided
-            if (errfunc) |efunc| {
-                const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
-                if (efunc(&dirname_z, eerrno) != 0) {
-                    return error.Aborted;
+            var iter = dir.iterate();
+            while (iter.next() catch null) |entry| {
+                const name = entry.name;
+                if (!is_final and entry.kind != .directory) continue;
+                if (shouldSkipFile(name, &component_ctx, flags)) continue;
+
+                const matches = if (is_final and component_ctx.simd_batched_suffix_match != null)
+                    component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
+                else
+                    fnmatchWithContext(&component_ctx, name);
+
+                if (matches) {
+                    if (is_final and directories_only and entry.kind != .directory) continue;
+
+                    var new_path_buf: [4096]u8 = undefined;
+                    const new_path = buildPathInBuffer(&new_path_buf, current_dir, name);
+                    if (new_path.len >= 4096) continue;
+
+                    try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir);
                 }
             }
-            // If ZLOB_ERR is set, abort on error
-            if ((flags & ZLOB_ERR) != 0) {
-                return error.Aborted;
-            }
-            // Otherwise, silently skip this directory
-            return;
-        };
-        defer _ = c.closedir(dir);
+        } else {
+            // C-based path
+            var dirname_z: [4096:0]u8 = undefined;
+            if (current_dir.len >= 4096) return error.OutOfMemory;
+            @memcpy(dirname_z[0..current_dir.len], current_dir);
+            dirname_z[current_dir.len] = 0;
 
-        while (c.readdir(dir)) |entry_raw| {
-            const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-            const name = mem.sliceTo(&entry.name, 0);
+            const dir = c.opendir(&dirname_z) orelse {
+                if (errfunc) |efunc| {
+                    const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
+                    if (efunc(&dirname_z, eerrno) != 0) {
+                        return error.Aborted;
+                    }
+                }
+                if (flags.err) return error.Aborted;
+                return;
+            };
+            defer _ = c.closedir(dir);
 
-            // For non-final components, only traverse directories
-            if (!is_final and entry.type != DT_DIR) continue;
-            if (shouldSkipFile(name, &component_ctx, 0)) continue;
+            while (c.readdir(dir)) |entry_raw| {
+                const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
+                const name = mem.sliceTo(&entry.name, 0);
 
-            const matches = if (is_final and component_ctx.simd_batched_suffix_match != null)
-                component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
-            else
-                fnmatchWithContext(&component_ctx, name);
+                if (!is_final and entry.type != DT_DIR) continue;
+                if (shouldSkipFile(name, &component_ctx, flags)) continue;
 
-            if (matches) {
-                // For final component with directories_only flag, only keep directories
-                if (is_final and directories_only and entry.type != DT_DIR) continue;
+                const matches = if (is_final and component_ctx.simd_batched_suffix_match != null)
+                    component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
+                else
+                    fnmatchWithContext(&component_ctx, name);
 
-                var new_path_buf: [4096]u8 = undefined;
-                const new_path = buildPathInBuffer(&new_path_buf, current_dir, name);
+                if (matches) {
+                    if (is_final and directories_only and entry.type != DT_DIR) continue;
 
-                if (new_path.len >= 4096) continue;
+                    var new_path_buf: [4096]u8 = undefined;
+                    const new_path = buildPathInBuffer(&new_path_buf, current_dir, name);
+                    if (new_path.len >= 4096) continue;
 
-                // Recurse with next component
-                try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc);
+                    try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, null);
+                }
             }
         }
     } else {
@@ -920,30 +903,32 @@ fn expandWildcardComponents(
 
         if (new_path.len >= 4096) return;
 
-        var path_z: [4096:0]u8 = undefined;
-        @memcpy(path_z[0..new_path.len], new_path);
-        path_z[new_path.len] = 0;
+        if (base_dir) |bd| {
+            const stat = bd.statFile(new_path) catch return;
+            if (!is_final and stat.kind != .directory) return;
+            if (is_final and directories_only and stat.kind != .directory) return;
+            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir);
+        } else {
+            var path_z: [4096:0]u8 = undefined;
+            @memcpy(path_z[0..new_path.len], new_path);
+            path_z[new_path.len] = 0;
 
-        var stat_buf: std.c.Stat = undefined;
-        if (std.c.stat(&path_z, &stat_buf) == 0) {
-            // For non-final components, must be a directory
-            if (!is_final and !std.c.S.ISDIR(stat_buf.mode)) return;
-
-            // For final component with directories_only, must be directory
-            if (is_final and directories_only and !std.c.S.ISDIR(stat_buf.mode)) return;
-
-            // Path exists and is valid, recurse
-            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc);
+            var stat_buf: std.c.Stat = undefined;
+            if (std.c.stat(&path_z, &stat_buf) == 0) {
+                if (!is_final and !std.c.S.ISDIR(stat_buf.mode)) return;
+                if (is_final and directories_only and !std.c.S.ISDIR(stat_buf.mode)) return;
+                try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, null);
+            }
         }
     }
 }
 
-fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore) !?void {
+fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
     var effective_pattern = pattern;
-    var effective_flags = flags;
+    var flags = flags_in;
 
     if (pattern.len > 0 and pattern[pattern.len - 1] == '/') {
-        effective_flags |= ZLOB_ONLYDIR;
+        flags.onlydir = true;
         effective_pattern = pattern[0 .. pattern.len - 1];
 
         if (effective_pattern.len == 0) {
@@ -960,11 +945,11 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     if (!hasWildcardsSIMD(effective_pattern) and !needs_tilde_expansion and !has_brace_alternatives) {
         // Check gitignore for literal path
         if (gitignore_filter) |gi| {
-            const cwd = std.fs.cwd();
-            const stat = cwd.statFile(effective_pattern) catch null;
+            const root = base_dir orelse std.fs.cwd();
+            const stat = root.statFile(effective_pattern) catch null;
             const is_dir = if (stat) |s| s.kind == .directory else false;
             if (gi.isIgnored(effective_pattern, is_dir)) {
-                if (flags & ZLOB_NOCHECK != 0) {
+                if (flags.nocheck) {
                     return returnPatternAsResult(allocator, effective_pattern, pzlob);
                 }
                 return null;
@@ -972,56 +957,60 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
         }
 
         // Try to match literal path
-        const found = try globLiteralPath(allocator, effective_pattern, effective_flags, pzlob);
+        const found = try globLiteralPath(allocator, effective_pattern, flags, pzlob, base_dir);
         if (found) return;
 
-        if (flags & ZLOB_NOCHECK != 0) {
+        if (flags.nocheck) {
             return returnPatternAsResult(allocator, effective_pattern, pzlob);
         }
 
         return null;
     }
 
-    const info = analyzePattern(effective_pattern, effective_flags);
+    const info = analyzePattern(effective_pattern, flags);
 
     // Fast path: simple pattern with literal prefix (e.g., "src/foo/*.txt")
     if (info.simple_extension != null and info.literal_prefix.len > 0) {
-        return globInDirFiltered(allocator, info.wildcard_suffix, info.literal_prefix, effective_flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed);
+        return globInDirFiltered(allocator, info.wildcard_suffix, info.literal_prefix, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir);
     }
 
-    if (mem.indexOf(u8, effective_pattern, "**")) |double_star_pos| {
-        var dirname_buf: [4096:0]u8 = undefined;
-        var dirname: []const u8 = ".";
-        var pattern_from_doublestar: []const u8 = effective_pattern;
+    // Only use recursive glob handling if ZLOB_DOUBLESTAR_RECURSIVE is set
+    // Without it, ** is treated as * (glibc-compatible behavior)
+    if (flags.doublestar_recursive) {
+        if (mem.indexOf(u8, effective_pattern, "**")) |double_star_pos| {
+            var dirname_buf: [4096:0]u8 = undefined;
+            var dirname: []const u8 = ".";
+            var pattern_from_doublestar: []const u8 = effective_pattern;
 
-        // Look for slash before **
-        if (double_star_pos > 0) {
-            var last_slash_before: ?usize = null;
-            var i: usize = double_star_pos;
-            while (i > 0) {
-                i -= 1;
-                if (effective_pattern[i] == '/') {
-                    last_slash_before = i;
-                    break;
+            // Look for slash before **
+            if (double_star_pos > 0) {
+                var last_slash_before: ?usize = null;
+                var i: usize = double_star_pos;
+                while (i > 0) {
+                    i -= 1;
+                    if (effective_pattern[i] == '/') {
+                        last_slash_before = i;
+                        break;
+                    }
+                }
+
+                if (last_slash_before) |slash_pos| {
+                    // e.g., "foo/bar/**/*.c" → dirname="foo/bar", pattern="**/*.c"
+                    @memcpy(dirname_buf[0..slash_pos], effective_pattern[0..slash_pos]);
+                    dirname_buf[slash_pos] = 0;
+                    dirname = dirname_buf[0..slash_pos];
+                    pattern_from_doublestar = effective_pattern[slash_pos + 1 ..];
+                } else {
+                    // e.g., "./**/*.c" → dirname=".", pattern="**/*.c"
+                    @memcpy(dirname_buf[0..double_star_pos], effective_pattern[0..double_star_pos]);
+                    dirname_buf[double_star_pos] = 0;
+                    dirname = dirname_buf[0..double_star_pos];
+                    pattern_from_doublestar = effective_pattern[double_star_pos..];
                 }
             }
 
-            if (last_slash_before) |slash_pos| {
-                // e.g., "foo/bar/**/*.c" → dirname="foo/bar", pattern="**/*.c"
-                @memcpy(dirname_buf[0..slash_pos], effective_pattern[0..slash_pos]);
-                dirname_buf[slash_pos] = 0;
-                dirname = dirname_buf[0..slash_pos];
-                pattern_from_doublestar = effective_pattern[slash_pos + 1 ..];
-            } else {
-                // e.g., "./**/*.c" → dirname=".", pattern="**/*.c"
-                @memcpy(dirname_buf[0..double_star_pos], effective_pattern[0..double_star_pos]);
-                dirname_buf[double_star_pos] = 0;
-                dirname = dirname_buf[0..double_star_pos];
-                pattern_from_doublestar = effective_pattern[double_star_pos..];
-            }
+            return globRecursive(allocator, pattern_from_doublestar, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, base_dir);
         }
-
-        return globRecursive(allocator, pattern_from_doublestar, dirname, effective_flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter);
     }
 
     // If yes, need recursive directory expansion (slow path)
@@ -1047,7 +1036,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
 
     // But skip if pattern has ** (needs special recursive handling)
     if (has_wildcard_in_dir and !info.has_recursive) {
-        return globWithWildcardDirsOptimized(allocator, effective_pattern, &info, effective_flags, errfunc, pzlob, info.directories_only, gitignore_filter);
+        return globWithWildcardDirsOptimized(allocator, effective_pattern, &info, flags, errfunc, pzlob, info.directories_only, gitignore_filter, base_dir);
     }
 
     var dir_end: usize = 0;
@@ -1071,11 +1060,14 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
         filename_pattern = effective_pattern[dir_end + 1 ..];
     }
 
-    if (mem.indexOf(u8, filename_pattern, "**")) |_| {
-        return globRecursive(allocator, filename_pattern, dirname, effective_flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter);
+    // Only check for ** in filename if doublestar_recursive is enabled
+    if (flags.doublestar_recursive) {
+        if (mem.indexOf(u8, filename_pattern, "**")) |_| {
+            return globRecursive(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, base_dir);
+        }
     }
 
-    return globInDirFiltered(allocator, filename_pattern, dirname, effective_flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed);
+    return globInDirFiltered(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir);
 }
 
 /// Helper to return pattern as result (for ZLOB_NOCHECK)
@@ -1103,7 +1095,7 @@ fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, pzlo
 
 //   - The expanded pattern (allocated if expanded, original if no tilde)
 //   - null if ZLOB_TILDE_CHECK is set and expansion fails (indicates no match)
-fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int) !?[:0]const u8 {
+fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: ZlobFlags) !?[:0]const u8 {
     if (pattern.len == 0 or pattern[0] != '~') {
         return pattern; // No tilde, return as-is
     }
@@ -1121,7 +1113,7 @@ fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int
         // Need null-terminated username for getpwnam
         var username_z: [256]u8 = undefined;
         if (username.len >= 256) {
-            if (flags & ZLOB_TILDE_CHECK != 0) {
+            if (flags.tilde_check) {
                 return null; // Indicate no match
             }
             break :blk null;
@@ -1131,7 +1123,7 @@ fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int
 
         const pw_entry = pwd.getpwnam(&username_z);
         if (pw_entry == null) {
-            if (flags & ZLOB_TILDE_CHECK != 0) {
+            if (flags.tilde_check) {
                 return null; // Indicate no match
             }
             break :blk null;
@@ -1139,7 +1131,7 @@ fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int
 
         const home_cstr = pw_entry.*.pw_dir;
         if (home_cstr == null) {
-            if (flags & ZLOB_TILDE_CHECK != 0) {
+            if (flags.tilde_check) {
                 return null; // Indicate no match
             }
             break :blk null;
@@ -1161,10 +1153,33 @@ fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: c_int
 
 /// This is the root logic function for globbing
 pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
-    if (flags & ZLOB_APPEND == 0) {
+    return globInternal(allocator, pattern, flags, errfunc, pzlob, null);
+}
+
+/// Glob within a specific base directory.
+/// base_path must be an absolute path (starts with '/'), otherwise returns error.Aborted.
+pub fn globAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
+    // Validate that base_path is absolute
+    if (base_path.len == 0 or base_path[0] != '/') {
+        return error.Aborted;
+    }
+
+    // Open the base directory
+    var base_dir = std.fs.openDirAbsolute(base_path, .{ .iterate = true }) catch {
+        return error.Aborted;
+    };
+    defer base_dir.close();
+
+    return globInternal(allocator, pattern, flags, errfunc, pzlob, base_dir);
+}
+
+/// Internal glob implementation that accepts an optional base directory
+fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !?void {
+    const gf = ZlobFlags.fromInt(flags);
+    if (!gf.append) {
         pzlob.gl_pathc = 0;
         pzlob.gl_pathv = null;
-        if (flags & ZLOB_DOOFFS == 0) {
+        if (!gf.dooffs) {
             pzlob.gl_offs = 0;
         }
     }
@@ -1185,13 +1200,14 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
     var gitignore_instance: ?GitIgnore = null;
     defer if (gitignore_instance) |*gi| gi.deinit();
 
-    if (flags & ZLOB_GITIGNORE != 0) {
+    if (gf.gitignore) {
+        // TODO: For globAt, we should load .gitignore relative to base_dir
         gitignore_instance = GitIgnore.loadFromCwd(allocator) catch null;
     }
     const gitignore_ptr: ?*GitIgnore = if (gitignore_instance) |*gi| gi else null;
 
-    if (flags & ZLOB_TILDE != 0) {
-        expanded_pattern = try expandTilde(allocator, pattern_slice, flags);
+    if (gf.tilde) {
+        expanded_pattern = try expandTilde(allocator, pattern_slice, gf);
         if (expanded_pattern == null) {
             // ZLOB_TILDE_CHECK is set and tilde expansion failed - no match
             return null;
@@ -1199,10 +1215,10 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
         pattern_slice = expanded_pattern.?;
     }
 
-    if ((flags & ZLOB_BRACE != 0) and brace_optimizer.containsBraces(pattern_slice)) {
+    if (gf.brace and brace_optimizer.containsBraces(pattern_slice)) {
         var opt = brace_optimizer.analyzeBracedPattern(allocator, pattern_slice) catch {
             // On error, fall back to standard brace expansion
-            return try globBraceExpand(allocator, pattern_slice, flags, errfunc, pzlob, gitignore_ptr);
+            return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir);
         };
         defer opt.deinit();
 
@@ -1214,26 +1230,27 @@ pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, 
                     allocator,
                     pattern_slice,
                     parsed,
-                    flags,
+                    gf,
                     errfunc,
                     pzlob,
                     gitignore_ptr,
+                    base_dir,
                 );
             },
             .fallback => {
-                return try globBraceExpand(allocator, pattern_slice, flags, errfunc, pzlob, gitignore_ptr);
+                return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir);
             },
             .no_braces => {
-                return try globBraceExpand(allocator, pattern_slice, flags, errfunc, pzlob, gitignore_ptr);
+                return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir);
             },
         }
     }
 
-    return try globSingle(allocator, pattern_slice, null, flags, errfunc, pzlob, gitignore_ptr);
+    return try globSingle(allocator, pattern_slice, null, gf, errfunc, pzlob, gitignore_ptr, base_dir);
 }
 
 // Expand brace patterns and glob each independently (no ZLOB_APPEND manipulation)
-fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore) !?void {
+fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
     var expanded = ResultsList.init(allocator);
     defer {
         for (expanded.items) |item| {
@@ -1259,7 +1276,7 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: c_i
         temp_pzlob.gl_pathv = null;
         temp_pzlob.gl_offs = 0;
 
-        _ = try globSingle(allocator, exp_slice, null, flags & ~@as(c_int, ZLOB_APPEND), errfunc, &temp_pzlob, gitignore_filter);
+        _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true }), errfunc, &temp_pzlob, gitignore_filter, base_dir);
 
         // Collect results from temp_pzlob
         if (temp_pzlob.gl_pathc > 0) {
@@ -1276,7 +1293,7 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: c_i
     }
 
     if (all_results.items.len == 0) {
-        if (flags & ZLOB_NOCHECK != 0) {
+        if (flags.nocheck) {
             const pat_copy = try allocator.allocSentinel(u8, pattern.len, 0);
             @memcpy(pat_copy[0..pattern.len], pattern);
             const path: [*c]u8 = @ptrCast(pat_copy.ptr);
@@ -1299,7 +1316,7 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: c_i
     }
 
     // Sort results if needed
-    if (flags & ZLOB_NOSORT == 0) {
+    if (!flags.nosort) {
         qsort(@ptrCast(all_results.items.ptr), all_results.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
@@ -1349,11 +1366,11 @@ inline fn matchWithAlternativesPrecomputed(name: []const u8, contexts: []const P
 }
 
 /// Unified brace pattern glob - walks the tree ONCE regardless of where braces appear
-fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*GitIgnore) !?void {
+fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
     const info = analyzePattern(pattern, flags);
 
     // Split pattern at **
-    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInDirFiltered(allocator, pattern, dirname, flags, errfunc, pzlob, directories_only, gitignore_filter, brace_parsed);
+    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInDirFiltered(allocator, pattern, dirname, flags, errfunc, pzlob, directories_only, gitignore_filter, brace_parsed, base_dir);
 
     var after_double_star = pattern[double_star_pos + 2 ..];
 
@@ -1515,20 +1532,21 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
             &all_results,
             &info,
             errfunc,
+            base_dir,
         );
     } else if (post_ds_count == 0) {
         // No dir components at all - use Zig walker which produces slices directly
-        try globRecursiveWithZigWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc);
+        try globRecursiveWithZigWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc, base_dir);
     } else {
         // Has post-doublestar dir components - use C-based recursive helper
-        try globRecursiveHelperCollect(allocator, &rec_pattern, start_dir, flags, &all_results, 0, &info, errfunc);
+        try globRecursiveHelperCollect(allocator, &rec_pattern, start_dir, flags, &all_results, 0, &info, errfunc, base_dir);
     }
 
     if (all_results.items.len == 0) {
         return null;
     }
 
-    if (flags & ZLOB_NOSORT == 0) {
+    if (!flags.nosort) {
         qsort(@ptrCast(all_results.items.ptr), all_results.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
@@ -1542,18 +1560,19 @@ fn globRecursiveWithBracedPrefix(
     pre_ds_components: []const []const u8,
     pre_ds_alternatives: []const ?[]const []const u8,
     component_idx: usize,
-    flags: c_int,
+    flags: ZlobFlags,
     results: *ResultsList,
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
+    base_dir: ?std.fs.Dir,
 ) !void {
     // If we've matched all pre-doublestar components, start the recursive walk
     if (component_idx >= pre_ds_components.len) {
         // Now do the recursive walk from current_dir
         if (rec_pattern.dir_components.len == 0) {
-            try globRecursiveWithZigWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc);
+            try globRecursiveWithZigWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc, base_dir);
         } else {
-            try globRecursiveHelperCollect(allocator, rec_pattern, current_dir, flags, results, 0, info, errfunc);
+            try globRecursiveHelperCollect(allocator, rec_pattern, current_dir, flags, results, 0, info, errfunc, base_dir);
         }
         return;
     }
@@ -1562,7 +1581,8 @@ fn globRecursiveWithBracedPrefix(
     const comp_alts = pre_ds_alternatives[component_idx];
 
     // Open current directory to find matching subdirectories
-    var dir = std.fs.cwd().openDir(current_dir, .{ .iterate = true }) catch |err| {
+    const root = base_dir orelse std.fs.cwd();
+    var dir = root.openDir(current_dir, .{ .iterate = true }) catch |err| {
         if (errfunc) |efunc| {
             var path_buf: [4096:0]u8 = undefined;
             if (current_dir.len < 4096) {
@@ -1577,7 +1597,7 @@ fn globRecursiveWithBracedPrefix(
                 _ = efunc(&path_buf, eerrno);
             }
         }
-        if ((flags & ZLOB_ERR) != 0) {
+        if (flags.err) {
             return error.Aborted;
         }
         return;
@@ -1593,7 +1613,7 @@ fn globRecursiveWithBracedPrefix(
         if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
 
         // Skip hidden unless ZLOB_PERIOD or pattern starts with .
-        if ((flags & ZLOB_PERIOD) == 0 and name[0] == '.') {
+        if (!flags.period and name[0] == '.') {
             if (comp_text.len == 0 or comp_text[0] != '.') {
                 if (comp_alts) |alts| {
                     var any_starts_dot = false;
@@ -1653,17 +1673,18 @@ fn globRecursiveWithBracedPrefix(
                 results,
                 info,
                 errfunc,
+                base_dir,
             );
         }
     }
 }
 
 // Helper to finalize results from ArrayList to zlob_t
-fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: c_int, pzlob: *zlob_t) !?void {
-    const offs = if (flags & ZLOB_DOOFFS != 0) pzlob.gl_offs else 0;
+fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: ZlobFlags, pzlob: *zlob_t) !?void {
+    const offs = if (flags.dooffs) pzlob.gl_offs else 0;
 
     // Handle ZLOB_APPEND - merge with existing results
-    if (flags & ZLOB_APPEND != 0 and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
+    if (flags.append and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
         const old_count = pzlob.gl_pathc;
         const new_count = results.items.len;
         const total_count = old_count + new_count;
@@ -1735,16 +1756,18 @@ inline fn globRecursiveWithZigWalk(
     allocator: std.mem.Allocator,
     rec_pattern: *const RecursivePattern,
     start_dir: []const u8,
-    flags: c_int,
+    flags: ZlobFlags,
     results: *ResultsList,
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
+    base_dir: ?std.fs.Dir,
 ) !void {
     // Pattern context for file matching
     const pattern_ctx = PatternContext.init(rec_pattern.file_pattern);
 
     // Open the starting directory using Zig's std.fs
-    var dir = std.fs.cwd().openDir(start_dir, .{ .iterate = true }) catch |err| {
+    const root = base_dir orelse std.fs.cwd();
+    var dir = root.openDir(start_dir, .{ .iterate = true }) catch |err| {
         // If we can't open the directory, call errfunc if provided
         if (errfunc) |efunc| {
             // Convert start_dir to null-terminated string for errfunc
@@ -1765,7 +1788,7 @@ inline fn globRecursiveWithZigWalk(
             }
         }
         // If ZLOB_ERR is set, abort on error
-        if ((flags & ZLOB_ERR) != 0) {
+        if (flags.err) {
             return error.Aborted;
         }
         // Otherwise, silently skip this directory
@@ -1793,7 +1816,7 @@ inline fn globRecursiveWithZigWalk(
             if (entry.kind == .file or is_dir) {
                 // ZLOB_PERIOD: Check if path contains hidden components
                 // If ZLOB_PERIOD is NOT set, skip files whose path contains hidden directories
-                if ((flags & ZLOB_PERIOD) == 0) {
+                if (!flags.period) {
                     // entry.path can be like ".hidden_dir/file.txt" or "dir/.hidden/file.txt"
                     if (mem.indexOf(u8, entry.path, "/.") != null) {
                         continue; // Path contains /. (hidden directory)
@@ -1855,7 +1878,7 @@ fn walkWithGitignore(
     rel_path: []const u8,
     rec_pattern: *const RecursivePattern,
     pattern_ctx: *const PatternContext,
-    flags: c_int,
+    flags: ZlobFlags,
     results: *ResultsList,
     info: *const PatternInfo,
     gi: *GitIgnore,
@@ -1890,7 +1913,7 @@ fn walkWithGitignore(
         }
 
         // ZLOB_PERIOD handling
-        if ((flags & ZLOB_PERIOD) == 0 and name[0] == '.') {
+        if (!flags.period and name[0] == '.') {
             if (!pattern_ctx.starts_with_dot) {
                 continue;
             }
@@ -1946,7 +1969,7 @@ fn walkWithGitignore(
     }
 }
 
-inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: c_int, results: *ResultsList, depth: usize, info: *const PatternInfo, errfunc: zlob_errfunc_t) !void {
+fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: ZlobFlags, results: *ResultsList, depth: usize, info: *const PatternInfo, errfunc: zlob_errfunc_t, base_dir: ?std.fs.Dir) !void {
     // Limit recursion depth
     if (depth > 100) return;
 
@@ -1962,11 +1985,73 @@ inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: 
         true;
 
     if (should_match_here and rec_pattern.dir_components.len == 0) {
-        try globInDirImplCollect(allocator, rec_pattern.file_pattern, rec_pattern.file_alternatives, rec_pattern.file_pattern_contexts, dirname, flags, results, info.directories_only, errfunc, rec_pattern.gitignore_filter);
+        try globInDirImplCollect(allocator, rec_pattern.file_pattern, rec_pattern.file_alternatives, rec_pattern.file_pattern_contexts, dirname, flags, results, info.directories_only, errfunc, rec_pattern.gitignore_filter, base_dir);
         // Continue recursing even if no matches in this directory
     }
 
     // Open directory to find subdirectories
+    // If base_dir is provided, use Zig's fs; otherwise use C's opendir for performance
+    if (base_dir) |bd| {
+        var dir = bd.openDir(dirname, .{ .iterate = true }) catch {
+            if (flags.err) return error.Aborted;
+            return;
+        };
+        defer dir.close();
+
+        var iter = dir.iterate();
+        while (iter.next() catch null) |entry| {
+            const name = entry.name;
+            if (name.len == 0 or (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.')))) continue;
+
+            if (name[0] == '.' and !flags.period) {
+                if (rec_pattern.dir_components.len > 0 and rec_pattern.dir_components[0].len > 0 and rec_pattern.dir_components[0][0] == '.') {
+                    // First directory component explicitly starts with '.'
+                } else if (rec_pattern.dir_components.len == 0 and rec_pattern.file_pattern.len > 0 and rec_pattern.file_pattern[0] == '.') {
+                    // File pattern explicitly starts with '.'
+                } else {
+                    continue;
+                }
+            }
+
+            if (entry.kind == .directory) {
+                var subdir_buf: [4096]u8 = undefined;
+                const subdir = if (mem.eql(u8, dirname, ".")) blk: {
+                    @memcpy(subdir_buf[0..name.len], name);
+                    break :blk subdir_buf[0..name.len];
+                } else blk: {
+                    @memcpy(subdir_buf[0..dirname.len], dirname);
+                    subdir_buf[dirname.len] = '/';
+                    @memcpy(subdir_buf[dirname.len + 1 ..][0..name.len], name);
+                    break :blk subdir_buf[0 .. dirname.len + 1 + name.len];
+                };
+
+                var next_rec_pattern = rec_pattern.*;
+                if (rec_pattern.dir_components.len > 0) {
+                    const next_component = rec_pattern.dir_components[0];
+                    const has_alternatives = rec_pattern.dir_component_alternatives != null and
+                        rec_pattern.dir_component_alternatives.?[0] != null;
+
+                    const matches_component = if (has_alternatives)
+                        matchWithAlternatives(name, rec_pattern.dir_component_alternatives.?[0].?)
+                    else blk: {
+                        const component_ctx = PatternContext.init(next_component);
+                        break :blk fnmatchWithContext(&component_ctx, name);
+                    };
+
+                    if (matches_component) {
+                        next_rec_pattern.dir_components = rec_pattern.dir_components[1..];
+                        if (rec_pattern.dir_component_alternatives) |alts| {
+                            next_rec_pattern.dir_component_alternatives = if (alts.len > 1) alts[1..] else null;
+                        }
+                    }
+                }
+                try globRecursiveHelperCollect(allocator, &next_rec_pattern, subdir, flags, results, depth + 1, info, errfunc, base_dir);
+            }
+        }
+        return;
+    }
+
+    // C-based path (no base_dir)
     var dirname_z: [4096:0]u8 = undefined;
     @memcpy(dirname_z[0..dirname.len], dirname);
     dirname_z[dirname.len] = 0;
@@ -1980,7 +2065,7 @@ inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: 
             }
         }
         // If ZLOB_ERR is set, abort on error
-        if ((flags & ZLOB_ERR) != 0) {
+        if (flags.err) {
             return error.Aborted;
         }
         // Otherwise, silently skip this directory
@@ -1998,7 +2083,7 @@ inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: 
         }
 
         if (name[0] == '.') {
-            if (flags & ZLOB_PERIOD != 0) {
+            if (flags.period) {
                 // ZLOB_PERIOD allows wildcards to match hidden files
             } else if (rec_pattern.dir_components.len > 0 and rec_pattern.dir_components[0].len > 0 and rec_pattern.dir_components[0][0] == '.') {
                 // First directory component explicitly starts with '.'
@@ -2077,16 +2162,74 @@ inline fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: 
             }
 
             // Recurse into subdirectory
-            try globRecursiveHelperCollect(allocator, &next_rec_pattern, subdir, flags, results, depth + 1, info, errfunc);
+            try globRecursiveHelperCollect(allocator, &next_rec_pattern, subdir, flags, results, depth + 1, info, errfunc, null);
         }
     }
 }
 
-fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_alternatives: ?[]const []const u8, file_pattern_contexts: ?[]const PatternContext, dirname: []const u8, flags: c_int, results: *ResultsList, directories_only: bool, errfunc: zlob_errfunc_t, gitignore_filter: ?*GitIgnore) !void {
+fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_alternatives: ?[]const []const u8, file_pattern_contexts: ?[]const PatternContext, dirname: []const u8, flags: ZlobFlags, results: *ResultsList, directories_only: bool, errfunc: zlob_errfunc_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !void {
     const pattern_ctx = PatternContext.init(pattern);
 
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
 
+    // If base_dir is provided, use Zig's fs; otherwise use C's opendir for performance
+    if (base_dir) |bd| {
+        var dir = bd.openDir(dirname, .{ .iterate = true }) catch {
+            if (flags.err) return error.Aborted;
+            return;
+        };
+        defer dir.close();
+
+        var iter = dir.iterate();
+        while (iter.next() catch null) |entry| {
+            const name = entry.name;
+            if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
+
+            const matches = if (file_pattern_contexts) |contexts|
+                matchWithAlternativesPrecomputed(name, contexts)
+            else if (file_alternatives) |alts|
+                matchWithAlternatives(name, alts)
+            else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+                batched_suffix_match.matchSuffix(name)
+            else
+                fnmatchWithContext(&pattern_ctx, name);
+
+            if (matches) {
+                if (directories_only and entry.kind != .directory) continue;
+
+                const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
+                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
+                const path_len = path_buf_slice.len;
+
+                const is_dir = entry.kind == .directory;
+
+                if (directories_only and !is_dir) {
+                    allocator.free(path_buf_slice);
+                    continue;
+                }
+
+                if (gitignore_filter) |gi| {
+                    const rel_path = if (use_dirname) path_buf_slice[0..path_len] else name;
+                    if (gi.isIgnored(rel_path, is_dir)) {
+                        allocator.free(path_buf_slice);
+                        continue;
+                    }
+                }
+
+                if (maybeAppendSlash(allocator, path, path_len, is_dir, flags) catch {
+                    allocator.free(path_buf_slice);
+                    return error.OutOfMemory;
+                }) |new_path| {
+                    path = new_path;
+                }
+
+                results.append(path) catch return error.OutOfMemory;
+            }
+        }
+        return;
+    }
+
+    // C-based path (no base_dir)
     var dirname_z: [4096:0]u8 = undefined;
     @memcpy(dirname_z[0..dirname.len], dirname);
     dirname_z[dirname.len] = 0;
@@ -2100,7 +2243,7 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
             }
         }
         // If ZLOB_ERR is set, abort on error
-        if ((flags & ZLOB_ERR) != 0) {
+        if (flags.err) {
             return error.Aborted;
         }
         // Otherwise, silently skip this directory
@@ -2202,7 +2345,7 @@ pub inline fn buildFullPath(allocator: std.mem.Allocator, dirname: []const u8, n
 }
 
 // Helper to check if filename should be skipped (returns true to skip)
-pub inline fn shouldSkipFile(name: []const u8, pattern_ctx: *const PatternContext, flags: c_int) bool {
+pub inline fn shouldSkipFile(name: []const u8, pattern_ctx: *const PatternContext, flags: ZlobFlags) bool {
     if (name.len == 0) return true;
 
     const first_byte = name[0];
@@ -2217,7 +2360,7 @@ pub inline fn shouldSkipFile(name: []const u8, pattern_ctx: *const PatternContex
         }
 
         // ZLOB_PERIOD: allow wildcards to match hidden files
-        if (flags & ZLOB_PERIOD != 0) return false;
+        if (flags.period) return false;
 
         if (!pattern_ctx.starts_with_dot) return true;
     }
@@ -2225,8 +2368,8 @@ pub inline fn shouldSkipFile(name: []const u8, pattern_ctx: *const PatternContex
 }
 
 // Helper to check if path is a directory and append '/' if ZLOB_MARK is set
-pub inline fn maybeAppendSlash(allocator: std.mem.Allocator, path: [*c]u8, path_len: usize, is_dir: bool, flags: c_int) !?[*c]u8 {
-    if (!is_dir or (flags & ZLOB_MARK == 0)) {
+pub inline fn maybeAppendSlash(allocator: std.mem.Allocator, path: [*c]u8, path_len: usize, is_dir: bool, flags: ZlobFlags) !?[*c]u8 {
+    if (!is_dir or (!flags.mark)) {
         return null; // No modification needed
     }
 
@@ -2238,7 +2381,7 @@ pub inline fn maybeAppendSlash(allocator: std.mem.Allocator, path: [*c]u8, path_
     return @ptrCast(new_slice.ptr);
 }
 
-fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern) !?void {
+fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern, base_dir: ?std.fs.Dir) !?void {
     // If we have brace alternatives for the filename pattern, use them for matching
     // e.g., "*.{toml,lock}" -> alternatives = ["*.toml", "*.lock"]
     const file_alternatives: ?[]const PatternContext = if (brace_parsed) |bp| blk: {
@@ -2255,6 +2398,77 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
     const pattern_ctx = PatternContext.init(pattern);
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
 
+    // If base_dir is provided, use Zig's fs; otherwise use C's opendir for performance
+    if (base_dir) |bd| {
+        var dir = bd.openDir(dirname, .{ .iterate = true }) catch {
+            if (flags.err) return error.Aborted;
+            return null;
+        };
+        defer dir.close();
+
+        var names = ResultsList.init(allocator);
+        defer names.deinit();
+
+        var iter = dir.iterate();
+        while (iter.next() catch null) |entry| {
+            const name = entry.name;
+            if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
+
+            const matches = if (file_alternatives) |alts| blk: {
+                for (alts) |alt_ctx| {
+                    if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
+                        if (batched_suffix_match.matchSuffix(name)) break :blk true;
+                    } else if (fnmatchWithContext(&alt_ctx, name)) {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+                batched_suffix_match.matchSuffix(name)
+            else
+                fnmatchWithContext(&pattern_ctx, name);
+
+            if (matches) {
+                if (directories_only and entry.kind != .directory) continue;
+
+                const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
+                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
+                const path_len = path_buf_slice.len;
+
+                const is_dir = entry.kind == .directory;
+
+                if (directories_only and !is_dir) {
+                    allocator.free(path_buf_slice);
+                    continue;
+                }
+
+                if (gitignore_filter) |gi| {
+                    const rel_path = if (use_dirname) path_buf_slice[0..path_len] else name;
+                    if (gi.isIgnored(rel_path, is_dir)) {
+                        allocator.free(path_buf_slice);
+                        continue;
+                    }
+                }
+
+                if (maybeAppendSlash(allocator, path, path_len, is_dir, flags) catch {
+                    allocator.free(path_buf_slice);
+                    return error.OutOfMemory;
+                }) |new_path| {
+                    path = new_path;
+                }
+
+                names.append(path) catch return error.OutOfMemory;
+            }
+        }
+
+        if (names.items.len == 0) return null;
+        if (!flags.nosort) {
+            qsort(@ptrCast(names.items.ptr), names.items.len, @sizeOf([*c]u8), c_cmp_strs);
+        }
+        return finalizeResults(allocator, &names, flags, pzlob);
+    }
+
+    // C-based path (no base_dir)
     var dirname_z: [4096:0]u8 = undefined;
     @memcpy(dirname_z[0..dirname.len], dirname);
     dirname_z[dirname.len] = 0;
@@ -2268,7 +2482,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
             }
         }
         // If ZLOB_ERR is set, abort on error
-        if ((flags & ZLOB_ERR) != 0) {
+        if (flags.err) {
             return error.Aborted;
         }
         // Otherwise, silently skip this directory and return no matches
@@ -2349,7 +2563,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
     }
 
     if (names.items.len == 0) {
-        if (flags & ZLOB_NOCHECK != 0) {
+        if (flags.nocheck) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
             @memcpy(pat_copy[0..pattern.len], pattern);
             const path: [*c]u8 = @ptrCast(pat_copy.ptr);
@@ -2371,16 +2585,16 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         return null;
     }
 
-    if (flags & ZLOB_NOSORT == 0) {
+    if (!flags.nosort) {
         qsort(@ptrCast(names.items.ptr), names.items.len, @sizeOf([*c]u8), c_cmp_strs);
     }
 
     // Handle ZLOB_APPEND flag - merge with existing results
-    if (flags & ZLOB_APPEND != 0 and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
+    if (flags.append and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
         const old_count = pzlob.gl_pathc;
         const new_count = names.items.len;
         const total_count = old_count + new_count;
-        const offs = if (flags & ZLOB_DOOFFS != 0) pzlob.gl_offs else 0;
+        const offs = if (flags.dooffs) pzlob.gl_offs else 0;
 
         const pathv_buf = allocator.alloc([*c]u8, offs + total_count + 1) catch return error.OutOfMemory;
         const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
@@ -2422,7 +2636,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
     } else {
         // No APPEND or first call - allocate fresh result array
-        const offs = if (flags & ZLOB_DOOFFS != 0) pzlob.gl_offs else 0;
+        const offs = if (flags.dooffs) pzlob.gl_offs else 0;
         const pathv_buf = allocator.alloc([*c]u8, offs + names.items.len + 1) catch return error.OutOfMemory;
         const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
@@ -2637,11 +2851,6 @@ pub fn globfreeInternal(allocator: std.mem.Allocator, pzlob: *zlob_t) void {
     pzlob.gl_flags = ZLOB_FLAGS_SHARED_STRINGS;
 }
 
-pub const GlobError = error{
-    OutOfMemory,
-    Aborted,
-};
-
 /// Result of a glob operation containing matched paths
 pub const GlobResults = struct {
     paths: [][]const u8,
@@ -2680,29 +2889,29 @@ pub const GlobResults = struct {
 };
 
 // ============================================================================
-// Tests for GlobFlags packed struct
+// Tests for ZlobFlags packed struct
 // ============================================================================
 
-test "GlobFlags bit positions match integer constants" {
+test "ZlobFlags bit positions match integer constants" {
     const testing = std.testing;
 
     // Verify each flag maps to the correct bit position
-    const f_err = GlobFlags{ .err = true };
-    const f_mark = GlobFlags{ .mark = true };
-    const f_nosort = GlobFlags{ .nosort = true };
-    const f_dooffs = GlobFlags{ .dooffs = true };
-    const f_nocheck = GlobFlags{ .nocheck = true };
-    const f_append = GlobFlags{ .append = true };
-    const f_noescape = GlobFlags{ .noescape = true };
-    const f_period = GlobFlags{ .period = true };
-    const f_magchar = GlobFlags{ .magchar = true };
-    const f_altdirfunc = GlobFlags{ .altdirfunc = true };
-    const f_brace = GlobFlags{ .brace = true };
-    const f_nomagic = GlobFlags{ .nomagic = true };
-    const f_tilde = GlobFlags{ .tilde = true };
-    const f_onlydir = GlobFlags{ .onlydir = true };
-    const f_tilde_check = GlobFlags{ .tilde_check = true };
-    const f_gitignore = GlobFlags{ .gitignore = true };
+    const f_err = ZlobFlags{ .err = true };
+    const f_mark = ZlobFlags{ .mark = true };
+    const f_nosort = ZlobFlags{ .nosort = true };
+    const f_dooffs = ZlobFlags{ .dooffs = true };
+    const f_nocheck = ZlobFlags{ .nocheck = true };
+    const f_append = ZlobFlags{ .append = true };
+    const f_noescape = ZlobFlags{ .noescape = true };
+    const f_period = ZlobFlags{ .period = true };
+    const f_magchar = ZlobFlags{ .magchar = true };
+    const f_altdirfunc = ZlobFlags{ .altdirfunc = true };
+    const f_brace = ZlobFlags{ .brace = true };
+    const f_nomagic = ZlobFlags{ .nomagic = true };
+    const f_tilde = ZlobFlags{ .tilde = true };
+    const f_onlydir = ZlobFlags{ .onlydir = true };
+    const f_tilde_check = ZlobFlags{ .tilde_check = true };
+    const f_gitignore = ZlobFlags{ .gitignore = true };
 
     try testing.expectEqual(@as(u32, ZLOB_ERR), f_err.toU32());
     try testing.expectEqual(@as(u32, ZLOB_MARK), f_mark.toU32());
@@ -2722,12 +2931,12 @@ test "GlobFlags bit positions match integer constants" {
     try testing.expectEqual(@as(u32, ZLOB_GITIGNORE), f_gitignore.toU32());
 }
 
-test "GlobFlags roundtrip conversion" {
+test "ZlobFlags roundtrip conversion" {
     const testing = std.testing;
 
     // Test multiple flags combined
     const combined: u32 = ZLOB_MARK | ZLOB_NOSORT | ZLOB_BRACE | ZLOB_GITIGNORE;
-    const flags = GlobFlags.fromU32(combined);
+    const flags = ZlobFlags.fromU32(combined);
 
     try testing.expect(flags.mark);
     try testing.expect(flags.nosort);
@@ -2743,7 +2952,7 @@ test "GlobFlags roundtrip conversion" {
     const combined_cint: c_int = @bitCast(combined);
     try testing.expectEqual(combined_cint, flags.toInt());
 
-    const from_cint = GlobFlags.fromInt(flags.toInt());
+    const from_cint = ZlobFlags.fromInt(flags.toInt());
     try testing.expectEqual(combined, from_cint.toU32());
 }
 

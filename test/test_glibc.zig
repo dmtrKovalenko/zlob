@@ -106,7 +106,7 @@ test "recursive glob - **/*.c finds all C files" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -139,7 +139,7 @@ test "recursive glob - dir1/**/*.c finds C files in dir1" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -170,7 +170,7 @@ test "recursive glob - **/*.h finds all header files" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -201,7 +201,7 @@ test "recursive glob - dir2/**/*.c finds files in dir2 subdirectories" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -232,7 +232,7 @@ test "recursive glob - **/*.txt finds all text files" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result);
@@ -263,7 +263,7 @@ test "recursive glob - no matches returns ZLOB_NOMATCH" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
 
     // Recursive glob returns ZLOB_NOMATCH when no matches found (consistent with glibc)
     try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
@@ -293,7 +293,7 @@ test "recursive glob - ZLOB_APPEND correctly accumulates results" {
     // First glob for .c files
     const pattern1 = try allocator.dupeZ(u8, "**/*.c");
     defer allocator.free(pattern1);
-    const result1 = c_lib.zlob(pattern1.ptr, 0, null, &pzlob);
+    const result1 = c_lib.zlob(pattern1.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     try testing.expectEqual(@as(c_int, 0), result1);
     const first_count = pzlob.gl_pathc;
     try testing.expectEqual(@as(usize, 8), first_count);
@@ -301,7 +301,7 @@ test "recursive glob - ZLOB_APPEND correctly accumulates results" {
     // Second glob for .h files with ZLOB_APPEND
     const pattern2 = try allocator.dupeZ(u8, "**/*.h");
     defer allocator.free(pattern2);
-    const result2 = c_lib.zlob(pattern2.ptr, glob.ZLOB_APPEND, null, &pzlob);
+    const result2 = c_lib.zlob(pattern2.ptr, glob.ZLOB_APPEND | glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(@as(c_int, 0), result2);
@@ -332,18 +332,57 @@ test "recursive glob - empty pattern component" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Should handle gracefully, either finding directories or returning NOMATCH
     try testing.expect(result == 0 or result == glob.ZLOB_NOMATCH);
 }
 
+test "glibc compatible - ** treated as * without ZLOB_DOUBLESTAR_RECURSIVE" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestDirStructure(allocator, tmp_dir);
+    defer cleanupTestDirStructure(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_zlob_recursive", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var test_dir: [4096:0]u8 = undefined;
+    @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
+    test_dir[test_dir_str.len] = 0;
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    // Test: Pattern "**/*.c" WITHOUT ZLOB_DOUBLESTAR_RECURSIVE flag
+    // Expected behavior (matching glibc):
+    //   - ** is treated as single *
+    //   - Only matches: dir1/file1.c, dir2/file1.c, dir3/... (one level deep, like */*.c)
+    //   - Does NOT match: file1.c (no directory component for **)
+    //   - Does NOT match: dir1/subdir1/file1.c (too deep)
+    const pattern = try allocator.dupeZ(u8, "**/*.c");
+    defer allocator.free(pattern);
+
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob); // NO flags - glibc compatible
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    // Should match only files one directory level deep (like */*.c)
+    // In our test structure: dir1/file1.c, dir2/file1.c = 2 files
+    // (** acts as single *, matching one path component)
+    try testing.expectEqual(@as(usize, 2), pzlob.gl_pathc);
+}
+
 // Tests for pattern analysis and optimization
 
 test "analyzePattern - simple pattern" {
     const pattern = "src/foo/*.c";
-    const info = glob.analyzePattern(pattern, 0);
+    const info = glob.analyzePattern(pattern, glob.ZlobFlags{});
 
     try testing.expectEqualStrings("src/foo", info.literal_prefix);
     try testing.expectEqualStrings("*.c", info.wildcard_suffix);
@@ -353,7 +392,7 @@ test "analyzePattern - simple pattern" {
 
 test "analyzePattern - recursive pattern" {
     const pattern = "arch/x86/**/*.c";
-    const info = glob.analyzePattern(pattern, 0);
+    const info = glob.analyzePattern(pattern, glob.ZlobFlags{ .doublestar_recursive = true });
 
     try testing.expectEqualStrings("arch/x86", info.literal_prefix);
     try testing.expectEqualStrings("**/*.c", info.wildcard_suffix);
@@ -364,7 +403,7 @@ test "analyzePattern - recursive pattern" {
 
 test "analyzePattern - no literal prefix" {
     const pattern = "**/*.c";
-    const info = glob.analyzePattern(pattern, 0);
+    const info = glob.analyzePattern(pattern, glob.ZlobFlags{ .doublestar_recursive = true });
 
     try testing.expectEqualStrings("", info.literal_prefix);
     try testing.expectEqualStrings("**/*.c", info.wildcard_suffix);
@@ -375,7 +414,7 @@ test "analyzePattern - no literal prefix" {
 
 test "analyzePattern - no wildcards" {
     const pattern = "src/main.c";
-    const info = glob.analyzePattern(pattern, 0);
+    const info = glob.analyzePattern(pattern, glob.ZlobFlags{});
 
     // When pattern has a slash but no wildcards, it treats the last component as wildcard suffix
     // This is a quirk of the implementation but doesn't affect glob functionality
@@ -386,7 +425,7 @@ test "analyzePattern - no wildcards" {
 
 test "analyzePattern - complex extension" {
     const pattern = "docs/**/*.md";
-    const info = glob.analyzePattern(pattern, 0);
+    const info = glob.analyzePattern(pattern, glob.ZlobFlags{ .doublestar_recursive = true });
 
     try testing.expectEqualStrings("docs", info.literal_prefix);
     try testing.expectEqualStrings("**/*.md", info.wildcard_suffix);
@@ -397,7 +436,7 @@ test "analyzePattern - complex extension" {
 
 test "analyzePattern - multiple wildcards no simple extension" {
     const pattern = "src/**/test_*.c";
-    const info = glob.analyzePattern(pattern, 0);
+    const info = glob.analyzePattern(pattern, glob.ZlobFlags{ .doublestar_recursive = true });
 
     try testing.expectEqualStrings("src", info.literal_prefix);
     try testing.expectEqualStrings("**/test_*.c", info.wildcard_suffix);

@@ -156,6 +156,40 @@ int glob(const char *restrict pattern, int flags,
  */
 void globfree(zlob_t *pzlob);
 
+/**
+ * glob_at - Find pathnames matching a pattern relative to a base directory
+ *
+ * This function is similar to glob() but operates relative to the specified
+ * base_path instead of the current working directory. The matched paths in
+ * pzlob->gl_pathv will be relative to base_path.
+ *
+ * @param base_path Absolute path to the base directory (must start with '/')
+ * @param pattern   The glob pattern to match (relative to base_path)
+ * @param flags     Bitwise OR of ZLOB_* flags
+ * @param errfunc   Error callback function (see glob() for details)
+ * @param pzlob     Pointer to zlob_t structure to receive results
+ *
+ * @return 0 on success, or one of ZLOB_NOSPACE, ZLOB_ABORTED, ZLOB_NOMATCH
+ *
+ * Returns ZLOB_ABORTED if base_path is not an absolute path.
+ *
+ * Example:
+ *   zlob_t pzlob;
+ *   int result = glob_at("/home/user/project", "src/*.c", ZLOB_BRACE, NULL, &pzlob);
+ *   if (result == 0) {
+ *       for (size_t i = 0; i < pzlob.gl_pathc; i++) {
+ *           // Paths are relative to /home/user/project
+ *           printf("%s\n", pzlob.gl_pathv[i]);
+ *       }
+ *       globfree(&pzlob);
+ *   }
+ */
+int glob_at(const char *base_path,
+            const char *restrict pattern,
+            int flags,
+            int (*errfunc)(const char *epath, int eerrno),
+            zlob_t *restrict pzlob);
+
 /* ============================================================================
  * Path Matching API (no filesystem access)
  * ============================================================================ */

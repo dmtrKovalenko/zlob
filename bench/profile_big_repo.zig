@@ -59,16 +59,10 @@ pub fn main() !void {
         std.debug.print("  Description: {s}\n", .{tc.description});
         std.debug.print("  Iterations: {d}\n", .{tc.iterations});
 
-        // Determine flags based on pattern
-        const flags: c_int = if (std.mem.indexOf(u8, tc.pattern, "{") != null)
-            c_lib.ZLOB_BRACE
-        else
-            0;
-
         // Warmup run to avoid cold cache
         {
             var pzlob: zlob_t = undefined;
-            const result = c_lib.zlob(tc.pattern.ptr, flags, null, &pzlob);
+            const result = c_lib.zlob(tc.pattern.ptr, c_lib.ZLOB_RECOMMENDED, null, &pzlob);
             if (result == 0) {
                 std.debug.print("  Matches: {d}\n", .{pzlob.gl_pathc});
                 c_lib.zlobfree(&pzlob);
@@ -85,7 +79,7 @@ pub fn main() !void {
         var matches_this_test: usize = 0;
         while (i < tc.iterations) : (i += 1) {
             var pzlob: zlob_t = undefined;
-            const result = c_lib.zlob(tc.pattern.ptr, flags, null, &pzlob);
+            const result = c_lib.zlob(tc.pattern.ptr, c_lib.ZLOB_RECOMMENDED, null, &pzlob);
             if (result == 0) {
                 matches_this_test = pzlob.gl_pathc;
                 c_lib.zlobfree(&pzlob);

@@ -9,6 +9,7 @@ use std::ffi::{c_char, c_int, c_void};
 ///
 /// This matches the C `zlob_t` structure exactly.
 #[repr(C)]
+#[allow(non_camel_case_types)]
 pub struct zlob_t {
     /// Count of matched paths
     pub gl_pathc: usize,
@@ -30,6 +31,7 @@ pub struct zlob_t {
 
 /// Directory entry for ALTDIRFUNC callbacks.
 #[repr(C)]
+#[allow(non_camel_case_types)]
 pub struct zlob_dirent_t {
     /// Null-terminated entry name
     pub d_name: *const c_char,
@@ -41,6 +43,7 @@ pub struct zlob_dirent_t {
 ///
 /// This allows zero-copy conversion between Rust string slices and zlob slices.
 #[repr(C)]
+#[allow(non_camel_case_types)]
 pub struct zlob_slice_t {
     pub ptr: *const u8,
     pub len: usize,
@@ -57,9 +60,8 @@ const _: () = {
 /// Called when a directory read error occurs.
 /// Returns non-zero to abort, zero to continue.
 #[allow(non_camel_case_types)]
-pub type zlob_errfunc_t = Option<unsafe extern "C" fn(*const c_char, c_int) -> c_int>;
+pub type zlob_errfunc_t = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 
-// Error codes
 #[allow(dead_code)]
 pub const ZLOB_NOSPACE: c_int = 1;
 #[allow(dead_code)]
@@ -68,16 +70,23 @@ pub const ZLOB_ABORTED: c_int = 2;
 pub const ZLOB_NOMATCH: c_int = 3;
 
 extern "C" {
-    /// POSIX-compatible glob function (exported as "glob" from libzlob)
     #[link_name = "glob"]
     pub fn zlob(
         pattern: *const c_char,
         flags: c_int,
-        errfunc: zlob_errfunc_t,
+        errfunc: Option<zlob_errfunc_t>,
         pzlob: *mut zlob_t,
     ) -> c_int;
 
-    /// POSIX-compatible globfree function (exported as "globfree" from libzlob)
+    #[link_name = "glob_at"]
+    pub fn zlob_at(
+        base_path: *const c_char,
+        pattern: *const c_char,
+        flags: c_int,
+        errfunc: Option<zlob_errfunc_t>,
+        pzlob: *mut zlob_t,
+    ) -> c_int;
+
     #[link_name = "globfree"]
     pub fn zlobfree(pzlob: *mut zlob_t);
 

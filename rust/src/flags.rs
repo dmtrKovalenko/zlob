@@ -66,8 +66,7 @@ bitflags! {
         const MAGCHAR = 1 << 8;
 
         /// GNU: Use custom directory functions (gl_opendir, gl_readdir, gl_closedir).
-        ///
-        /// Enables globbing over virtual filesystems or custom data sources.
+        /// !IMPORTANT! there is no api support for rust crate to set those functions yet.
         const ALTDIRFUNC = 1 << 9;
 
         /// Expand `{a,b,c}` brace patterns.
@@ -116,6 +115,12 @@ bitflags! {
         /// of leaving it unexpanded.
         const TILDE_CHECK = 1 << 14;
 
+        // =====================================================================
+        // zlob extensions (bits 24+)
+        // NOTE: Bits 15-23 are reserved for potential future glibc extensions.
+        // glibc currently uses bits 0-14. We leave a 9-bit gap to avoid conflicts.
+        // =====================================================================
+
         /// Filter results using `.gitignore` rules from the current directory.
         ///
         /// Matches are filtered against gitignore patterns, excluding files
@@ -127,9 +132,49 @@ bitflags! {
         /// use zlob::{zlob, ZlobFlags};
         ///
         /// // Find all .rs files, excluding those in .gitignore
-        /// let result = zlob("**/*.rs", ZlobFlags::GITIGNORE).unwrap();
+        /// let result = zlob("**/*.rs", ZlobFlags::GITIGNORE | ZlobFlags::DOUBLESTAR_RECURSIVE).unwrap();
         /// ```
-        const GITIGNORE = 1 << 15;
+        const GITIGNORE = 1 << 24;
+
+        /// Enable `**` recursive directory matching.
+        ///
+        /// By default (for glibc compatibility), `**` is treated as `*` (single-level match).
+        /// With this flag, `**` matches zero or more directory levels recursively.
+        ///
+        /// # Example
+        ///
+        /// ```no_run
+        /// use zlob::{zlob, ZlobFlags};
+        ///
+        /// // Find all .rs files recursively
+        /// let result = zlob("**/*.rs", ZlobFlags::DOUBLESTAR_RECURSIVE).unwrap();
+        /// ```
+        const DOUBLESTAR_RECURSIVE = 1 << 25;
+
+        /// Recommended modern defaults for globbing.
+        ///
+        /// This flag combination enables the most commonly desired behaviors:
+        /// - `BRACE`: Brace expansion `{a,b,c}`
+        /// - `DOUBLESTAR_RECURSIVE`: Recursive `**` patterns like `**/*.rs`
+        /// - `NOSORT`: Skip sorting for better performance
+        /// - `TILDE`: Home directory expansion `~`
+        /// - `TILDE_CHECK`: Error if `~user` is not found
+        ///
+        /// **Use this for typical glob usage** unless you need glibc-compatible behavior.
+        ///
+        /// # Example
+        ///
+        /// ```no_run
+        /// use zlob::{zlob, ZlobFlags};
+        ///
+        /// // Recommended way to glob
+        /// let result = zlob("**/*.rs", ZlobFlags::RECOMMENDED).unwrap();
+        ///
+        /// // With additional flags
+        /// let result = zlob("**/*.rs", ZlobFlags::RECOMMENDED | ZlobFlags::GITIGNORE).unwrap();
+        /// ```
+        const RECOMMENDED = Self::BRACE.bits() | Self::DOUBLESTAR_RECURSIVE.bits()
+                          | Self::NOSORT.bits() | Self::TILDE.bits() | Self::TILDE_CHECK.bits();
     }
 }
 
@@ -155,7 +200,9 @@ mod tests {
         assert_eq!(ZlobFlags::TILDE.bits(), 0x1000);
         assert_eq!(ZlobFlags::ONLYDIR.bits(), 0x2000);
         assert_eq!(ZlobFlags::TILDE_CHECK.bits(), 0x4000);
-        assert_eq!(ZlobFlags::GITIGNORE.bits(), 0x8000);
+        // zlob extensions (bits 24+)
+        assert_eq!(ZlobFlags::GITIGNORE.bits(), 1 << 24);
+        assert_eq!(ZlobFlags::DOUBLESTAR_RECURSIVE.bits(), 1 << 25);
     }
 
     #[test]
@@ -169,5 +216,20 @@ mod tests {
     #[test]
     fn test_default_is_empty() {
         assert_eq!(ZlobFlags::default(), ZlobFlags::empty());
+    }
+
+    #[test]
+    fn test_recommended_contains_expected_flags() {
+        let recommended = ZlobFlags::RECOMMENDED;
+        assert!(recommended.contains(ZlobFlags::BRACE));
+        assert!(recommended.contains(ZlobFlags::DOUBLESTAR_RECURSIVE));
+        assert!(recommended.contains(ZlobFlags::NOSORT));
+        assert!(recommended.contains(ZlobFlags::TILDE));
+        assert!(recommended.contains(ZlobFlags::TILDE_CHECK));
+        // Should NOT contain these
+        assert!(!recommended.contains(ZlobFlags::ERR));
+        assert!(!recommended.contains(ZlobFlags::MARK));
+        assert!(!recommended.contains(ZlobFlags::GITIGNORE));
+        assert!(!recommended.contains(ZlobFlags::PERIOD));
     }
 }

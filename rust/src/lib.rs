@@ -10,13 +10,26 @@
 //! - `.gitignore` filtering
 //! - Zero-copy path matching API
 //!
+//! For most use cases, use [`ZlobFlags::RECOMMENDED`]:
+//!
+//! ```no_run
+//! use zlob::{zlob, ZlobFlags};
+//!
+//! // RECOMMENDED enables: brace expansion, recursive **, tilde expansion, no sorting
+//! if let Some(result) = zlob("**/*.rs", ZlobFlags::RECOMMENDED)? {
+//!     for path in &result {
+//!         println!("{}", path);
+//!     }
+//! }
+//! # Ok::<(), zlob::ZlobError>(())
+//! ```
+//!
 //! ## Basic Usage
 //!
 //! ```no_run
 //! use zlob::{zlob, ZlobFlags};
 //!
-//! // Find all Rust files recursively
-//! if let Some(result) = zlob("**/*.rs", ZlobFlags::empty())? {
+//! if let Some(result) = zlob("**/*.rs", ZlobFlags::RECOMMENDED)? {
 //!     for path in &result {
 //!         println!("{}", path);
 //!     }
@@ -56,16 +69,30 @@
 //!
 //! ## Flags
 //!
-//! Control matching behavior with `ZlobFlags`:
+//! For most use cases, use [`ZlobFlags::RECOMMENDED`]:
+//!
+//! ```no_run
+//! use zlob::{zlob, ZlobFlags};
+//!
+//! let result = zlob("**/*.rs", ZlobFlags::RECOMMENDED)?;
+//!
+//! // Add more flags as needed
+//! let result = zlob("**/*.rs", ZlobFlags::RECOMMENDED | ZlobFlags::GITIGNORE)?;
+//! # Ok::<(), zlob::ZlobError>(())
+//! ```
+//!
+//! Control matching behavior with individual `ZlobFlags`:
 //!
 //! ```
 //! use zlob::ZlobFlags;
 //!
 //! // Combine flags with bitwise OR
-//! let flags = ZlobFlags::BRACE | ZlobFlags::NOSORT | ZlobFlags::PERIOD;
+//! let flags = ZlobFlags::BRACE | ZlobFlags::DOUBLESTAR_RECURSIVE | ZlobFlags::PERIOD;
 //!
 //! // Common flags:
+//! // - RECOMMENDED: Best defaults for typical usage (see above)
 //! // - BRACE: Enable {a,b,c} expansion
+//! // - DOUBLESTAR_RECURSIVE: Enable ** recursive directory matching
 //! // - TILDE: Enable ~ home directory expansion
 //! // - NOSORT: Don't sort results (faster)
 //! // - PERIOD: Allow wildcards to match leading dots
@@ -75,6 +102,11 @@
 //!
 //! ## Supported Patterns
 //!
+//! We support all the varieties of glob pattern supported by rust's `glob` crate, posix `glob(3)`,
+//! glibc `glob()` implementation and many more.
+//!
+//! Here are some of the most common patterns:
+//!
 //! | Pattern | Description |
 //! |---------|-------------|
 //! | `*` | Matches any string (including empty) |
@@ -82,10 +114,14 @@
 //! | `[abc]` | Matches one character from the set |
 //! | `[!abc]` | Matches one character NOT in the set |
 //! | `[a-z]` | Matches one character in the range |
-//! | `**` | Matches zero or more path components (recursive) |
-//! | `{a,b}` | Matches alternatives (requires `BRACE` flag) |
-//! | `~` | Home directory (requires `TILDE` flag) |
-//! | `~user` | User's home directory (requires `TILDE` flag) |
+//! | `**` | Matches zero or more path components (requires `DOUBLESTAR_RECURSIVE` or `RECOMMENDED`) |
+//! | `{a,b}` | Matches alternatives (requires `BRACE` or `RECOMMENDED`) |
+//! | `~` | Home directory (requires `TILDE` or `RECOMMENDED`) |
+//! | `~user` | User's home directory (requires `TILDE` or `RECOMMENDED`) |
+//!
+//! **Note:** By default (for glibc compatibility), `**` is treated as `*`, and braces are not
+//! supported
+//! Use `ZlobFlags::DOUBLESTAR_RECURSIVE` or `ZlobFlags::RECOMMENDED` for recursive matching.
 //!
 //! ## Error Handling
 //!
@@ -97,7 +133,7 @@
 //! ```no_run
 //! use zlob::{zlob, ZlobFlags, ZlobError};
 //!
-//! match zlob("**/*.rs", ZlobFlags::empty()) {
+//! match zlob("**/*.rs", ZlobFlags::RECOMMENDED) {
 //!     Ok(Some(result)) => println!("Found {} files", result.len()),
 //!     Ok(None) => println!("No files matched"),
 //!     Err(ZlobError::Aborted) => println!("Operation aborted"),
@@ -114,7 +150,7 @@ mod zlob;
 pub use error::ZlobError;
 pub use flags::ZlobFlags;
 pub use match_paths::{zlob_match_paths, ZlobMatch, ZlobMatchIter};
-pub use zlob::{zlob, Zlob, ZlobIter};
+pub use zlob::{zlob, zlob_at, Zlob, ZlobIter};
 
 #[cfg(test)]
 mod tests {
