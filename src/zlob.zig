@@ -1223,13 +1223,13 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
         defer opt.deinit();
 
         switch (opt) {
-            .single_walk => |*parsed| {
+            .single_walk => |*brace_parsed| {
                 // All single_walk patterns flow through globSingle
                 // which handles braces in any position via globRecursive
                 return try globSingle(
                     allocator,
                     pattern_slice,
-                    parsed,
+                    brace_parsed,
                     gf,
                     errfunc,
                     pzlob,
@@ -1353,7 +1353,6 @@ const RecursivePattern = struct {
     gitignore_filter: ?*GitIgnore = null,
 };
 
-/// Match filename against pre-computed pattern contexts (avoids redundant PatternContext.init calls)
 inline fn matchWithAlternativesPrecomputed(name: []const u8, contexts: []const PatternContext) bool {
     for (contexts) |*ctx| {
         if (ctx.simd_batched_suffix_match) |*batched| {
@@ -1365,7 +1364,6 @@ inline fn matchWithAlternativesPrecomputed(name: []const u8, contexts: []const P
     return false;
 }
 
-/// Unified brace pattern glob - walks the tree ONCE regardless of where braces appear
 fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
     const info = analyzePattern(pattern, flags);
 
@@ -3069,3 +3067,5 @@ test "DirIterator with ALTDIRFUNC" {
     try testing.expect(found_file2);
     try testing.expect(found_subdir);
 }
+
+

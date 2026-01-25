@@ -4,6 +4,39 @@ const Allocator = std.mem.Allocator;
 const pattern_context = @import("pattern_context.zig");
 const PatternContext = pattern_context.PatternContext;
 
+// ============================================================================
+// Brace pattern utilities - shared helpers for brace expansion
+// ============================================================================
+
+/// Find the matching closing brace, handling nested braces and escapes
+pub fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
+    var depth: usize = 1;
+    var i = start;
+    while (i < pattern.len) : (i += 1) {
+        if (pattern[i] == '{') {
+            depth += 1;
+        } else if (pattern[i] == '}') {
+            depth -= 1;
+            if (depth == 0) return i;
+        } else if (pattern[i] == '\\' and i + 1 < pattern.len) {
+            i += 1; // Skip escaped character
+        }
+    }
+    return null;
+}
+
+/// Check if a pattern contains braces
+pub fn containsBraces(pattern: []const u8) bool {
+    for (pattern) |c| {
+        if (c == '{') return true;
+    }
+    return false;
+}
+
+// ============================================================================
+// Pre-computed suffix data for fast matching
+// ============================================================================
+
 /// Pre-computed suffix data for fast matching of *.ext patterns
 pub const PrecomputedSuffix = struct {
     suffix: []const u8, // The suffix (e.g., ".rs", ".toml")
@@ -171,67 +204,6 @@ pub const BracedPattern = struct {
             .allocator = allocator,
         };
     }
-
-    /// Expand a parsed pattern into all concrete patterns
-    /// e.g., "{src,lib}/**/*.{rs,toml}" -> ["src/**/*.rs", "src/**/*.toml", "lib/**/*.rs", "lib/**/*.toml"]
-    pub fn expandToPatterns(self: *const BracedPattern, allocator: Allocator) ![][]const u8 {
-        var patterns = std.array_list.AlignedManaged([]const u8, null).init(allocator);
-        errdefer {
-            for (patterns.items) |p| allocator.free(p);
-            patterns.deinit();
-        }
-
-        try patterns.append(try allocator.dupe(u8, ""));
-
-        // For each component, either append it or expand alternatives
-        for (self.components, 0..) |comp, idx| {
-            const need_slash = idx > 0;
-
-            if (comp.alternatives) |alts| {
-                // Expand: multiply existing patterns by alternatives
-                var new_patterns = std.array_list.AlignedManaged([]const u8, null).init(allocator);
-                errdefer {
-                    for (new_patterns.items) |p| allocator.free(p);
-                    new_patterns.deinit();
-                }
-
-                for (patterns.items) |existing| {
-                    for (alts) |alt| {
-                        const new = if (need_slash)
-                            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ existing, alt })
-                        else
-                            try std.fmt.allocPrint(allocator, "{s}{s}", .{ existing, alt });
-                        try new_patterns.append(new);
-                    }
-                }
-
-                for (patterns.items) |p| allocator.free(p);
-                patterns.deinit();
-                patterns = new_patterns;
-            } else {
-                // No braces - just append this component to all patterns
-                var new_patterns = std.array_list.AlignedManaged([]const u8, null).init(allocator);
-                errdefer {
-                    for (new_patterns.items) |p| allocator.free(p);
-                    new_patterns.deinit();
-                }
-
-                for (patterns.items) |existing| {
-                    const new = if (need_slash)
-                        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ existing, comp.text })
-                    else
-                        try std.fmt.allocPrint(allocator, "{s}{s}", .{ existing, comp.text });
-                    try new_patterns.append(new);
-                }
-
-                for (patterns.items) |p| allocator.free(p);
-                patterns.deinit();
-                patterns = new_patterns;
-            }
-        }
-
-        return try patterns.toOwnedSlice();
-    }
 };
 
 /// Check if a pattern is a simple *.suffix pattern (e.g., "*.rs", "*.toml")
@@ -248,7 +220,7 @@ fn isSimpleSuffixPattern(pattern: []const u8) bool {
     return true;
 }
 
-fn hasNestedBraces(pattern: []const u8) bool {
+pub fn hasNestedBraces(pattern: []const u8) bool {
     var depth: usize = 0;
     var i: usize = 0;
     while (i < pattern.len) : (i += 1) {
@@ -264,10 +236,6 @@ fn hasNestedBraces(pattern: []const u8) bool {
         }
     }
     return false;
-}
-
-pub fn containsBraces(s: []const u8) bool {
-    return mem.indexOf(u8, s, "{") != null and mem.indexOf(u8, s, "}") != null;
 }
 
 fn splitBraceContent(allocator: Allocator, content: []const u8) ![][]const u8 {
@@ -327,75 +295,6 @@ fn expandBracesAsAlternatives(allocator: Allocator, component: []const u8) !?[][
     return try alternatives.toOwnedSlice();
 }
 
-pub fn canOptimize(pattern: []const u8) bool {
-    if (!containsBraces(pattern)) return false;
-    if (hasNestedBraces(pattern)) return false;
-    return true;
-}
-
-/// SIMD-optimized batch suffix matching
-pub fn batchMatchSuffixes(filename: []const u8, suffixes: []const []const u8) bool {
-    const Vec16 = @Vector(16, u8);
-
-    for (suffixes) |suffix| {
-        if (suffix.len > filename.len) continue;
-
-        const filename_end = filename[filename.len - suffix.len ..];
-
-        if (suffix.len <= 16) {
-            var suffix_vec: Vec16 = @splat(0);
-            var filename_vec: Vec16 = @splat(0);
-
-            for (0..suffix.len) |j| {
-                suffix_vec[j] = suffix[j];
-                filename_vec[j] = filename_end[j];
-            }
-
-            const cmp = suffix_vec == filename_vec;
-            var all_match = true;
-            for (0..suffix.len) |j| {
-                if (!cmp[j]) {
-                    all_match = false;
-                    break;
-                }
-            }
-            if (all_match) return true;
-        } else {
-            if (mem.eql(u8, filename_end, suffix)) return true;
-        }
-    }
-    return false;
-}
-
-/// Match filename against multiple patterns (simple wildcard matching)
-pub fn batchMatchPatterns(filename: []const u8, patterns: []const []const u8) bool {
-    for (patterns) |pattern| {
-        if (matchSimple(filename, pattern)) return true;
-    }
-    return false;
-}
-
-/// Simple wildcard matching for a single pattern
-fn matchSimple(name: []const u8, pattern: []const u8) bool {
-    // *.suffix
-    if (pattern.len > 1 and pattern[0] == '*' and pattern[1] == '.') {
-        return mem.endsWith(u8, name, pattern[1..]);
-    }
-
-    // *suffix (any suffix)
-    if (pattern.len > 0 and pattern[0] == '*') {
-        return mem.endsWith(u8, name, pattern[1..]);
-    }
-
-    // prefix*
-    if (pattern.len > 0 and pattern[pattern.len - 1] == '*') {
-        return mem.startsWith(u8, name, pattern[0 .. pattern.len - 1]);
-    }
-
-    // Exact match
-    return mem.eql(u8, name, pattern);
-}
-
 pub const OptimizationResult = union(enum) {
     no_braces,
     fallback,
@@ -434,17 +333,6 @@ pub fn analyzeBracedPattern(allocator: Allocator, pattern: []const u8) !Optimiza
     return .{ .single_walk = parsed };
 }
 
-test "canOptimize" {
-    const testing = std.testing;
-
-    try testing.expect(canOptimize("*.{c,h}"));
-    try testing.expect(canOptimize("{src,lib}/**/*.ts"));
-    try testing.expect(canOptimize("path/{a,b}/file.rs"));
-
-    try testing.expect(!canOptimize("no braces"));
-    try testing.expect(!canOptimize("{a,{b,c}}/file")); // nested
-}
-
 test "BracedPattern.parse - simple" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -476,62 +364,6 @@ test "BracedPattern.parse - with braces" {
     try testing.expectEqual(@as(usize, 2), parsed.components[2].alternatives.?.len);
     try testing.expectEqualStrings("*.rs", parsed.components[2].alternatives.?[0]);
     try testing.expectEqualStrings("*.toml", parsed.components[2].alternatives.?[1]);
-}
-
-test "BracedPattern.expandToPatterns" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var parsed = try BracedPattern.parse(allocator, "{src,lib}/**/*.{rs,toml}");
-    defer parsed.deinit();
-
-    const expanded = try parsed.expandToPatterns(allocator);
-    defer {
-        for (expanded) |p| allocator.free(p);
-        allocator.free(expanded);
-    }
-
-    try testing.expectEqual(@as(usize, 4), expanded.len);
-    try testing.expectEqualStrings("src/**/*.rs", expanded[0]);
-    try testing.expectEqualStrings("src/**/*.toml", expanded[1]);
-    try testing.expectEqualStrings("lib/**/*.rs", expanded[2]);
-    try testing.expectEqualStrings("lib/**/*.toml", expanded[3]);
-}
-
-test "BracedPattern.expandToPatterns - mid-path brace" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var parsed = try BracedPattern.parse(allocator, "common/{error,logging}/**/*.rs");
-    defer parsed.deinit();
-
-    const expanded = try parsed.expandToPatterns(allocator);
-    defer {
-        for (expanded) |p| allocator.free(p);
-        allocator.free(expanded);
-    }
-
-    try testing.expectEqual(@as(usize, 2), expanded.len);
-    try testing.expectEqualStrings("common/error/**/*.rs", expanded[0]);
-    try testing.expectEqualStrings("common/logging/**/*.rs", expanded[1]);
-}
-
-test "batchMatchPatterns" {
-    const testing = std.testing;
-
-    const patterns = [_][]const u8{ "*.rs", "*.toml" };
-    try testing.expect(batchMatchPatterns("main.rs", &patterns));
-    try testing.expect(batchMatchPatterns("Cargo.toml", &patterns));
-    try testing.expect(!batchMatchPatterns("readme.md", &patterns));
-}
-
-test "batchMatchSuffixes" {
-    const testing = std.testing;
-
-    const suffixes = [_][]const u8{ ".rs", ".toml" };
-    try testing.expect(batchMatchSuffixes("main.rs", &suffixes));
-    try testing.expect(batchMatchSuffixes("Cargo.toml", &suffixes));
-    try testing.expect(!batchMatchSuffixes("readme.md", &suffixes));
 }
 
 test "BracedPattern.parse - cargo pattern" {

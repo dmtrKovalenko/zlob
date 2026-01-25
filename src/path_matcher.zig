@@ -7,6 +7,7 @@ const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const glob = @import("zlob.zig");
 const suffix_match = @import("suffix_match.zig");
+const brace_optimizer = @import("brace_optimizer.zig");
 
 const hasWildcardsSIMD = glob.hasWildcardsSIMD;
 const PatternContext = glob.PatternContext;
@@ -33,15 +34,6 @@ const PatternSegments = struct {
     pub fn deinit(self: *PatternSegments) void {
         self.allocator.free(self.segments);
         self.allocator.free(self.contexts);
-    }
-};
-
-const PathComponents = struct {
-    components: [][]const u8,
-    allocator: Allocator,
-
-    pub fn deinit(self: *PathComponents) void {
-        self.allocator.free(self.components);
     }
 };
 
@@ -207,58 +199,6 @@ pub fn extractSuffixFromPattern(pattern: []const u8) struct { suffix: ?[]const u
     return .{ .suffix = after_star };
 }
 
-fn splitPathComponents(allocator: Allocator, path: []const u8) !PathComponents {
-    var component_count: usize = 0;
-    var iter = mem.splitScalar(u8, path, '/');
-    while (iter.next()) |component| {
-        if (component.len > 0) {
-            component_count += 1;
-        }
-    }
-
-    if (component_count == 0) {
-        const components = try allocator.alloc([]const u8, 0);
-        return PathComponents{
-            .components = components,
-            .allocator = allocator,
-        };
-    }
-
-    var components = try allocator.alloc([]const u8, component_count);
-    errdefer allocator.free(components);
-
-    var idx: usize = 0;
-    iter = mem.splitScalar(u8, path, '/');
-    while (iter.next()) |component| {
-        if (component.len > 0) {
-            components[idx] = component;
-            idx += 1;
-        }
-    }
-
-    return PathComponents{
-        .components = components,
-        .allocator = allocator,
-    };
-}
-
-// Helper to find matching closing brace
-fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
-    var depth: usize = 1;
-    var i = start;
-    while (i < pattern.len) : (i += 1) {
-        if (pattern[i] == '{') {
-            depth += 1;
-        } else if (pattern[i] == '}') {
-            depth -= 1;
-            if (depth == 0) return i;
-        } else if (pattern[i] == '\\' and i + 1 < pattern.len) {
-            i += 1; // Skip escaped character
-        }
-    }
-    return null;
-}
-
 // Expand brace patterns like "{a,b,c}" into multiple patterns
 fn expandBraces(allocator: Allocator, pattern: []const u8, results: *std.array_list.AlignedManaged([]const u8, null)) !void {
     // Find first unescaped opening brace
@@ -283,7 +223,7 @@ fn expandBraces(allocator: Allocator, pattern: []const u8, results: *std.array_l
     }
 
     const brace_open = brace_start.?;
-    const brace_close = findClosingBrace(pattern, brace_open + 1) orelse {
+    const brace_close = brace_optimizer.findClosingBrace(pattern, brace_open + 1) orelse {
         // No matching closing brace, treat as literal
         const copy = try allocator.dupe(u8, pattern);
         try results.append(copy);
