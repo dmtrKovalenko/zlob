@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
-const zlobcore = zlob.glob;
+const zlobcore = @import("zlob_core");
 const GitIgnore = zlobcore.GitIgnore;
 
 // Test gitignore pattern parsing

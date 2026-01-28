@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
-const glob = zlob.glob;
+const glob = @import("zlob_core");
 const root = zlob;
 
 // SIMD Character Search Tests

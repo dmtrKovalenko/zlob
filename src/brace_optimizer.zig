@@ -4,11 +4,6 @@ const Allocator = std.mem.Allocator;
 const pattern_context = @import("pattern_context.zig");
 const PatternContext = pattern_context.PatternContext;
 
-// ============================================================================
-// Brace pattern utilities - shared helpers for brace expansion
-// ============================================================================
-
-/// Find the matching closing brace, handling nested braces and escapes
 pub fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
     var depth: usize = 1;
     var i = start;
@@ -25,7 +20,6 @@ pub fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
     return null;
 }
 
-/// Check if a pattern contains braces
 pub fn containsBraces(pattern: []const u8) bool {
     for (pattern) |c| {
         if (c == '{') return true;
@@ -33,64 +27,12 @@ pub fn containsBraces(pattern: []const u8) bool {
     return false;
 }
 
-// ============================================================================
-// Pre-computed suffix data for fast matching
-// ============================================================================
-
-/// Pre-computed suffix data for fast matching of *.ext patterns
-pub const PrecomputedSuffix = struct {
-    suffix: []const u8, // The suffix (e.g., ".rs", ".toml")
-    suffix_u32: u32, // Pre-computed u32 for fast comparison
-    suffix_u16: u16, // Pre-computed u16 for 2-3 byte suffixes
-    len: u8,
-
-    pub fn init(suffix: []const u8) PrecomputedSuffix {
-        var suffix_u32: u32 = 0;
-        var suffix_u16: u16 = 0;
-        const len: u8 = @intCast(@min(suffix.len, 16));
-
-        if (suffix.len >= 1) {
-            @memcpy(@as([*]u8, @ptrCast(&suffix_u32))[0..@min(suffix.len, 4)], suffix[0..@min(suffix.len, 4)]);
-            if (suffix.len >= 2) {
-                suffix_u16 = @as(*align(1) const u16, @ptrCast(suffix.ptr)).*;
-            }
-        }
-
-        return .{
-            .suffix = suffix,
-            .suffix_u32 = suffix_u32,
-            .suffix_u16 = suffix_u16,
-            .len = len,
-        };
-    }
-
-    /// Fast suffix match using pre-computed values
-    pub inline fn match(self: *const PrecomputedSuffix, name: []const u8) bool {
-        if (name.len < self.len) return false;
-
-        const name_end = name.ptr + name.len;
-
-        return switch (self.len) {
-            1 => name[name.len - 1] == self.suffix[0],
-            2 => @as(*align(1) const u16, @ptrCast(name_end - 2)).* == self.suffix_u16,
-            3 => blk: {
-                const tail_u16 = @as(*align(1) const u16, @ptrCast(name_end - 3)).*;
-                break :blk tail_u16 == self.suffix_u16 and (name_end - 1)[0] == self.suffix[2];
-            },
-            4 => @as(*align(1) const u32, @ptrCast(name_end - 4)).* == self.suffix_u32,
-            else => mem.endsWith(u8, name, self.suffix),
-        };
-    }
-};
-
 pub const BracedComponent = struct {
     /// The raw text of this component (may contain {a,b} braces)
     text: []const u8,
     /// If this component has braces, the expanded alternatives
     /// e.g., for "{a,b}" -> ["a", "b"], for "*.rs" -> null
     alternatives: ?[][]const u8,
-    /// Pre-computed suffix matchers for *.ext alternatives (null if not applicable)
-    suffix_matchers: ?[]PrecomputedSuffix,
     /// Pre-computed pattern contexts for alternatives (avoids re-computing during matching)
     pattern_contexts: ?[]PatternContext,
     /// Whether this is the last component (filename or dir)
@@ -107,9 +49,6 @@ pub const BracedPattern = struct {
             if (comp.pattern_contexts) |contexts| {
                 self.allocator.free(contexts);
             }
-            if (comp.suffix_matchers) |matchers| {
-                self.allocator.free(matchers);
-            }
             if (comp.alternatives) |alts| {
                 for (alts) |alt| {
                     self.allocator.free(alt);
@@ -125,7 +64,6 @@ pub const BracedPattern = struct {
         errdefer {
             for (components.items) |comp| {
                 if (comp.pattern_contexts) |contexts| allocator.free(contexts);
-                if (comp.suffix_matchers) |matchers| allocator.free(matchers);
                 if (comp.alternatives) |alts| {
                     for (alts) |alt| allocator.free(alt);
                     allocator.free(alts);
@@ -153,30 +91,6 @@ pub const BracedPattern = struct {
 
                     const alts = expandBracesAsAlternatives(allocator, comp_text) catch null;
 
-                    // Pre-compute suffix matchers for *.ext patterns
-                    const suffix_matchers = if (alts) |alternatives| blk: {
-                        // Check if all alternatives are *.suffix patterns
-                        var all_suffix_patterns = true;
-                        for (alternatives) |alt| {
-                            if (!isSimpleSuffixPattern(alt)) {
-                                all_suffix_patterns = false;
-                                break;
-                            }
-                        }
-
-                        if (all_suffix_patterns) {
-                            const matchers = try allocator.alloc(PrecomputedSuffix, alternatives.len);
-                            for (alternatives, 0..) |alt, idx| {
-                                // Extract suffix from "*.ext" -> ".ext"
-                                const suffix = if (alt.len > 1 and alt[0] == '*') alt[1..] else alt;
-                                matchers[idx] = PrecomputedSuffix.init(suffix);
-                            }
-                            break :blk matchers;
-                        } else {
-                            break :blk null;
-                        }
-                    } else null;
-
                     // Pre-compute pattern contexts for ALL alternatives (key optimization!)
                     const pattern_contexts_val = if (alts) |alternatives| blk: {
                         const contexts = try allocator.alloc(PatternContext, alternatives.len);
@@ -189,7 +103,6 @@ pub const BracedPattern = struct {
                     try components.append(allocator, .{
                         .text = comp_text,
                         .alternatives = alts,
-                        .suffix_matchers = suffix_matchers,
                         .pattern_contexts = pattern_contexts_val,
                         .is_last = is_last,
                     });
@@ -205,20 +118,6 @@ pub const BracedPattern = struct {
         };
     }
 };
-
-/// Check if a pattern is a simple *.suffix pattern (e.g., "*.rs", "*.toml")
-/// These can use fast pre-computed suffix matching
-fn isSimpleSuffixPattern(pattern: []const u8) bool {
-    // Must start with "*"
-    if (pattern.len < 2 or pattern[0] != '*') return false;
-
-    // Rest should be a simple suffix with no wildcards
-    const suffix = pattern[1..];
-    for (suffix) |c| {
-        if (c == '*' or c == '?' or c == '[' or c == '{') return false;
-    }
-    return true;
-}
 
 pub fn hasNestedBraces(pattern: []const u8) bool {
     var depth: usize = 0;

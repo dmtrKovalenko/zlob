@@ -17,6 +17,28 @@ pub const simdFindChar = glob.simdFindChar;
 pub const hasWildcardsSIMD = glob.hasWildcardsSIMD;
 pub const ZlobFlags = glob.ZlobFlags;
 
+// used mostloy by the tests
+pub const ZLOB_APPEND = glob.ZLOB_APPEND;
+pub const ZLOB_DOOFFS = glob.ZLOB_DOOFFS;
+pub const ZLOB_ERR = glob.ZLOB_ERR;
+pub const ZLOB_MARK = glob.ZLOB_MARK;
+pub const ZLOB_NOCHECK = glob.ZLOB_NOCHECK;
+pub const ZLOB_NOSORT = glob.ZLOB_NOSORT;
+pub const ZLOB_NOESCAPE = glob.ZLOB_NOESCAPE;
+pub const ZLOB_MAGCHAR = glob.ZLOB_MAGCHAR;
+pub const ZLOB_NOMAGIC = glob.ZLOB_NOMAGIC;
+pub const ZLOB_TILDE = glob.ZLOB_TILDE;
+pub const ZLOB_BRACE = glob.ZLOB_BRACE;
+pub const ZLOB_PERIOD = glob.ZLOB_PERIOD;
+pub const ZLOB_ONLYDIR = glob.ZLOB_ONLYDIR;
+pub const ZLOB_TILDE_CHECK = glob.ZLOB_TILDE_CHECK;
+pub const ZLOB_GITIGNORE = glob.ZLOB_GITIGNORE;
+pub const ZLOB_DOUBLESTAR_RECURSIVE = glob.ZLOB_DOUBLESTAR_RECURSIVE;
+pub const ZLOB_RECOMMENDED = glob.ZLOB_RECOMMENDED;
+pub const ZLOB_NOSPACE = glob.ZLOB_NOSPACE;
+pub const ZLOB_ABORTED = glob.ZLOB_ABORTED;
+pub const ZLOB_NOMATCH = glob.ZLOB_NOMATCH;
+
 /// Perform file system walking and collect matching results to GlobResults
 ///
 /// Example with ZlobFlags (recommended):
