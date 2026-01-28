@@ -308,7 +308,6 @@ pub const OptimizationResult = union(enum) {
 };
 
 /// Analyze a pattern and determine the optimal strategy for globbing.
-/// Always returns a result - never null.
 pub fn analyzeBracedPattern(allocator: Allocator, pattern: []const u8) !OptimizationResult {
     // Check if pattern contains braces at all
     if (!containsBraces(pattern)) {
@@ -318,17 +317,6 @@ pub fn analyzeBracedPattern(allocator: Allocator, pattern: []const u8) !Optimiza
     const parsed = BracedPattern.parse(allocator, pattern) catch {
         return .fallback;
     };
-
-    // Check if braces are only in the filename (last) component
-    // If braces are in directory components, we need to fall back to multi-pattern expansion
-    for (parsed.components) |comp| {
-        if (!comp.is_last and comp.alternatives != null) {
-            // Braces in directory component - need to expand into multiple patterns
-            var parsed_mut = parsed;
-            parsed_mut.deinit();
-            return .fallback;
-        }
-    }
 
     return .{ .single_walk = parsed };
 }
@@ -404,16 +392,23 @@ test "analyzePatternForGlob - single_walk with alternatives" {
     try testing.expectEqual(@as(usize, 2), last_comp.alternatives.?.len);
 }
 
-test "analyzePatternForGlob - dir alternatives uses fallback" {
+test "analyzePatternForGlob - dir alternatives uses single_walk" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    // Pattern like {src,lib}/**/*.rs should use fallback because braces are in directory component
+    // Pattern like {src,lib}/**/*.rs should use single_walk with pre-doublestar components
     var result = try analyzeBracedPattern(allocator, "{src,lib}/**/*.rs");
     defer result.deinit();
 
-    // Directory-level braces require multi-pattern expansion (fallback)
-    try testing.expect(result == .fallback);
+    // Directory-level braces now use single_walk for optimized single tree traversal
+    try testing.expect(result == .single_walk);
+
+    // Verify the parsed pattern has correct structure
+    const parsed = result.single_walk;
+    try testing.expectEqual(@as(usize, 3), parsed.components.len);
+    // First component should have alternatives
+    try testing.expect(parsed.components[0].alternatives != null);
+    try testing.expectEqual(@as(usize, 2), parsed.components[0].alternatives.?.len);
 }
 
 test "analyzePatternForGlob - no braces returns no_braces strategy" {

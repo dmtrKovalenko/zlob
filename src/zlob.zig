@@ -1,11 +1,11 @@
 const std = @import("std");
-const c = std.c;
-const mem = std.mem;
-const Allocator = std.mem.Allocator;
 const suffix_match = @import("suffix_match.zig");
 const brace_optimizer = @import("brace_optimizer.zig");
 const pattern_context_mod = @import("pattern_context.zig");
 const flags_mod = @import("flags.zig");
+const c = std.c;
+const mem = std.mem;
+const Allocator = std.mem.Allocator;
 
 pub const PatternContext = pattern_context_mod.PatternContext;
 pub const hasWildcardsSIMD = pattern_context_mod.hasWildcardsSIMD;
@@ -43,7 +43,6 @@ pub const zlob_t = extern struct {
     gl_closedir: gl_closedir_t = null,
 };
 
-/// Directory iterator abstraction - wraps either std.fs.Dir or custom ALTDIRFUNC
 pub const DirIterator = struct {
     // For std.fs mode
     std_dir: ?std.fs.Dir = null,
@@ -969,6 +968,44 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
 
     const info = analyzePattern(effective_pattern, flags);
 
+    // Handle braced patterns without ** using single-walk approach
+    // This covers:
+    // - "{src,lib}/*.c" - braces in directory
+    // - "common/*/*.{rs,toml}" - braces in filename with wildcard dirs
+    // - "{src,lib}/*/*.{c,h}" - braces in both
+    // Skip if pattern has ** - those go through globRecursive
+    if (brace_parsed) |parsed| {
+        if (!parsed.has_recursive) {
+            // Check if we need the braced component walker:
+            // 1. Any non-last component has alternatives, OR
+            // 2. Last component has alternatives AND there are wildcards in directory part
+            var has_dir_alternatives = false;
+            var has_file_alternatives = false;
+            var has_dir_wildcards = false;
+
+            for (parsed.components) |comp| {
+                if (comp.is_last) {
+                    has_file_alternatives = comp.alternatives != null;
+                } else {
+                    if (comp.alternatives != null) {
+                        has_dir_alternatives = true;
+                    }
+                    // Check for wildcards in non-last components
+                    for (comp.text) |ch| {
+                        if (ch == '*' or ch == '?' or ch == '[') {
+                            has_dir_wildcards = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (has_dir_alternatives or (has_file_alternatives and has_dir_wildcards)) {
+                return globWithBracedComponents(allocator, parsed, flags, errfunc, pzlob, info.directories_only, gitignore_filter, base_dir);
+            }
+        }
+    }
+
     // Fast path: simple pattern with literal prefix (e.g., "src/foo/*.txt")
     if (info.simple_extension != null and info.literal_prefix.len > 0) {
         return globInDirFiltered(allocator, info.wildcard_suffix, info.literal_prefix, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir);
@@ -1385,6 +1422,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     // For patterns like "{src,lib}/**/*.rs", we need to:
     // 1. Identify "pre-doublestar" components that must be matched FIRST
     // 2. Then do recursive walk with "post-doublestar" components
+    var start_dir_buf: [4096]u8 = undefined;
     var start_dir: []const u8 = dirname;
     var pre_ds_components_buf: [32][]const u8 = undefined;
     var pre_ds_alternatives_buf: [32]?[]const []const u8 = undefined;
@@ -1419,18 +1457,20 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
             // Build start directory from literal prefix components
             if (literal_prefix_end > 0) {
                 // Build full path from literal components
-                var path_buf: [4096]u8 = undefined;
                 var path_len: usize = 0;
                 for (parsed.components[0..literal_prefix_end], 0..) |comp, i| {
                     if (i > 0) {
-                        path_buf[path_len] = '/';
+                        start_dir_buf[path_len] = '/';
                         path_len += 1;
                     }
-                    @memcpy(path_buf[path_len..][0..comp.text.len], comp.text);
+                    @memcpy(start_dir_buf[path_len..][0..comp.text.len], comp.text);
                     path_len += comp.text.len;
                 }
-                // Store in a static buffer that persists (we only use start_dir during this call)
-                start_dir = path_buf[0..path_len];
+                start_dir = start_dir_buf[0..path_len];
+            } else {
+                // No literal prefix - braces start immediately (e.g., "{src,lib}/**/*.rs")
+                // Start from "." and use pre_ds_components to match braced dirs
+                start_dir = ".";
             }
 
             // Components with wildcards/braces BEFORE ** are "pre-doublestar" components
@@ -1551,6 +1591,188 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     return finalizeResults(allocator, &all_results, flags, pzlob);
 }
 
+/// Handle non-recursive patterns with braced directory components
+/// e.g., "{src,lib}/*.c", "{a,b}/{x,y}/*.txt"
+/// Walks components using alternatives where present
+fn globWithBracedComponents(
+    allocator: std.mem.Allocator,
+    parsed: *const brace_optimizer.BracedPattern,
+    flags: ZlobFlags,
+    errfunc: zlob_errfunc_t,
+    pzlob: *zlob_t,
+    directories_only: bool,
+    gitignore_filter: ?*GitIgnore,
+    base_dir: ?std.fs.Dir,
+) !?void {
+    _ = gitignore_filter; // TODO: Apply gitignore filtering
+
+    var all_results = ResultsList.init(allocator);
+    defer all_results.deinit();
+    all_results.ensureTotalCapacity(256) catch {};
+
+    // Convert BracedComponent to ComponentMatch format
+    var matchers: [32]ComponentMatcher = undefined;
+    const matcher_count = @min(parsed.components.len, 32);
+    for (parsed.components[0..matcher_count], 0..) |comp, i| {
+        matchers[i] = ComponentMatcher.fromBracedComponent(&comp);
+    }
+
+    try walkBracedComponents(
+        allocator,
+        matchers[0..matcher_count],
+        0,
+        ".",
+        flags,
+        &all_results,
+        directories_only,
+        errfunc,
+        base_dir,
+        struct {
+            fn onComplete(alloc: std.mem.Allocator, path: []const u8, results: *ResultsList, _: bool) !void {
+                const path_copy = try alloc.allocSentinel(u8, path.len, 0);
+                @memcpy(path_copy[0..path.len], path);
+                try results.append(@ptrCast(path_copy.ptr));
+            }
+        }.onComplete,
+    );
+
+    if (all_results.items.len == 0) {
+        return null;
+    }
+
+    if (!flags.nosort) {
+        qsort(@ptrCast(all_results.items.ptr), all_results.items.len, @sizeOf([*c]u8), c_cmp_strs);
+    }
+
+    return finalizeResults(allocator, &all_results, flags, pzlob);
+}
+
+/// Unified component matcher - can match against text or alternatives
+const ComponentMatcher = struct {
+    text: []const u8,
+    alternatives: ?[]const []const u8,
+    is_last: bool,
+
+    fn fromBracedComponent(comp: *const brace_optimizer.BracedComponent) ComponentMatcher {
+        return .{
+            .text = comp.text,
+            .alternatives = comp.alternatives,
+            .is_last = comp.is_last,
+        };
+    }
+
+    fn fromTextAndAlts(text: []const u8, alts: ?[]const []const u8, is_last: bool) ComponentMatcher {
+        return .{ .text = text, .alternatives = alts, .is_last = is_last };
+    }
+
+    /// Check if name matches this component
+    fn matches(self: *const ComponentMatcher, name: []const u8) bool {
+        if (self.alternatives) |alts| {
+            return matchWithAlternatives(name, alts);
+        }
+        const ctx = PatternContext.init(self.text);
+        return fnmatchWithContext(&ctx, name);
+    }
+
+    /// Check if any pattern/alternative starts with dot
+    fn startsWithDot(self: *const ComponentMatcher) bool {
+        if (self.text.len > 0 and self.text[0] == '.') return true;
+        if (self.alternatives) |alts| {
+            for (alts) |alt| {
+                if (alt.len > 0 and alt[0] == '.') return true;
+            }
+        }
+        return false;
+    }
+};
+
+/// Check if entry should be skipped (. and .., hidden files)
+inline fn shouldSkipEntry(name: []const u8, is_hidden_ok: bool) bool {
+    if (name.len == 0) return true;
+    if (name[0] == '.') {
+        // Always skip . and ..
+        if (name.len == 1 or (name.len == 2 and name[1] == '.')) return true;
+        // Skip hidden unless allowed
+        if (!is_hidden_ok) return true;
+    }
+    return false;
+}
+
+fn walkBracedComponents(
+    allocator: std.mem.Allocator,
+    matchers: []const ComponentMatcher,
+    component_idx: usize,
+    current_dir: []const u8,
+    flags: ZlobFlags,
+    results: *ResultsList,
+    directories_only: bool,
+    errfunc: zlob_errfunc_t,
+    base_dir: ?std.fs.Dir,
+    comptime onComplete: fn (std.mem.Allocator, []const u8, *ResultsList, bool) error{ OutOfMemory, Aborted }!void,
+) error{ OutOfMemory, Aborted }!void {
+    if (component_idx >= matchers.len) {
+        try onComplete(allocator, current_dir, results, directories_only);
+        return;
+    }
+
+    const matcher = &matchers[component_idx];
+    const is_final = component_idx == matchers.len - 1;
+    const is_hidden_ok = flags.period or matcher.startsWithDot();
+
+    // Open directory
+    const root = base_dir orelse std.fs.cwd();
+    var dir = root.openDir(current_dir, .{ .iterate = true }) catch |err| {
+        if (errfunc) |efunc| {
+            var path_buf: [4096:0]u8 = undefined;
+            if (current_dir.len < 4096) {
+                @memcpy(path_buf[0..current_dir.len], current_dir);
+                path_buf[current_dir.len] = 0;
+                _ = efunc(&path_buf, errToErrno(err));
+            }
+        }
+        if (flags.err) return error.Aborted;
+        return;
+    };
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (shouldSkipEntry(entry.name, is_hidden_ok)) continue;
+        if (!is_final and entry.kind != .directory) continue;
+
+        if (matcher.matches(entry.name)) {
+            if (is_final and directories_only and entry.kind != .directory) continue;
+
+            var path_buf: [4096]u8 = undefined;
+            const subpath = buildPathInBuffer(&path_buf, current_dir, entry.name);
+            if (subpath.len >= 4096) continue;
+
+            try walkBracedComponents(
+                allocator,
+                matchers,
+                component_idx + 1,
+                subpath,
+                flags,
+                results,
+                directories_only,
+                errfunc,
+                base_dir,
+                onComplete,
+            );
+        }
+    }
+}
+
+/// Convert error to errno for error callback
+inline fn errToErrno(err: anyerror) c_int {
+    return switch (err) {
+        error.AccessDenied => @intFromEnum(std.posix.E.ACCES),
+        error.FileNotFound => @intFromEnum(std.posix.E.NOENT),
+        error.NotDir => @intFromEnum(std.posix.E.NOTDIR),
+        else => @intFromEnum(std.posix.E.IO),
+    };
+}
+
 fn globRecursiveWithBracedPrefix(
     allocator: std.mem.Allocator,
     rec_pattern: *const RecursivePattern,
@@ -1566,7 +1788,6 @@ fn globRecursiveWithBracedPrefix(
 ) !void {
     // If we've matched all pre-doublestar components, start the recursive walk
     if (component_idx >= pre_ds_components.len) {
-        // Now do the recursive walk from current_dir
         if (rec_pattern.dir_components.len == 0) {
             try globRecursiveWithZigWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc, base_dir);
         } else {
@@ -1575,10 +1796,13 @@ fn globRecursiveWithBracedPrefix(
         return;
     }
 
-    const comp_text = pre_ds_components[component_idx];
-    const comp_alts = pre_ds_alternatives[component_idx];
+    const matcher = ComponentMatcher.fromTextAndAlts(
+        pre_ds_components[component_idx],
+        pre_ds_alternatives[component_idx],
+        false, // not last - always matching directories
+    );
+    const is_hidden_ok = flags.period or matcher.startsWithDot();
 
-    // Open current directory to find matching subdirectories
     const root = base_dir orelse std.fs.cwd();
     var dir = root.openDir(current_dir, .{ .iterate = true }) catch |err| {
         if (errfunc) |efunc| {
@@ -1586,80 +1810,24 @@ fn globRecursiveWithBracedPrefix(
             if (current_dir.len < 4096) {
                 @memcpy(path_buf[0..current_dir.len], current_dir);
                 path_buf[current_dir.len] = 0;
-                const eerrno: c_int = switch (err) {
-                    error.AccessDenied => @intFromEnum(std.posix.E.ACCES),
-                    error.FileNotFound => @intFromEnum(std.posix.E.NOENT),
-                    error.NotDir => @intFromEnum(std.posix.E.NOTDIR),
-                    else => @intFromEnum(std.posix.E.IO),
-                };
-                _ = efunc(&path_buf, eerrno);
+                _ = efunc(&path_buf, errToErrno(err));
             }
         }
-        if (flags.err) {
-            return error.Aborted;
-        }
+        if (flags.err) return error.Aborted;
         return;
     };
     defer dir.close();
 
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
-        const name = entry.name;
-
-        // Skip . and ..
-        if (name.len == 0) continue;
-        if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
-
-        // Skip hidden unless ZLOB_PERIOD or pattern starts with .
-        if (!flags.period and name[0] == '.') {
-            if (comp_text.len == 0 or comp_text[0] != '.') {
-                if (comp_alts) |alts| {
-                    var any_starts_dot = false;
-                    for (alts) |alt| {
-                        if (alt.len > 0 and alt[0] == '.') {
-                            any_starts_dot = true;
-                            break;
-                        }
-                    }
-                    if (!any_starts_dot) continue;
-                } else {
-                    continue;
-                }
-            }
-        }
-
-        // Only consider directories
+        if (shouldSkipEntry(entry.name, is_hidden_ok)) continue;
         if (entry.kind != .directory) continue;
 
-        // Check if name matches this component (with alternatives if present)
-        const matches = if (comp_alts) |alts|
-            matchWithAlternatives(name, alts)
-        else blk: {
-            const comp_ctx = PatternContext.init(comp_text);
-            break :blk fnmatchWithContext(&comp_ctx, name);
-        };
-
-        if (matches) {
-            // Build path to matched directory
+        if (matcher.matches(entry.name)) {
             var path_buf: [4096]u8 = undefined;
-            const path_len = if (mem.eql(u8, current_dir, "."))
-                name.len
-            else
-                current_dir.len + 1 + name.len;
+            const subdir = buildPathInBuffer(&path_buf, current_dir, entry.name);
+            if (subdir.len >= 4096) continue;
 
-            if (path_len >= 4096) continue;
-
-            const subdir = if (mem.eql(u8, current_dir, ".")) blk: {
-                @memcpy(path_buf[0..name.len], name);
-                break :blk path_buf[0..name.len];
-            } else blk: {
-                @memcpy(path_buf[0..current_dir.len], current_dir);
-                path_buf[current_dir.len] = '/';
-                @memcpy(path_buf[current_dir.len + 1 ..][0..name.len], name);
-                break :blk path_buf[0..path_len];
-            };
-
-            // Recurse to next pre-ds component
             try globRecursiveWithBracedPrefix(
                 allocator,
                 rec_pattern,
@@ -3067,5 +3235,3 @@ test "DirIterator with ALTDIRFUNC" {
     try testing.expect(found_file2);
     try testing.expect(found_subdir);
 }
-
-

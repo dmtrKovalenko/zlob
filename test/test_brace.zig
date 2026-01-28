@@ -1120,3 +1120,166 @@ test "ZLOB_BRACE filesystem - header files in multiple directories" {
     // include/api.h, include/types.h
     try testing.expect(pzlob.gl_pathc >= 8);
 }
+
+// ============================================================================
+// Wildcard directory + brace filename tests
+// These test patterns like "dir/*/*.{a,b}" which combine wildcards in directory
+// components with brace alternatives in filename
+// ============================================================================
+
+test "ZLOB_BRACE filesystem - wildcard dir with brace extension" {
+    // Pattern: */*.{c,h} - wildcard in dir, braces in filename
+    // This was broken: wildcards in dirs + braces in filename returned no results
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createBraceTestFiles(allocator, tmp_dir);
+    defer cleanupBraceTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "*/*.{c,h}");
+    defer allocator.free(pattern);
+
+    var pzlob: zlob.zlob_t = undefined;
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    // src/main.c, src/main.h, src/test.c, src/test.h, src/utils.c
+    // lib/lib.c, lib/lib.h
+    // include/api.h, include/types.h
+    try testing.expect(pzlob.gl_pathc >= 9);
+
+    // Verify we have both .c and .h files
+    var c_count: usize = 0;
+    var h_count: usize = 0;
+    for (0..pzlob.gl_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+        if (std.mem.endsWith(u8, path, ".c")) c_count += 1;
+        if (std.mem.endsWith(u8, path, ".h")) h_count += 1;
+    }
+    try testing.expect(c_count >= 4);
+    try testing.expect(h_count >= 4);
+}
+
+test "ZLOB_BRACE filesystem - literal prefix with wildcard dir and brace extension" {
+    // Pattern: src/*/*.{c,h} - literal prefix + wildcard + braces
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createBraceTestFiles(allocator, tmp_dir);
+    defer cleanupBraceTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "src/*/*.{c,h}");
+    defer allocator.free(pattern);
+
+    var pzlob: zlob.zlob_t = undefined;
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    // src/core/engine.c, src/core/engine.h, src/utils/helper.c, src/utils/helper.h
+    try testing.expect(pzlob.gl_pathc >= 4);
+}
+
+test "ZLOB_BRACE filesystem - question mark wildcard with brace extension" {
+    // Pattern: src/????.{c,h} - ? wildcard + braces
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createBraceTestFiles(allocator, tmp_dir);
+    defer cleanupBraceTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "src/????.{c,h}");
+    defer allocator.free(pattern);
+
+    var pzlob: zlob.zlob_t = undefined;
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    // src/main.c, src/main.h, src/test.c, src/test.h
+    try testing.expect(pzlob.gl_pathc >= 4);
+}
+
+test "ZLOB_BRACE filesystem - multiple wildcard dirs with brace extension" {
+    // Pattern: */*/*.{c,h} - two wildcard levels + braces
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createBraceTestFiles(allocator, tmp_dir);
+    defer cleanupBraceTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "*/*/*.{c,h}");
+    defer allocator.free(pattern);
+
+    var pzlob: zlob.zlob_t = undefined;
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    // src/core/engine.c, src/core/engine.h
+    // src/utils/helper.c, src/utils/helper.h
+    // lib/common/shared.c, lib/common/shared.h
+    try testing.expect(pzlob.gl_pathc >= 6);
+}
+
+test "ZLOB_BRACE filesystem - brace dir AND wildcard dir AND brace extension" {
+    // Pattern: {src,lib}/*/*.{c,h} - braces in dir + wildcard + braces in filename
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createBraceTestFiles(allocator, tmp_dir);
+    defer cleanupBraceTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir_str);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    const pattern = try allocator.dupeZ(u8, "{src,lib}/*/*.{c,h}");
+    defer allocator.free(pattern);
+
+    var pzlob: zlob.zlob_t = undefined;
+    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    // src/core/engine.c, src/core/engine.h, src/utils/helper.c, src/utils/helper.h
+    // lib/common/shared.c, lib/common/shared.h
+    try testing.expect(pzlob.gl_pathc >= 6);
+}

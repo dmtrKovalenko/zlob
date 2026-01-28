@@ -201,16 +201,15 @@ pub fn main() !void {
         full_pattern = pattern;
     }
 
-    // Build flags using the type-safe ZlobFlags struct
-    var flags = zlob.ZlobFlags{
-        .nosort = !opts.sorted, // Default: unsorted (faster)
-        .brace = !opts.no_brace, // Default: brace expansion enabled
-        .gitignore = !opts.no_gitignore, // Default: respect .gitignore
-        .mark = opts.mark_dirs,
-        .noescape = opts.no_escape,
-        .period = opts.hidden,
-        .onlydir = opts.dirs_only,
-    };
+    // Start with recommended settings, then apply CLI options
+    var flags = zlob.ZlobFlags.recommended();
+    flags.nosort = !opts.sorted;
+    flags.brace = !opts.no_brace;
+    flags.gitignore = !opts.no_gitignore;
+    flags.mark = opts.mark_dirs;
+    flags.noescape = opts.no_escape;
+    flags.period = opts.hidden;
+    flags.onlydir = opts.dirs_only;
     _ = &flags; // suppress unused warning if match accepts anytype
 
     var match_result = zlob.match(allocator, full_pattern, flags) catch |err| {

@@ -451,7 +451,7 @@ pub const GitIgnore = struct {
                 // Check if any negation could affect this directory or its children
                 if (!self.has_negations) {
                     // No negations at all - safe to skip
-                    self.dir_cache.put(normalized_path, true) catch {};
+                    self.cacheResult(normalized_path, true);
                     return true;
                 }
 
@@ -482,7 +482,7 @@ pub const GitIgnore = struct {
                 }
 
                 if (!dominated_by_negation) {
-                    self.dir_cache.put(normalized_path, true) catch {};
+                    self.cacheResult(normalized_path, true);
                     return true;
                 }
             }
@@ -490,8 +490,17 @@ pub const GitIgnore = struct {
 
         // For non-literal patterns or when negations might interfere,
         // we need to be conservative and NOT skip
-        self.dir_cache.put(normalized_path, false) catch {};
+        self.cacheResult(normalized_path, false);
         return false;
+    }
+
+    /// Cache a directory skip result - duplicates the key since it may be from a stack buffer
+    fn cacheResult(self: *Self, path: []const u8, should_skip: bool) void {
+        // Duplicate the key since it may point to a temporary stack buffer
+        const key_copy = self.allocator.dupe(u8, path) catch return;
+        self.dir_cache.put(key_copy, should_skip) catch {
+            self.allocator.free(key_copy);
+        };
     }
 
     pub fn deinit(self: *Self) void {
@@ -502,9 +511,15 @@ pub const GitIgnore = struct {
         }
         self.suffix_patterns.deinit();
 
+        // Free duplicated keys in dir_cache
+        var cache_iter = self.dir_cache.keyIterator();
+        while (cache_iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.dir_cache.deinit();
+
         self.literal_dirs.deinit();
         self.literal_files.deinit();
-        self.dir_cache.deinit();
         self.allocator.free(self.patterns);
         self.allocator.free(self.wildcard_patterns);
         self.allocator.free(self.source);

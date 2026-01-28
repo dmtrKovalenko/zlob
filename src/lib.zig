@@ -3,51 +3,19 @@
 //! This library provides high-performance file pattern matching (globbing) using
 //! SIMD optimizations for improved performance on pattern matching operations.
 //!
-//! Based on the OpenBSD glob implementation with modern SIMD enhancements.
-//!
 //! This is the pure Zig API. For C-compatible API, see c_lib.zig which provides
-//! POSIX glob() and globfree() functions with a C header (include/zlob.h).
+//! POSIX glob() and globfree() functions and C header (include/zlob.h).
 
 const std = @import("std");
+const glob = @import("zlob");
 
-const glob_impl = @import("zlob");
-
-pub const GlobResults = glob_impl.GlobResults;
-pub const GlobError = glob_impl.GlobError;
-pub const zlob_t = glob_impl.zlob_t;
-pub const analyzePattern = glob_impl.analyzePattern;
-pub const simdFindChar = glob_impl.simdFindChar;
-pub const hasWildcardsSIMD = glob_impl.hasWildcardsSIMD;
-
-/// ZlobFlags is a packed struct for type-safe flag handling.
-/// Use this instead of raw integer constants for better ergonomics.
-pub const ZlobFlags = glob_impl.ZlobFlags;
-
-/// Internal glob module - exposed for tests that need low-level access.
-/// Not part of the stable public API.
-pub const glob = glob_impl;
-
-// Legacy integer flag constants (for backward compatibility and C interop)
-pub const ZLOB_APPEND = glob_impl.ZLOB_APPEND;
-pub const ZLOB_DOOFFS = glob_impl.ZLOB_DOOFFS;
-pub const ZLOB_ERR = glob_impl.ZLOB_ERR;
-pub const ZLOB_MARK = glob_impl.ZLOB_MARK;
-pub const ZLOB_NOCHECK = glob_impl.ZLOB_NOCHECK;
-pub const ZLOB_NOSORT = glob_impl.ZLOB_NOSORT;
-pub const ZLOB_NOESCAPE = glob_impl.ZLOB_NOESCAPE;
-pub const ZLOB_MAGCHAR = glob_impl.ZLOB_MAGCHAR;
-pub const ZLOB_NOMAGIC = glob_impl.ZLOB_NOMAGIC;
-pub const ZLOB_TILDE = glob_impl.ZLOB_TILDE;
-pub const ZLOB_BRACE = glob_impl.ZLOB_BRACE;
-pub const ZLOB_PERIOD = glob_impl.ZLOB_PERIOD;
-pub const ZLOB_ONLYDIR = glob_impl.ZLOB_ONLYDIR;
-pub const ZLOB_TILDE_CHECK = glob_impl.ZLOB_TILDE_CHECK;
-pub const ZLOB_GITIGNORE = glob_impl.ZLOB_GITIGNORE;
-pub const ZLOB_DOUBLESTAR_RECURSIVE = glob_impl.ZLOB_DOUBLESTAR_RECURSIVE;
-pub const ZLOB_RECOMMENDED = glob_impl.ZLOB_RECOMMENDED;
-pub const ZLOB_NOSPACE = glob_impl.ZLOB_NOSPACE;
-pub const ZLOB_ABORTED = glob_impl.ZLOB_ABORTED;
-pub const ZLOB_NOMATCH = glob_impl.ZLOB_NOMATCH;
+pub const GlobResults = glob.GlobResults;
+pub const GlobError = glob.GlobError;
+pub const zlob_t = glob.zlob_t;
+pub const analyzePattern = glob.analyzePattern;
+pub const simdFindChar = glob.simdFindChar;
+pub const hasWildcardsSIMD = glob.hasWildcardsSIMD;
+pub const ZlobFlags = glob.ZlobFlags;
 
 /// Perform file system walking and collect matching results to GlobResults
 ///
@@ -149,7 +117,7 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: any
 /// - Paths from filesystem operations are typically already normalized
 pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !GlobResults {
     const zflags = flagsToZlobFlags(flags_param);
-    return glob_impl.path_matcher.matchPaths(allocator, pattern, paths, zflags.toU32());
+    return glob.path_matcher.matchPaths(allocator, pattern, paths, zflags.toU32());
 }
 
 /// Perform file system walking within a specified base directory and collect matching results.

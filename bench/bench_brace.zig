@@ -53,9 +53,7 @@ fn getRepoPath(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 fn runBenchmark(tc: TestCase, warmup_iterations: usize) !BenchmarkResult {
-    const flags: c_int = c_lib.ZLOB_BRACE | c_lib.ZLOB_GITIGNORE | c_lib.ZLOB_NOSORT;
-
-    // Warmup runs to avoid cold cache effects
+    const flags: c_int = c_lib.ZLOB_RECOMMENDED | c_lib.ZLOB_GITIGNORE;
     var matches: usize = 0;
     for (0..warmup_iterations) |_| {
         var pzlob: zlob_t = undefined;
