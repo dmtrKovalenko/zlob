@@ -9,6 +9,8 @@ const Allocator = std.mem.Allocator;
 
 pub const PatternContext = pattern_context_mod.PatternContext;
 pub const hasWildcardsSIMD = pattern_context_mod.hasWildcardsSIMD;
+pub const indexOfCharSIMD = pattern_context_mod.indexOfCharSIMD;
+pub const lastIndexOfCharSIMD = pattern_context_mod.lastIndexOfCharSIMD;
 pub const gitignore = @import("gitignore.zig");
 pub const GitIgnore = gitignore.GitIgnore;
 
@@ -314,7 +316,7 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
         info.wildcard_suffix.len >= 2 and info.wildcard_suffix[0] == '*')
     {
         const suffix = info.wildcard_suffix[1..];
-        if (!hasWildcardsSIMD(suffix) and mem.indexOf(u8, suffix, "/") == null) {
+        if (!hasWildcardsSIMD(suffix) and indexOfCharSIMD(suffix, '/') == null) {
             info.simple_extension = suffix;
         }
     }
@@ -322,7 +324,7 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
     if (!info.has_recursive) {
         var depth: usize = info.fixed_component_count;
         var remaining = info.wildcard_suffix;
-        while (mem.indexOf(u8, remaining, "/")) |pos| {
+        while (indexOfCharSIMD(remaining, '/')) |pos| {
             depth += 1;
             remaining = remaining[pos + 1 ..];
         }
@@ -2858,6 +2860,19 @@ pub fn simdFindChar(haystack: []const u8, needle: u8) ?usize {
 
 // SIMD-optimized fnmatch with pre-computed pattern context (avoids redundant wildcard checks)
 pub inline fn fnmatchWithContext(ctx: *const PatternContext, string: []const u8) bool {
+    // Early rejection: if we know the required last character and it doesn't match, reject immediately
+    // This is a very cheap check that can avoid expensive pattern matching
+    if (ctx.required_last_char) |required_last| {
+        if (string.len == 0 or string[string.len - 1] != required_last) {
+            return false;
+        }
+    }
+
+    // Try template-based fast path first
+    if (ctx.matchTemplate(string)) |result| {
+        return result;
+    }
+
     // Fast path: exact match with SIMD for long strings (only if no wildcards)
     if (ctx.pattern.len == string.len and !ctx.has_wildcards) {
         if (ctx.pattern.len >= 32) {
@@ -2889,6 +2904,20 @@ pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
     var pi: usize = 0;
     var si: usize = 0;
 
+    // Fast path: check literal prefix before first wildcard
+    // This avoids entering the slow recursive path for non-matching strings
+    while (pi < pattern.len) {
+        const p = pattern[pi];
+        if (p == '*' or p == '?' or p == '[') break;
+        if (si >= string.len or string[si] != p) return false;
+        pi += 1;
+        si += 1;
+    }
+
+    // If pattern exhausted, check if string also exhausted
+    if (pi >= pattern.len) return si == string.len;
+
+    // Continue with wildcard matching from current position
     while (pi < pattern.len) {
         const p = pattern[pi];
 
@@ -2943,32 +2972,10 @@ pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
                     pi += 1;
                 }
 
-                // Remember start position - first char after '[' can be ']' as literal
-                const bracket_start = pi;
-
-                var matched = false;
-                while (pi < pattern.len) {
-                    const set_c = pattern[pi];
-
-                    // First character is always part of set (even if it's ']')
-                    // Only subsequent ']' closes the bracket expression
-                    if (set_c == ']' and pi > bracket_start) break;
-
-                    pi += 1;
-
-                    if (pi + 1 < pattern.len and pattern[pi] == '-' and pattern[pi + 1] != ']') {
-                        pi += 1;
-                        const range_end = pattern[pi];
-                        pi += 1;
-                        if (ch >= set_c and ch <= range_end) {
-                            matched = true;
-                        }
-                    } else {
-                        if (ch == set_c) matched = true;
-                    }
-                }
-
-                if (pi < pattern.len and pattern[pi] == ']') pi += 1;
+                // Use branchless bitmap matching for bracket expressions
+                const result = matchBracketExpressionFast(pattern, pi, ch);
+                pi = result.new_pi;
+                var matched = result.matched;
 
                 if (negate) matched = !matched;
                 if (!matched) return false;
@@ -2982,6 +2989,56 @@ pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
     }
 
     return si == string.len;
+}
+
+/// Fast bracket expression matching using branchless techniques
+/// Returns the match result and the new pattern index after the closing ']'
+inline fn matchBracketExpressionFast(pattern: []const u8, start_pi: usize, ch: u8) struct { matched: bool, new_pi: usize } {
+    var pi = start_pi;
+    const bracket_start = pi;
+
+    // Build a 256-bit bitmap for the character set
+    // Each bit represents whether that byte value is in the set
+    var bitmap: [32]u8 = [_]u8{0} ** 32;
+
+    while (pi < pattern.len) {
+        const set_c = pattern[pi];
+
+        // First character is always part of set (even if it's ']')
+        // Only subsequent ']' closes the bracket expression
+        if (set_c == ']' and pi > bracket_start) break;
+
+        pi += 1;
+
+        if (pi + 1 < pattern.len and pattern[pi] == '-' and pattern[pi + 1] != ']') {
+            // Range like [a-z]
+            pi += 1;
+            const range_end = pattern[pi];
+            pi += 1;
+
+            // Fill bitmap for range - unroll for common small ranges
+            const start_byte = set_c;
+            const end_byte = range_end;
+            if (start_byte <= end_byte) {
+                var range_c = start_byte;
+                while (range_c <= end_byte) : (range_c += 1) {
+                    bitmap[range_c >> 3] |= @as(u8, 1) << @as(u3, @truncate(range_c & 7));
+                    if (range_c == 255) break; // Prevent overflow
+                }
+            }
+        } else {
+            // Single character
+            bitmap[set_c >> 3] |= @as(u8, 1) << @as(u3, @truncate(set_c & 7));
+        }
+    }
+
+    // Skip the closing ']'
+    if (pi < pattern.len and pattern[pi] == ']') pi += 1;
+
+    // Branchless bitmap lookup
+    const matched = (bitmap[ch >> 3] & (@as(u8, 1) << @as(u3, @truncate(ch & 7)))) != 0;
+
+    return .{ .matched = matched, .new_pi = pi };
 }
 
 /// Internal globfree function - frees zlob_t structure

@@ -21,6 +21,23 @@ pub fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
 }
 
 pub fn containsBraces(pattern: []const u8) bool {
+    // SIMD optimization for longer patterns
+    if (pattern.len >= 32) {
+        const Vec32 = @Vector(32, u8);
+        const brace_vec: Vec32 = @splat('{');
+        var i: usize = 0;
+        while (i + 32 <= pattern.len) : (i += 32) {
+            const chunk: Vec32 = pattern[i..][0..32].*;
+            const mask = @as(u32, @bitCast(chunk == brace_vec));
+            if (mask != 0) return true;
+        }
+        // Handle remainder
+        for (pattern[i..]) |c| {
+            if (c == '{') return true;
+        }
+        return false;
+    }
+    // Fallback for short patterns
     for (pattern) |c| {
         if (c == '{') return true;
     }

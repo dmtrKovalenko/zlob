@@ -120,15 +120,9 @@ pub const GitIgnore = struct {
         return try parseOwned(allocator, content);
     }
 
-    /// Check if a pattern text contains any glob wildcards
+    /// Check if a pattern text contains any glob wildcards (SIMD-accelerated)
     fn hasWildcards(text: []const u8) bool {
-        for (text) |c| {
-            switch (c) {
-                '*', '?', '[', ']' => return true,
-                else => {},
-            }
-        }
-        return false;
+        return glob.hasWildcardsSIMD(text);
     }
 
     /// Extract suffix from a simple *.ext pattern
@@ -293,7 +287,7 @@ pub const GitIgnore = struct {
 
         const is_literal = !hasWildcards(text);
         const suffix = if (!anchored) extractSuffix(text) else null;
-        const has_slash = mem.indexOfScalar(u8, text, '/') != null;
+        const has_slash = glob.indexOfCharSIMD(text, '/') != null;
 
         // Pre-compute suffix values for fast matching
         var suffix_len: u8 = 0;
@@ -325,7 +319,7 @@ pub const GitIgnore = struct {
         // Fast path: skip ./ prefix if present (common case: no prefix)
         const normalized_path = if (path.len > 2 and path[0] == '.' and path[1] == '/') path[2..] else path;
 
-        const basename = if (mem.lastIndexOfScalar(u8, normalized_path, '/')) |pos|
+        const basename = if (glob.lastIndexOfCharSIMD(normalized_path, '/')) |pos|
             normalized_path[pos + 1 ..]
         else
             normalized_path;
@@ -343,7 +337,7 @@ pub const GitIgnore = struct {
                 }
             }
 
-            if (mem.lastIndexOfScalar(u8, basename, '.')) |dot_pos| {
+            if (glob.lastIndexOfCharSIMD(basename, '.')) |dot_pos| {
                 const suffix = basename[dot_pos..];
                 if (self.suffix_patterns.get(suffix)) |patterns| {
                     // Any matching suffix pattern means ignored (check dir_only constraint)
@@ -439,7 +433,7 @@ pub const GitIgnore = struct {
             return cached;
         }
 
-        const basename = if (mem.lastIndexOfScalar(u8, normalized_path, '/')) |pos|
+        const basename = if (glob.lastIndexOfCharSIMD(normalized_path, '/')) |pos|
             normalized_path[pos + 1 ..]
         else
             normalized_path;

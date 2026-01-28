@@ -177,16 +177,28 @@ pub const SimdBatchedSuffixMatch = struct {
         paths: []const []const u8,
         matches: *std.array_list.AlignedManaged([]const u8, null),
     ) !void {
-        for (paths) |path| {
-            const is_match = switch (self.simple_ext_len) {
-                1 => matchSuffixLen1(path, @truncate(self.suffix_u32)),
-                2 => matchSuffixLen2(path, self.suffix_u16),
-                3 => matchSuffixLen3(path, self.suffix_u16, self.suffix_byte),
-                4 => matchSuffixLen4(path, self.suffix_u32),
-                else => unreachable,
-            };
-            if (is_match) {
-                try matches.append(path);
+        const len = paths.len;
+        var i: usize = 0;
+
+        // Process 4 paths at a time for better instruction pipelining
+        // this unrolling how dumb it might be looking actualloy gives a measurable performance increase on x86_64
+        while (i + 4 <= len) : (i += 4) {
+            const m0 = self.matchSuffix(paths[i]);
+            const m1 = self.matchSuffix(paths[i + 1]);
+            const m2 = self.matchSuffix(paths[i + 2]);
+            const m3 = self.matchSuffix(paths[i + 3]);
+
+            // Batch appends to reduce branch mispredictions
+            if (m0) try matches.append(paths[i]);
+            if (m1) try matches.append(paths[i + 1]);
+            if (m2) try matches.append(paths[i + 2]);
+            if (m3) try matches.append(paths[i + 3]);
+        }
+
+        // Handle remainder
+        while (i < len) : (i += 1) {
+            if (self.matchSuffix(paths[i])) {
+                try matches.append(paths[i]);
             }
         }
     }
