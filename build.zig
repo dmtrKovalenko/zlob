@@ -293,6 +293,9 @@ pub fn build(b: *std.Build) void {
     // libc comparison run step
     const compare_libc_cmd = b.addRunArtifact(compare_libc);
     compare_libc_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        compare_libc_cmd.addArgs(args);
+    }
     const compare_libc_step = b.step("compare-libc", "Compare SIMD glob vs libc glob()");
     compare_libc_step.dependOn(&compare_libc_cmd.step);
 

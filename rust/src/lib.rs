@@ -147,19 +147,7 @@ mod flags;
 mod match_paths;
 mod zlob;
 
-pub use error::ZlobError;
-pub use flags::ZlobFlags;
-pub use match_paths::{zlob_match_paths, ZlobMatch, ZlobMatchIter};
-pub use zlob::{zlob, zlob_at, Zlob, ZlobIter};
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_public_api() {
-        // Test that all public items are accessible
-        let _flags = ZlobFlags::BRACE | ZlobFlags::NOSORT;
-        let _err = ZlobError::Aborted;
-    }
-}
+pub use error::*;
+pub use flags::*;
+pub use match_paths::*;
+pub use zlob::*;

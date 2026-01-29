@@ -1,5 +1,6 @@
 //! Error types for zlob operations.
 
+use crate::ffi;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,18 +31,12 @@ impl fmt::Display for ZlobError {
 impl std::error::Error for ZlobError {}
 
 impl ZlobError {
-    /// Converts a zlob error code to a ZlobError.
-    ///
-    /// Returns:
-    /// - `Ok(true)` for success with matches (code 0)
-    /// - `Ok(false)` for no matches (code 3 / ZLOB_NOMATCH)
-    /// - `Err(ZlobError)` for actual errors
     pub(crate) fn from_code(code: i32) -> Result<bool, Self> {
         match code {
-            0 => Ok(true),  // Success with matches
-            3 => Ok(false), // No matches (not an error)
-            1 => Err(ZlobError::NoSpace),
-            2 => Err(ZlobError::Aborted),
+            0 => Ok(true),                  // Success with matches
+            ffi::ZLOB_NOMATCH => Ok(false), // No matches (not an error)
+            ffi::ZLOB_NOSPACE => Err(ZlobError::NoSpace),
+            ffi::ZLOB_ABORTED => Err(ZlobError::Aborted),
             _ => Err(ZlobError::Aborted), // Unknown error treated as aborted
         }
     }

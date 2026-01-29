@@ -62,11 +62,11 @@ const _: () = {
 #[allow(non_camel_case_types)]
 pub type zlob_errfunc_t = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 
-#[allow(dead_code)]
+/// Error code: Out of memory
 pub const ZLOB_NOSPACE: c_int = 1;
-#[allow(dead_code)]
+/// Error code: Operation aborted or read error
 pub const ZLOB_ABORTED: c_int = 2;
-#[allow(dead_code)]
+/// Return code: No matches found (not an error)
 pub const ZLOB_NOMATCH: c_int = 3;
 
 extern "C" {

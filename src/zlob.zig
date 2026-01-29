@@ -2909,6 +2909,7 @@ pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
     while (pi < pattern.len) {
         const p = pattern[pi];
         if (p == '*' or p == '?' or p == '[') break;
+
         if (si >= string.len or string[si] != p) return false;
         pi += 1;
         si += 1;

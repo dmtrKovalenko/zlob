@@ -93,32 +93,6 @@ pub const SuffixMatch = struct {
     }
 };
 
-inline fn matchSuffixLen1(name: []const u8, suffix_byte: u8) bool {
-    if (name.len < 1) return false;
-    return name[name.len - 1] == suffix_byte;
-}
-
-inline fn matchSuffixLen2(name: []const u8, suffix_u16: u16) bool {
-    if (name.len < 2) return false;
-    const tail_ptr = name.ptr + name.len - 2;
-    const tail: u16 = @as(*align(1) const u16, @ptrCast(tail_ptr)).*;
-    return tail == suffix_u16;
-}
-
-inline fn matchSuffixLen3(name: []const u8, suffix_u16: u16, suffix_byte: u8) bool {
-    if (name.len < 3) return false;
-    const tail_ptr = name.ptr + name.len - 3;
-    const tail_u16: u16 = @as(*align(1) const u16, @ptrCast(tail_ptr)).*;
-    return tail_u16 == suffix_u16 and tail_ptr[2] == suffix_byte;
-}
-
-inline fn matchSuffixLen4(name: []const u8, suffix_u32: u32) bool {
-    if (name.len < 4) return false;
-    const tail_ptr = name.ptr + name.len - 4;
-    const tail: u32 = @as(*align(1) const u32, @ptrCast(tail_ptr)).*;
-    return tail == suffix_u32;
-}
-
 pub const SimdBatchedSuffixMatch = struct {
     simple_ext: []const u8, // The extension for *.ext patterns
     suffix_u32: u32, // Pre-computed u32 representation for SIMD

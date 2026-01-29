@@ -18,7 +18,16 @@ fn main() {
     }
 
     let target = env::var("TARGET").unwrap();
-    let zig_target = rust_target_to_zig(&target);
+    let host = env::var("HOST").unwrap();
+
+    // Use "native" for host builds to avoid archive format issues with rust-lld.
+    // When cross-compiling, Zig produces archives with SYM64 format that rust-lld
+    // cannot parse, but native builds produce compatible archives.
+    let zig_target = if target == host {
+        "native"
+    } else {
+        rust_target_to_zig(&target)
+    };
 
     let profile = env::var("PROFILE").unwrap();
     let optimize = match profile.as_str() {
@@ -39,6 +48,8 @@ fn main() {
         cmd.arg(format!("-Dtarget={}", zig_target));
     }
 
+    println!("cargo:warning=Running: {:?}", cmd);
+
     // print the output of the zig build
     let output = cmd.output().expect("Failed to run zig build");
     if !output.status.success() {
@@ -58,14 +69,6 @@ fn main() {
 
         println!("cargo:warning=Command: {:?}", cmd);
         panic!("zig build failed with status: {}", output.status);
-    }
-
-    let status = cmd.status().expect("Failed to run zig build");
-    if !status.success() {
-        panic!(
-            "zig build failed with status: {}\nCommand: {:?}",
-            status, cmd
-        );
     }
 
     // Link the static library

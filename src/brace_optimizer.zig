@@ -136,24 +136,6 @@ pub const BracedPattern = struct {
     }
 };
 
-pub fn hasNestedBraces(pattern: []const u8) bool {
-    var depth: usize = 0;
-    var i: usize = 0;
-    while (i < pattern.len) : (i += 1) {
-        if (pattern[i] == '\\' and i + 1 < pattern.len) {
-            i += 1;
-            continue;
-        }
-        if (pattern[i] == '{') {
-            depth += 1;
-            if (depth > 1) return true;
-        } else if (pattern[i] == '}') {
-            if (depth > 0) depth -= 1;
-        }
-    }
-    return false;
-}
-
 fn splitBraceContent(allocator: Allocator, content: []const u8) ![][]const u8 {
     var alternatives = std.array_list.AlignedManaged([]const u8, null).init(allocator);
     errdefer {
