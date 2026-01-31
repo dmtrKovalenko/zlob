@@ -1,0 +1,4 @@
+# Use gcc linker instead of rust-lld to avoid archive format issues with Zig
+# rust-lld has issues parsing archives with SYM64 format that Zig produces
+[target.x86_64-unknown-linux-gnu]
+linker = "gcc"

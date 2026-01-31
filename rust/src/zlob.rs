@@ -431,4 +431,70 @@ mod tests {
         // May be more if examples exist
         assert!(result.len() >= 8);
     }
+
+    #[test]
+    fn test_extglob_filesystem_negation() {
+        use std::fs::{self, File};
+        use tempfile::tempdir;
+
+        // Create temp directory with test files
+        let dir = tempdir().unwrap();
+        let dir_path = dir.path();
+
+        // Create test files: app.js, app.ts, app.css, app.html
+        File::create(dir_path.join("app.js")).unwrap();
+        File::create(dir_path.join("app.ts")).unwrap();
+        File::create(dir_path.join("app.css")).unwrap();
+        File::create(dir_path.join("app.html")).unwrap();
+
+        // Test !(js|ts) - should match app.css and app.html but NOT app.js or app.ts
+        let pattern = dir_path.join("app.!(js|ts)");
+        let pattern_str = pattern.to_str().unwrap();
+
+        let result = zlob(pattern_str, ZlobFlags::EXTGLOB).unwrap().unwrap();
+
+        assert_eq!(result.len(), 2);
+        let paths: Vec<&str> = result.iter().collect();
+
+        // Should contain css and html
+        assert!(paths.iter().any(|p| p.ends_with("app.css")));
+        assert!(paths.iter().any(|p| p.ends_with("app.html")));
+
+        // Should NOT contain js or ts
+        assert!(!paths.iter().any(|p| p.ends_with("app.js")));
+        assert!(!paths.iter().any(|p| p.ends_with("app.ts")));
+    }
+
+    #[test]
+    fn test_extglob_filesystem_exactly_one() {
+        use std::fs::File;
+        use tempfile::tempdir;
+
+        // Create temp directory with test files
+        let dir = tempdir().unwrap();
+        let dir_path = dir.path();
+
+        // Create test files: foo.txt, bar.txt, baz.txt, qux.txt
+        File::create(dir_path.join("foo.txt")).unwrap();
+        File::create(dir_path.join("bar.txt")).unwrap();
+        File::create(dir_path.join("baz.txt")).unwrap();
+        File::create(dir_path.join("qux.txt")).unwrap();
+
+        // Test @(foo|bar).txt - should match exactly foo.txt and bar.txt
+        let pattern = dir_path.join("@(foo|bar).txt");
+        let pattern_str = pattern.to_str().unwrap();
+
+        let result = zlob(pattern_str, ZlobFlags::EXTGLOB).unwrap().unwrap();
+
+        assert_eq!(result.len(), 2);
+        let paths: Vec<&str> = result.iter().collect();
+
+        // Should contain foo.txt and bar.txt
+        assert!(paths.iter().any(|p| p.ends_with("foo.txt")));
+        assert!(paths.iter().any(|p| p.ends_with("bar.txt")));
+
+        // Should NOT contain baz.txt or qux.txt
+        assert!(!paths.iter().any(|p| p.ends_with("baz.txt")));
+        assert!(!paths.iter().any(|p| p.ends_with("qux.txt")));
+    }
 }

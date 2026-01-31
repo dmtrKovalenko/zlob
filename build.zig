@@ -39,6 +39,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
     });
+    // Add include path for C header imports (flags.zig uses @cImport)
+    zlob_core_mod.addIncludePath(b.path("include"));
 
     // Main zlob module (public API via lib.zig)
     const mod = b.addModule("zlob", .{
@@ -65,6 +67,16 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "zlob", .module = zlob_core_mod },
+        },
+    });
+
+    // Test utilities module (shared helpers for tests)
+    const test_utils_mod = b.addModule("test_utils", .{
+        .root_source_file = b.path("test/test_utils.zig"),
+        .target = target,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zlob", .module = mod },
         },
     });
 
@@ -198,24 +210,32 @@ pub fn build(b: *std.Build) void {
         "test/test_path_matcher.zig",
         "test/test_errfunc.zig",
         "test/test_gitignore.zig",
+        "test/test_extglob.zig",
+        "test/test_utils.zig",
         // files with inline tests
         "src/brace_optimizer.zig",
         "src/gitignore.zig",
+        "src/extglob.zig",
     };
 
     for (test_files) |test_file| {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path(test_file),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zlob", .module = mod },
+                .{ .name = "zlob_core", .module = zlob_core_mod },
+                .{ .name = "c_lib", .module = c_lib_mod },
+                .{ .name = "test_utils", .module = test_utils_mod },
+            },
+        });
+        // Add include path for C header imports (flags.zig uses @cImport)
+        test_mod.addIncludePath(b.path("include"));
+
         const test_exe = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(test_file),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-                .imports = &.{
-                    .{ .name = "zlob", .module = mod },
-                    .{ .name = "zlob_core", .module = zlob_core_mod },
-                    .{ .name = "c_lib", .module = c_lib_mod },
-                },
-            }),
+            .root_module = test_mod,
         });
         const run_test = b.addRunArtifact(test_exe);
         test_step.dependOn(&run_test.step);

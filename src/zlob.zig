@@ -3,6 +3,7 @@ const suffix_match = @import("suffix_match.zig");
 const brace_optimizer = @import("brace_optimizer.zig");
 const pattern_context_mod = @import("pattern_context.zig");
 const flags_mod = @import("flags.zig");
+const extglob = @import("extglob.zig");
 const c = std.c;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
@@ -11,6 +12,7 @@ pub const PatternContext = pattern_context_mod.PatternContext;
 pub const hasWildcardsSIMD = pattern_context_mod.hasWildcardsSIMD;
 pub const indexOfCharSIMD = pattern_context_mod.indexOfCharSIMD;
 pub const lastIndexOfCharSIMD = pattern_context_mod.lastIndexOfCharSIMD;
+pub const containsExtglob = extglob.containsExtglob;
 pub const gitignore = @import("gitignore.zig");
 pub const GitIgnore = gitignore.GitIgnore;
 
@@ -201,6 +203,7 @@ pub const ZLOB_ONLYDIR = flags_mod.ZLOB_ONLYDIR;
 pub const ZLOB_TILDE_CHECK = flags_mod.ZLOB_TILDE_CHECK;
 pub const ZLOB_GITIGNORE = flags_mod.ZLOB_GITIGNORE;
 pub const ZLOB_DOUBLESTAR_RECURSIVE = flags_mod.ZLOB_DOUBLESTAR_RECURSIVE;
+pub const ZLOB_EXTGLOB = flags_mod.ZLOB_EXTGLOB;
 pub const ZLOB_RECOMMENDED = flags_mod.ZLOB_RECOMMENDED;
 pub const ZLOB_FLAGS_SHARED_STRINGS = flags_mod.ZLOB_FLAGS_SHARED_STRINGS;
 pub const ZLOB_FLAGS_OWNS_STRINGS = flags_mod.ZLOB_FLAGS_OWNS_STRINGS;
@@ -271,6 +274,15 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
             in_bracket = false;
         }
 
+        // Check for extglob patterns: ?(...) *(...) +(...) @(...) !(...)
+        // When extglob flag is set, these act as wildcards
+        if (flags.extglob and i + 1 < pattern.len and pattern[i + 1] == '(') {
+            switch (ch) {
+                '?', '*', '+', '@', '!' => break, // Extglob pattern found - stop here
+                else => {},
+            }
+        }
+
         if (ch == '*' or ch == '?') {
             if (ch == '*' and i + 1 < pattern.len and pattern[i + 1] == '*') {
                 // Only enable recursive behavior if ZLOB_DOUBLESTAR_RECURSIVE is set
@@ -308,7 +320,7 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
     if (info.wildcard_suffix.len > 0) {
         if (mem.lastIndexOf(u8, info.wildcard_suffix, "/")) |pos| {
             const dir_part = info.wildcard_suffix[0..pos];
-            info.has_dir_wildcards = hasWildcardsSIMD(dir_part);
+            info.has_dir_wildcards = pattern_context_mod.hasWildcardsOrExtglob(dir_part, flags.extglob);
         }
     }
 
@@ -344,6 +356,54 @@ inline fn matchWithAlternatives(name: []const u8, alternatives: []const []const 
             if (batched.matchSuffix(name)) return true;
         } else if (fnmatchWithContext(&ctx, name)) {
             return true;
+        }
+    }
+    return false;
+}
+
+/// Match a name against a pattern with extglob support
+/// Uses extglob matching if enable_extglob is true and pattern contains extglob syntax
+inline fn matchWithExtglobSupport(name: []const u8, pattern: []const u8, ctx: *const PatternContext, enable_extglob: bool) bool {
+    if (enable_extglob and extglob.containsExtglob(pattern)) {
+        initExtglob();
+        return extglob.fnmatchExtglob(pattern, name);
+    }
+    if (ctx.simd_batched_suffix_match) |batched| {
+        return batched.matchSuffix(name);
+    }
+    return fnmatchWithContext(ctx, name);
+}
+
+/// Match a name against multiple alternative patterns with extglob support
+inline fn matchWithAlternativesExtglob(name: []const u8, alternatives: []const []const u8, enable_extglob: bool) bool {
+    for (alternatives) |alt| {
+        if (enable_extglob and extglob.containsExtglob(alt)) {
+            initExtglob();
+            if (extglob.fnmatchExtglob(alt, name)) return true;
+        } else {
+            const ctx = PatternContext.init(alt);
+            if (ctx.simd_batched_suffix_match) |batched| {
+                if (batched.matchSuffix(name)) return true;
+            } else if (fnmatchWithContext(&ctx, name)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Match with precomputed contexts, with extglob support
+inline fn matchWithAlternativesPrecomputedExtglob(name: []const u8, patterns: []const []const u8, contexts: []const PatternContext, enable_extglob: bool) bool {
+    for (patterns, contexts) |pat, *ctx| {
+        if (enable_extglob and extglob.containsExtglob(pat)) {
+            initExtglob();
+            if (extglob.fnmatchExtglob(pat, name)) return true;
+        } else {
+            if (ctx.simd_batched_suffix_match) |*batched| {
+                if (batched.matchSuffix(name)) return true;
+            } else if (fnmatchWithContext(ctx, name)) {
+                return true;
+            }
         }
     }
     return false;
@@ -823,9 +883,12 @@ fn expandWildcardComponents(
     const is_final = component_idx == components.len - 1;
 
     const component_ctx = PatternContext.init(component);
+    const enable_extglob = flags.extglob;
+    const has_extglob_pattern = enable_extglob and extglob.containsExtglob(component);
+    const needs_wildcard_matching = component_ctx.has_wildcards or has_extglob_pattern;
 
-    if (component_ctx.has_wildcards) {
-        // Wildcard component - match against directory entries
+    if (needs_wildcard_matching) {
+        // Wildcard or extglob component - match against directory entries
         // If base_dir is provided, use Zig's fs; otherwise use C's opendir
         if (base_dir) |bd| {
             var dir = bd.openDir(current_dir, .{ .iterate = true }) catch {
@@ -840,7 +903,10 @@ fn expandWildcardComponents(
                 if (!is_final and entry.kind != .directory) continue;
                 if (shouldSkipFile(name, &component_ctx, flags)) continue;
 
-                const matches = if (is_final and component_ctx.simd_batched_suffix_match != null)
+                const matches = if (has_extglob_pattern) blk: {
+                    initExtglob();
+                    break :blk extglob.fnmatchExtglob(component, name);
+                } else if (is_final and component_ctx.simd_batched_suffix_match != null)
                     component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
                 else
                     fnmatchWithContext(&component_ctx, name);
@@ -881,7 +947,10 @@ fn expandWildcardComponents(
                 if (!is_final and entry.type != DT_DIR) continue;
                 if (shouldSkipFile(name, &component_ctx, flags)) continue;
 
-                const matches = if (is_final and component_ctx.simd_batched_suffix_match != null)
+                const matches = if (has_extglob_pattern) blk: {
+                    initExtglob();
+                    break :blk extglob.fnmatchExtglob(component, name);
+                } else if (is_final and component_ctx.simd_batched_suffix_match != null)
                     component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
                 else
                     fnmatchWithContext(&component_ctx, name);
@@ -941,9 +1010,11 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     // This is the most common case and libc glob optimizes it to a single stat() call
     // NOTE: Skip if pattern starts with tilde (needs tilde expansion first)
     // NOTE: Skip if we have brace alternatives - they need to be expanded
+    // NOTE: Skip if extglob is enabled and pattern contains extglob syntax
     const needs_tilde_expansion = effective_pattern.len > 0 and effective_pattern[0] == '~';
     const has_brace_alternatives = brace_parsed != null;
-    if (!hasWildcardsSIMD(effective_pattern) and !needs_tilde_expansion and !has_brace_alternatives) {
+    const has_extglob_pattern = flags.extglob and extglob.containsExtglob(effective_pattern);
+    if (!hasWildcardsSIMD(effective_pattern) and !needs_tilde_expansion and !has_brace_alternatives and !has_extglob_pattern) {
         // Check gitignore for literal path
         if (gitignore_filter) |gi| {
             const root = base_dir orelse std.fs.cwd();
@@ -1003,7 +1074,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
             }
 
             if (has_dir_alternatives or (has_file_alternatives and has_dir_wildcards)) {
-                return globWithBracedComponents(allocator, parsed, flags, errfunc, pzlob, info.directories_only, gitignore_filter, base_dir);
+                return globWithBracedComponents(allocator, parsed, &info, flags, errfunc, pzlob, info.directories_only, gitignore_filter, base_dir);
             }
         }
     }
@@ -1065,11 +1136,17 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
 
     var has_wildcard_in_dir = false;
     if (last_slash_pos > 0) {
-        for (effective_pattern[0..last_slash_pos]) |ch| {
+        const dir_part = effective_pattern[0..last_slash_pos];
+        // Check for traditional wildcards
+        for (dir_part) |ch| {
             if (ch == '*' or ch == '?' or ch == '[') {
                 has_wildcard_in_dir = true;
                 break;
             }
+        }
+        // Also check for extglob patterns when extglob is enabled
+        if (!has_wildcard_in_dir and flags.extglob and extglob.containsExtglob(dir_part)) {
+            has_wildcard_in_dir = true;
         }
     }
 
@@ -1599,6 +1676,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
 fn globWithBracedComponents(
     allocator: std.mem.Allocator,
     parsed: *const brace_optimizer.BracedPattern,
+    info: *const PatternInfo,
     flags: ZlobFlags,
     errfunc: zlob_errfunc_t,
     pzlob: *zlob_t,
@@ -1612,10 +1690,73 @@ fn globWithBracedComponents(
     defer all_results.deinit();
     all_results.ensureTotalCapacity(256) catch {};
 
-    // Convert BracedComponent to ComponentMatch format
+    // Find the literal prefix - components without wildcards or braces
+    var literal_prefix_end: usize = 0;
+    for (parsed.components, 0..) |comp, i| {
+        // Stop if we find wildcards or braces
+        if (comp.alternatives != null) break;
+        var has_wildcard = false;
+        for (comp.text) |ch| {
+            if (ch == '*' or ch == '?' or ch == '[') {
+                has_wildcard = true;
+                break;
+            }
+        }
+        // Also check for extglob patterns if extglob is enabled
+        if (flags.extglob and extglob.containsExtglob(comp.text)) {
+            has_wildcard = true;
+        }
+        if (has_wildcard) break;
+        literal_prefix_end = i + 1;
+    }
+
+    // Build start directory from literal prefix components
+    var start_dir_buf: [4096]u8 = undefined;
+    var start_dir: []const u8 = ".";
+    var start_component_idx: usize = 0;
+
+    if (literal_prefix_end > 0) {
+        var path_len: usize = 0;
+
+        // For absolute paths, start with "/"
+        if (info.is_absolute) {
+            start_dir_buf[0] = '/';
+            path_len = 1;
+        }
+
+        for (parsed.components[0..literal_prefix_end], 0..) |comp, i| {
+            if (i > 0 or (i == 0 and info.is_absolute)) {
+                if (path_len > 1 or (path_len == 1 and !info.is_absolute)) {
+                    start_dir_buf[path_len] = '/';
+                    path_len += 1;
+                }
+            }
+            @memcpy(start_dir_buf[path_len..][0..comp.text.len], comp.text);
+            path_len += comp.text.len;
+        }
+        start_dir = start_dir_buf[0..path_len];
+        start_component_idx = literal_prefix_end;
+    } else if (info.is_absolute) {
+        // No literal prefix but absolute path - start from "/"
+        start_dir = "/";
+    }
+
+    // If there are no wildcard/brace components left, just check if the path exists
+    if (start_component_idx >= parsed.components.len) {
+        // No wildcard components - just verify path exists and add it
+        const root = base_dir orelse std.fs.cwd();
+        _ = root.statFile(start_dir) catch return null;
+        const path_copy = try allocator.allocSentinel(u8, start_dir.len, 0);
+        @memcpy(path_copy[0..start_dir.len], start_dir);
+        try all_results.append(@ptrCast(path_copy.ptr));
+        return finalizeResults(allocator, &all_results, flags, pzlob);
+    }
+
+    // Convert remaining BracedComponents to ComponentMatcher format
+    const remaining_components = parsed.components[start_component_idx..];
     var matchers: [32]ComponentMatcher = undefined;
-    const matcher_count = @min(parsed.components.len, 32);
-    for (parsed.components[0..matcher_count], 0..) |comp, i| {
+    const matcher_count = @min(remaining_components.len, 32);
+    for (remaining_components[0..matcher_count], 0..) |comp, i| {
         matchers[i] = ComponentMatcher.fromBracedComponent(&comp);
     }
 
@@ -1623,7 +1764,7 @@ fn globWithBracedComponents(
         allocator,
         matchers[0..matcher_count],
         0,
-        ".",
+        start_dir,
         flags,
         &all_results,
         directories_only,
@@ -1669,8 +1810,18 @@ const ComponentMatcher = struct {
 
     /// Check if name matches this component
     fn matches(self: *const ComponentMatcher, name: []const u8) bool {
+        return self.matchesWithFlags(name, false);
+    }
+
+    /// Check if name matches this component with extglob support
+    fn matchesWithFlags(self: *const ComponentMatcher, name: []const u8, enable_extglob: bool) bool {
         if (self.alternatives) |alts| {
-            return matchWithAlternatives(name, alts);
+            return matchWithAlternativesExtglob(name, alts, enable_extglob);
+        }
+        // Check for extglob pattern
+        if (enable_extglob and extglob.containsExtglob(self.text)) {
+            initExtglob();
+            return extglob.fnmatchExtglob(self.text, name);
         }
         const ctx = PatternContext.init(self.text);
         return fnmatchWithContext(&ctx, name);
@@ -1742,7 +1893,7 @@ fn walkBracedComponents(
         if (shouldSkipEntry(entry.name, is_hidden_ok)) continue;
         if (!is_final and entry.kind != .directory) continue;
 
-        if (matcher.matches(entry.name)) {
+        if (matcher.matchesWithFlags(entry.name, flags.extglob)) {
             if (is_final and directories_only and entry.kind != .directory) continue;
 
             var path_buf: [4096]u8 = undefined;
@@ -1825,7 +1976,7 @@ fn globRecursiveWithBracedPrefix(
         if (shouldSkipEntry(entry.name, is_hidden_ok)) continue;
         if (entry.kind != .directory) continue;
 
-        if (matcher.matches(entry.name)) {
+        if (matcher.matchesWithFlags(entry.name, flags.extglob)) {
             var path_buf: [4096]u8 = undefined;
             const subdir = buildPathInBuffer(&path_buf, current_dir, entry.name);
             if (subdir.len >= 4096) continue;
@@ -2004,11 +2155,19 @@ inline fn globRecursiveWithZigWalk(
 
                 // Match against file pattern (with alternatives if present)
                 // KEY OPTIMIZATION: Use pre-computed pattern contexts to avoid redundant PatternContext.init() calls
-                const matches = if (rec_pattern.file_pattern_contexts) |contexts|
-                    matchWithAlternativesPrecomputed(entry.basename, contexts)
-                else if (rec_pattern.file_alternatives) |alts|
-                    matchWithAlternatives(entry.basename, alts)
-                else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+                const enable_extglob = flags.extglob;
+                const matches = if (rec_pattern.file_pattern_contexts) |contexts| blk: {
+                    // When extglob is enabled and we have alternatives, check each one
+                    if (enable_extglob and rec_pattern.file_alternatives != null) {
+                        break :blk matchWithAlternativesPrecomputedExtglob(entry.basename, rec_pattern.file_alternatives.?, contexts, true);
+                    }
+                    break :blk matchWithAlternativesPrecomputed(entry.basename, contexts);
+                } else if (rec_pattern.file_alternatives) |alts|
+                    matchWithAlternativesExtglob(entry.basename, alts, enable_extglob)
+                else if (enable_extglob and extglob.containsExtglob(rec_pattern.file_pattern)) blk: {
+                    initExtglob();
+                    break :blk extglob.fnmatchExtglob(rec_pattern.file_pattern, entry.basename);
+                } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
                     batched_suffix_match.matchSuffix(entry.basename)
                 else
                     fnmatchWithContext(&pattern_ctx, entry.basename);
@@ -2105,11 +2264,18 @@ fn walkWithGitignore(
             if (shouldSkipFile(name, pattern_ctx, flags)) continue;
 
             // Match against file pattern
-            const matches = if (rec_pattern.file_pattern_contexts) |contexts|
-                matchWithAlternativesPrecomputed(name, contexts)
-            else if (rec_pattern.file_alternatives) |alts|
-                matchWithAlternatives(name, alts)
-            else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+            const enable_extglob = flags.extglob;
+            const matches = if (rec_pattern.file_pattern_contexts) |contexts| blk: {
+                if (enable_extglob and rec_pattern.file_alternatives != null) {
+                    break :blk matchWithAlternativesPrecomputedExtglob(name, rec_pattern.file_alternatives.?, contexts, true);
+                }
+                break :blk matchWithAlternativesPrecomputed(name, contexts);
+            } else if (rec_pattern.file_alternatives) |alts|
+                matchWithAlternativesExtglob(name, alts, enable_extglob)
+            else if (enable_extglob and extglob.containsExtglob(rec_pattern.file_pattern)) blk: {
+                initExtglob();
+                break :blk extglob.fnmatchExtglob(rec_pattern.file_pattern, name);
+            } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
                 batched_suffix_match.matchSuffix(name)
             else
                 fnmatchWithContext(pattern_ctx, name);
@@ -2199,9 +2365,15 @@ fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const 
                     const has_alternatives = rec_pattern.dir_component_alternatives != null and
                         rec_pattern.dir_component_alternatives.?[0] != null;
 
+                    const enable_extglob = flags.extglob;
+                    const has_extglob_pattern = enable_extglob and extglob.containsExtglob(next_component);
+
                     const matches_component = if (has_alternatives)
                         matchWithAlternatives(name, rec_pattern.dir_component_alternatives.?[0].?)
-                    else blk: {
+                    else if (has_extglob_pattern) blk: {
+                        initExtglob();
+                        break :blk extglob.fnmatchExtglob(next_component, name);
+                    } else blk: {
                         const component_ctx = PatternContext.init(next_component);
                         break :blk fnmatchWithContext(&component_ctx, name);
                     };
@@ -2292,20 +2464,30 @@ fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const 
                 const has_alternatives = rec_pattern.dir_component_alternatives != null and
                     rec_pattern.dir_component_alternatives.?[0] != null;
 
+                const enable_extglob = flags.extglob;
+                const has_extglob_pattern = enable_extglob and extglob.containsExtglob(next_component);
+
                 const matches_component = if (has_alternatives)
                     matchWithAlternatives(name, rec_pattern.dir_component_alternatives.?[0].?)
-                else blk: {
+                else if (has_extglob_pattern) blk: {
+                    initExtglob();
+                    break :blk extglob.fnmatchExtglob(next_component, name);
+                } else blk: {
                     const component_ctx = PatternContext.init(next_component);
                     break :blk fnmatchWithContext(&component_ctx, name);
                 };
 
-                if (!matches_component) continue;
-
-                next_rec_pattern.dir_components = rec_pattern.dir_components[1..];
-                // Also advance alternatives if present
-                if (rec_pattern.dir_component_alternatives) |alts| {
-                    next_rec_pattern.dir_component_alternatives = if (alts.len > 1) alts[1..] else null;
+                // If matches, consume the dir component for next recursion
+                // But ALWAYS recurse into directories to support ** behavior
+                if (matches_component) {
+                    next_rec_pattern.dir_components = rec_pattern.dir_components[1..];
+                    // Also advance alternatives if present
+                    if (rec_pattern.dir_component_alternatives) |alts| {
+                        next_rec_pattern.dir_component_alternatives = if (alts.len > 1) alts[1..] else null;
+                    }
                 }
+                // Note: we removed the "if (!matches_component) continue;" to allow
+                // recursion into non-matching directories for ** glob behavior
             }
 
             var subdir_buf: [4096]u8 = undefined;
@@ -2353,11 +2535,18 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
             const name = entry.name;
             if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
 
-            const matches = if (file_pattern_contexts) |contexts|
-                matchWithAlternativesPrecomputed(name, contexts)
-            else if (file_alternatives) |alts|
-                matchWithAlternatives(name, alts)
-            else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+            const enable_extglob = flags.extglob;
+            const matches = if (file_pattern_contexts) |contexts| blk: {
+                if (enable_extglob and file_alternatives != null) {
+                    break :blk matchWithAlternativesPrecomputedExtglob(name, file_alternatives.?, contexts, true);
+                }
+                break :blk matchWithAlternativesPrecomputed(name, contexts);
+            } else if (file_alternatives) |alts|
+                matchWithAlternativesExtglob(name, alts, enable_extglob)
+            else if (enable_extglob and extglob.containsExtglob(pattern)) blk: {
+                initExtglob();
+                break :blk extglob.fnmatchExtglob(pattern, name);
+            } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
                 batched_suffix_match.matchSuffix(name)
             else
                 fnmatchWithContext(&pattern_ctx, name);
@@ -2427,11 +2616,18 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
 
         // Match against file pattern (with alternatives if present)
         // KEY OPTIMIZATION: Use pre-computed pattern contexts to avoid redundant PatternContext.init() calls
-        const matches = if (file_pattern_contexts) |contexts|
-            matchWithAlternativesPrecomputed(name, contexts)
-        else if (file_alternatives) |alts|
-            matchWithAlternatives(name, alts)
-        else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+        const enable_extglob_c = flags.extglob;
+        const matches = if (file_pattern_contexts) |contexts| blk: {
+            if (enable_extglob_c and file_alternatives != null) {
+                break :blk matchWithAlternativesPrecomputedExtglob(name, file_alternatives.?, contexts, true);
+            }
+            break :blk matchWithAlternativesPrecomputed(name, contexts);
+        } else if (file_alternatives) |alts|
+            matchWithAlternativesExtglob(name, alts, enable_extglob_c)
+        else if (enable_extglob_c and extglob.containsExtglob(pattern)) blk: {
+            initExtglob();
+            break :blk extglob.fnmatchExtglob(pattern, name);
+        } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
             batched_suffix_match.matchSuffix(name)
         else
             fnmatchWithContext(&pattern_ctx, name);
@@ -2563,8 +2759,20 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         break :blk null;
     } else null;
 
+    // Get raw pattern alternatives for extglob matching
+    const file_pattern_alts: ?[][]const u8 = if (brace_parsed) |bp| blk: {
+        if (bp.components.len > 0) {
+            const last_comp = bp.components[bp.components.len - 1];
+            if (last_comp.is_last and last_comp.alternatives != null) {
+                break :blk last_comp.alternatives;
+            }
+        }
+        break :blk null;
+    } else null;
+
     const pattern_ctx = PatternContext.init(pattern);
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
+    const enable_extglob = flags.extglob;
 
     // If base_dir is provided, use Zig's fs; otherwise use C's opendir for performance
     if (base_dir) |bd| {
@@ -2583,6 +2791,20 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
             if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
 
             const matches = if (file_alternatives) |alts| blk: {
+                // Check if we should use extglob matching
+                if (enable_extglob and file_pattern_alts != null) {
+                    for (file_pattern_alts.?, alts) |raw_pat, alt_ctx| {
+                        if (extglob.containsExtglob(raw_pat)) {
+                            initExtglob();
+                            if (extglob.fnmatchExtglob(raw_pat, name)) break :blk true;
+                        } else if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
+                            if (batched_suffix_match.matchSuffix(name)) break :blk true;
+                        } else if (fnmatchWithContext(&alt_ctx, name)) {
+                            break :blk true;
+                        }
+                    }
+                    break :blk false;
+                }
                 for (alts) |alt_ctx| {
                     if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
                         if (batched_suffix_match.matchSuffix(name)) break :blk true;
@@ -2591,6 +2813,9 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
                     }
                 }
                 break :blk false;
+            } else if (enable_extglob and extglob.containsExtglob(pattern)) blk: {
+                initExtglob();
+                break :blk extglob.fnmatchExtglob(pattern, name);
             } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
                 batched_suffix_match.matchSuffix(name)
             else
@@ -2653,7 +2878,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         if (flags.err) {
             return error.Aborted;
         }
-        // Otherwise, silently skip this directory and return no matches
+        // Otherwise, return null to indicate no matches
         return null;
     };
     defer _ = c.closedir(dir);
@@ -2668,6 +2893,20 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
 
         // Match using brace alternatives if available, otherwise use single pattern
         const matches = if (file_alternatives) |alts| blk: {
+            // Check if we should use extglob matching
+            if (enable_extglob and file_pattern_alts != null) {
+                for (file_pattern_alts.?, alts) |raw_pat, alt_ctx| {
+                    if (extglob.containsExtglob(raw_pat)) {
+                        initExtglob();
+                        if (extglob.fnmatchExtglob(raw_pat, name)) break :blk true;
+                    } else if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
+                        if (batched_suffix_match.matchSuffix(name)) break :blk true;
+                    } else if (fnmatchWithContext(&alt_ctx, name)) {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            }
             // Try each alternative pattern
             for (alts) |alt_ctx| {
                 if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
@@ -2677,6 +2916,9 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
                 }
             }
             break :blk false;
+        } else if (enable_extglob and extglob.containsExtglob(pattern)) blk: {
+            initExtglob();
+            break :blk extglob.fnmatchExtglob(pattern, name);
         } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
             batched_suffix_match.matchSuffix(name)
         else
@@ -2990,6 +3232,23 @@ pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
     }
 
     return si == string.len;
+}
+
+/// Initialize extglob module with fnmatchFull function pointer
+/// This must be called before using extglob functionality
+fn initExtglob() void {
+    extglob.initFnmatch(&fnmatchFull);
+}
+
+/// fnmatch with extglob support - use this when ZLOB_EXTGLOB flag is set
+/// If extglob is disabled or pattern doesn't contain extglob syntax, falls back to fnmatchFull
+pub fn fnmatchWithExtglob(pattern: []const u8, string: []const u8, enable_extglob: bool) bool {
+    if (enable_extglob and extglob.containsExtglob(pattern)) {
+        // Ensure extglob module is initialized
+        initExtglob();
+        return extglob.fnmatchExtglob(pattern, string);
+    }
+    return fnmatchFull(pattern, string);
 }
 
 /// Fast bracket expression matching using branchless techniques

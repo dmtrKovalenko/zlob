@@ -111,8 +111,30 @@ typedef struct {
 #define ZLOB_TILDE_CHECK                                                       \
   (1 << 14) /* 0x4000 - Like ZLOB_TILDE but return error if user name not      \
                available */
-#define ZLOB_GITIGNORE                                                         \
-  (1 << 15) /* 0x8000 - Respect .gitignore files (zlob extension) */
+
+/* ============================================================================
+ * zlob extensions (bits 24+)
+ * NOTE: Bits 15-23 are reserved for potential future glibc extensions.
+ * glibc currently uses bits 0-14. We leave a 9-bit gap to avoid conflicts.
+ * ============================================================================
+ */
+#define ZLOB_GITIGNORE (1 << 24) /* Filter results using .gitignore from cwd */
+#define ZLOB_DOUBLESTAR_RECURSIVE                                              \
+  (1 << 25) /* Enable ** recursive directory matching */
+#define ZLOB_EXTGLOB                                                           \
+  (1 << 26) /* Enable extended glob patterns: ?(pat) *(pat) +(pat) @(pat)      \
+               !(pat) */
+
+/* Recommended modern defaults for globbing:
+ * - BRACE: Brace expansion {a,b,c}
+ * - DOUBLESTAR_RECURSIVE: Recursive ** patterns
+ * - NOSORT: Skip sorting for performance
+ * - TILDE: Home directory expansion ~
+ * - TILDE_CHECK: Error if ~user not found
+ */
+#define ZLOB_RECOMMENDED                                                       \
+  (ZLOB_BRACE | ZLOB_DOUBLESTAR_RECURSIVE | ZLOB_NOSORT | ZLOB_TILDE |         \
+   ZLOB_TILDE_CHECK)
 
 /* Error codes returned by glob() */
 #define ZLOB_NOSPACE 1 /* Out of memory */

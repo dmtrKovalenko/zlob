@@ -394,3 +394,27 @@ pub fn hasWildcardsSIMD(s: []const u8) bool {
     }
     return false;
 }
+
+/// Check if pattern contains extglob sequences: ?( *( +( @( !(
+/// These are two-character sequences where the second char is '('
+pub fn containsExtglob(s: []const u8) bool {
+    if (s.len < 2) return false;
+
+    var i: usize = 0;
+    while (i + 1 < s.len) : (i += 1) {
+        if (s[i + 1] == '(') {
+            switch (s[i]) {
+                '?', '*', '+', '@', '!' => return true,
+                else => {},
+            }
+        }
+    }
+    return false;
+}
+
+/// Check if pattern has wildcards or extglob patterns (when extglob is enabled)
+pub fn hasWildcardsOrExtglob(s: []const u8, check_extglob: bool) bool {
+    if (hasWildcardsSIMD(s)) return true;
+    if (check_extglob and containsExtglob(s)) return true;
+    return false;
+}

@@ -399,4 +399,36 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(&matches[0], "foo.rs");
     }
+
+    #[test]
+    fn test_match_paths_extglob_negation() {
+        // Test !(pattern) - matches anything except the pattern
+        let paths = ["app.js", "app.ts", "app.css", "app.html"];
+        let matches = zlob_match_paths("app.!(js|ts)", &paths, ZlobFlags::EXTGLOB)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(matches.len(), 2);
+        let results: Vec<&str> = matches.iter().collect();
+        assert!(results.contains(&"app.css"));
+        assert!(results.contains(&"app.html"));
+        // Should NOT contain js or ts
+        assert!(!results.contains(&"app.js"));
+        assert!(!results.contains(&"app.ts"));
+    }
+
+    #[test]
+    fn test_match_paths_extglob_exactly_one() {
+        // Test @(pattern) - matches exactly one of the alternatives
+        let paths = ["foo.txt", "bar.txt", "baz.txt", "qux.txt"];
+        let matches = zlob_match_paths("@(foo|bar).txt", &paths, ZlobFlags::EXTGLOB)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(matches.len(), 2);
+        let results: Vec<&str> = matches.iter().collect();
+        assert!(results.contains(&"foo.txt"));
+        assert!(results.contains(&"bar.txt"));
+        assert!(!results.contains(&"baz.txt"));
+    }
 }

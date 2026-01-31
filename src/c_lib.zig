@@ -43,6 +43,7 @@ pub const ZLOB_TILDE_CHECK = zlob_impl.ZLOB_TILDE_CHECK;
 // zlob extensions
 pub const ZLOB_GITIGNORE = zlob_impl.ZLOB_GITIGNORE;
 pub const ZLOB_DOUBLESTAR_RECURSIVE = zlob_impl.ZLOB_DOUBLESTAR_RECURSIVE;
+pub const ZLOB_EXTGLOB = zlob_impl.ZLOB_EXTGLOB;
 pub const ZLOB_RECOMMENDED = zlob_impl.ZLOB_RECOMMENDED;
 
 // Error codes

@@ -14,6 +14,8 @@ const indexOfCharSIMD = glob.indexOfCharSIMD;
 const lastIndexOfCharSIMD = glob.lastIndexOfCharSIMD;
 const PatternContext = glob.PatternContext;
 const fnmatchWithContext = glob.fnmatchWithContext;
+const fnmatchWithExtglob = glob.fnmatchWithExtglob;
+const containsExtglob = glob.containsExtglob;
 
 // Re-export types and flags
 pub const GlobResults = glob.GlobResults;
@@ -22,6 +24,7 @@ pub const ZLOB_PERIOD = glob.ZLOB_PERIOD;
 pub const ZLOB_NOCHECK = glob.ZLOB_NOCHECK;
 pub const ZLOB_NOESCAPE = glob.ZLOB_NOESCAPE;
 pub const ZLOB_BRACE = glob.ZLOB_BRACE;
+pub const ZLOB_EXTGLOB = glob.ZLOB_EXTGLOB;
 
 const PatternSegments = struct {
     segments: [][]const u8,
@@ -250,7 +253,9 @@ pub fn extractSuffixFromPattern(pattern: []const u8) struct { suffix: ?[]const u
 
     const after_star = last_component[1..];
 
+    // Check for wildcards OR extglob patterns
     if (hasWildcardsSIMD(after_star)) return .{ .suffix = null };
+    if (containsExtglob(after_star)) return .{ .suffix = null };
 
     if (after_star.len == 0) return .{ .suffix = null };
 
@@ -339,6 +344,15 @@ fn shouldSkipHidden(path_component: []const u8, pattern: []const u8, flags: u32)
     return true;
 }
 
+/// Helper function to match a pattern segment against a path component
+/// Uses extglob-aware matching when enable_extglob is true
+inline fn matchSegment(pat_seg: []const u8, path_comp: []const u8, ctx: *const PatternContext, enable_extglob: bool) bool {
+    if (enable_extglob and containsExtglob(pat_seg)) {
+        return fnmatchWithExtglob(pat_seg, path_comp, true);
+    }
+    return fnmatchWithContext(ctx, path_comp);
+}
+
 /// Optimized iterative segment matching using a single-row DP approach
 /// This avoids deep recursion which was causing 34% of CPU time
 fn matchPathSegments(
@@ -351,6 +365,7 @@ fn matchPathSegments(
 ) bool {
     const pat_len = pattern_segments.len - initial_segment_idx;
     const path_len = path_components.len - initial_path_idx;
+    const enable_extglob = (flags & ZLOB_EXTGLOB) != 0;
 
     if (pat_len == 0) return path_len == 0;
 
@@ -404,7 +419,7 @@ fn matchPathSegments(
                 if (dp[j - 1]) {
                     if (shouldSkipHidden(path_comp, pat_seg, flags)) {
                         dp[j] = false;
-                    } else if (fnmatchWithContext(&pattern_contexts[initial_segment_idx + seg_i], path_comp)) {
+                    } else if (matchSegment(pat_seg, path_comp, &pattern_contexts[initial_segment_idx + seg_i], enable_extglob)) {
                         dp[j] = true;
                     } else {
                         dp[j] = false;
@@ -425,7 +440,13 @@ fn matchSinglePath(
     path: []const u8,
     flags: u32,
 ) !bool {
+    const enable_extglob = (flags & ZLOB_EXTGLOB) != 0;
+
     if (!pattern_segments.has_doublestar) {
+        // For simple patterns without **, use extglob-aware matching if enabled
+        if (enable_extglob and containsExtglob(pattern_segments.original_pattern)) {
+            return fnmatchWithExtglob(pattern_segments.original_pattern, path, true);
+        }
         return fnmatchWithContext(&pattern_segments.pattern_context, path);
     }
 
@@ -585,7 +606,9 @@ pub fn matchPaths(
     // OPTIMIZATION: Literal pattern fast path (no wildcards)
     // If pattern contains no wildcards, use direct string equality.
     // Paths must be normalized (no consecutive slashes).
-    if (!hasWildcardsSIMD(pattern)) {
+    // Note: If extglob is enabled, we need to check for extglob patterns too
+    const has_extglob = (flags & ZLOB_EXTGLOB != 0) and containsExtglob(pattern);
+    if (!hasWildcardsSIMD(pattern) and !has_extglob) {
         var norm_pattern_buf: [4096]u8 = undefined;
         const norm_pattern = blk: {
             var len: usize = 0;
