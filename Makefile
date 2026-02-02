@@ -32,7 +32,7 @@ else
     LIBEXT = dll
 endif
 
-.PHONY: all build install uninstall test clean cli install-cli uninstall-cli dev dev-test help
+.PHONY: all build install uninstall test clean cli install-cli uninstall-cli dev dev-test test-libc help
 
 all: build
 
@@ -145,8 +145,20 @@ dev-test: build
 	cd rust && $(CARGO) test
 	@echo ""
 	@echo "========================================"
+	@echo "Running libc comparison tests..."
+	@echo "========================================"
+	./test/test_libc_comparison.sh
+	@echo ""
+	@echo "========================================"
 	@echo "All tests passed!"
 	@echo "========================================"
+
+# Run libc comparison tests only
+test-libc: build
+	@echo "========================================"
+	@echo "Running libc comparison tests..."
+	@echo "========================================"
+	./test/test_libc_comparison.sh
 
 # Help
 help:
@@ -156,22 +168,25 @@ help:
 	@echo "  make              - Build the shared library (release)"
 	@echo "  make install      - Install library and headers (may require sudo)"
 	@echo "  make test         - Run C API tests only"
+	@echo "  make test-libc    - Run libc comparison tests (requires TEST_DIR)"
 	@echo "  make cli          - Build the CLI executable"
 	@echo "  make install-cli  - Install CLI executable (may require sudo)"
 	@echo "  make clean        - Remove build artifacts"
 	@echo ""
 	@echo "Development:"
 	@echo "  make dev          - Build all: Zig, C, and Rust"
-	@echo "  make dev-test     - Run all tests: Zig, C, and Rust"
+	@echo "  make dev-test     - Run all tests: Zig, C, Rust, and libc comparison"
 	@echo ""
 	@echo "Variables:"
 	@echo "  PREFIX        - Installation prefix (default: /usr/local)"
 	@echo "  CC            - C compiler (default: gcc)"
 	@echo "  CARGO         - Cargo command (default: cargo)"
+	@echo "  TEST_DIR      - Directory for libc comparison tests"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make"
 	@echo "  make dev-test"
+	@echo "  TEST_DIR=/path/to/linux make test-libc"
 	@echo "  sudo make install"
 	@echo "  make cli && sudo make install-cli"
 	@echo "  sudo make PREFIX=/usr install"

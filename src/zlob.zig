@@ -8,12 +8,12 @@ const c = std.c;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 
-// Import C header for struct compatibility verification
 const c_zlob = @cImport({
     @cInclude("zlob.h");
 });
 
 pub const PatternContext = pattern_context_mod.PatternContext;
+pub const PatternTemplate = pattern_context_mod.PatternTemplate;
 pub const hasWildcardsSIMD = pattern_context_mod.hasWildcardsSIMD;
 pub const indexOfCharSIMD = pattern_context_mod.indexOfCharSIMD;
 pub const lastIndexOfCharSIMD = pattern_context_mod.lastIndexOfCharSIMD;
@@ -282,7 +282,57 @@ pub const dirent = std.c.dirent;
 pub const DT_UNKNOWN = std.c.DT.UNKNOWN;
 pub const DT_DIR = std.c.DT.DIR;
 
-pub const ResultsList = std.array_list.AlignedManaged([*c]u8, null);
+/// List of paths with their lengths tracked in parallel arrays.
+/// Maps directly to zlob_t's zlo_pathv and zlo_pathlen fields.
+pub const ResultsList = struct {
+    paths: std.ArrayListUnmanaged([*c]u8),
+    lengths: std.ArrayListUnmanaged(usize),
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator) ResultsList {
+        return .{
+            .paths = .{},
+            .lengths = .{},
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *ResultsList) void {
+        self.paths.deinit(self.allocator);
+        self.lengths.deinit(self.allocator);
+    }
+
+    pub fn ensureTotalCapacity(self: *ResultsList, capacity: usize) Allocator.Error!void {
+        try self.paths.ensureTotalCapacity(self.allocator, capacity);
+        try self.lengths.ensureTotalCapacity(self.allocator, capacity);
+    }
+
+    /// Add a path with its known length - O(1), no scanning
+    pub fn append(self: *ResultsList, ptr: [*c]u8, path_len: usize) Allocator.Error!void {
+        try self.paths.append(self.allocator, ptr);
+        try self.lengths.append(self.allocator, path_len);
+    }
+
+    pub fn len(self: *const ResultsList) usize {
+        return self.paths.items.len;
+    }
+
+    /// Transfer ownership of the paths array, adding a null terminator.
+    /// Returns the buffer with null terminator appended (exact-sized allocation).
+    /// After calling this, the ResultsList paths array is invalidated.
+    pub fn toOwnedPathv(self: *ResultsList) Allocator.Error![][*c]u8 {
+        // Append null terminator - this may realloc if needed
+        try self.paths.append(self.allocator, null);
+        // Transfer ownership with exact-sized reallocation
+        return self.paths.toOwnedSlice(self.allocator);
+    }
+
+    /// Transfer ownership of the lengths array (exact-sized allocation).
+    /// After calling this, the ResultsList lengths array is invalidated.
+    pub fn toOwnedLengths(self: *ResultsList) Allocator.Error![]usize {
+        return self.lengths.toOwnedSlice(self.allocator);
+    }
+};
 
 const PatternInfo = struct {
     literal_prefix: []const u8, // e.g., "src/foo" from "src/foo/*.txt"
@@ -494,11 +544,10 @@ fn canMatchPattern(
     return true;
 }
 
-// SIMD string comparison for sorting
 fn simdStrCmp(a: []const u8, b: []const u8) std.math.Order {
     const min_len = @min(a.len, b.len);
 
-    // SIMD comparison for long strings
+    // SIMD comparison for long strings (32-byte vectors)
     if (min_len >= 32) {
         const Vec32 = @Vector(32, u8);
         var i: usize = 0;
@@ -517,13 +566,53 @@ fn simdStrCmp(a: []const u8, b: []const u8) std.math.Order {
                 if (a_byte > b_byte) return .gt;
             }
         }
-        // Compare remainder
+        // Compare remainder with 16-byte vector if possible
+        if (i + 16 <= min_len) {
+            const Vec16 = @Vector(16, u8);
+            const a_vec: Vec16 = a[i..][0..16].*;
+            const b_vec: Vec16 = b[i..][0..16].*;
+            const eq = a_vec == b_vec;
+            const mask = @as(u16, @bitCast(eq));
+
+            if (mask != 0xFFFF) {
+                const first_diff = @ctz(~mask);
+                const a_byte = a[i + first_diff];
+                const b_byte = b[i + first_diff];
+                if (a_byte < b_byte) return .lt;
+                if (a_byte > b_byte) return .gt;
+            }
+            i += 16;
+        }
+        // Compare final remainder byte-by-byte
+        for (a[i..min_len], b[i..min_len]) |a_byte, b_byte| {
+            if (a_byte < b_byte) return .lt;
+            if (a_byte > b_byte) return .gt;
+        }
+    } else if (min_len >= 16) {
+        // SIMD comparison for medium strings (16-byte vectors)
+        const Vec16 = @Vector(16, u8);
+        var i: usize = 0;
+        while (i + 16 <= min_len) : (i += 16) {
+            const a_vec: Vec16 = a[i..][0..16].*;
+            const b_vec: Vec16 = b[i..][0..16].*;
+            const eq = a_vec == b_vec;
+            const mask = @as(u16, @bitCast(eq));
+
+            if (mask != 0xFFFF) {
+                const first_diff = @ctz(~mask);
+                const a_byte = a[i + first_diff];
+                const b_byte = b[i + first_diff];
+                if (a_byte < b_byte) return .lt;
+                if (a_byte > b_byte) return .gt;
+            }
+        }
+        // Compare remainder byte-by-byte
         for (a[i..min_len], b[i..min_len]) |a_byte, b_byte| {
             if (a_byte < b_byte) return .lt;
             if (a_byte > b_byte) return .gt;
         }
     } else {
-        // Fallback for short strings
+        // Fallback for short strings (< 16 bytes)
         for (a[0..min_len], b[0..min_len]) |a_byte, b_byte| {
             if (a_byte < b_byte) return .lt;
             if (a_byte > b_byte) return .gt;
@@ -536,105 +625,75 @@ fn simdStrCmp(a: []const u8, b: []const u8) std.math.Order {
     return .eq;
 }
 
-fn c_cmp_strs(a: ?*const anyopaque, b: ?*const anyopaque) callconv(.c) c_int {
-    // qsort passes pointers to elements, so we need to dereference to get the actual string pointers
-    const ptr_a: *const [*c]const u8 = @ptrCast(@alignCast(a));
-    const ptr_b: *const [*c]const u8 = @ptrCast(@alignCast(b));
-    const str_a = ptr_a.*;
-    const str_b = ptr_b.*;
-    const slice_a = mem.sliceTo(str_a, 0);
-    const slice_b = mem.sliceTo(str_b, 0);
-    return switch (simdStrCmp(slice_a, slice_b)) {
-        .lt => -1,
-        .eq => 0,
-        .gt => 1,
-    };
-}
+/// Sort context for sorting paths with pre-computed lengths
+/// This avoids the O(n) strlen() call per comparison that mem.sliceTo would require
+const PathSortContext = struct {
+    paths: [*][*c]u8,
+    lengths: [*]usize,
 
-extern "c" fn qsort(base: ?*anyopaque, nmemb: usize, size: usize, compar: *const fn (?*const anyopaque, ?*const anyopaque) callconv(.c) c_int) void;
+    /// Compare two paths using their pre-computed lengths
+    /// This is significantly faster than mem.sliceTo which scans for null terminators
+    fn lessThan(ctx: PathSortContext, a_idx: usize, b_idx: usize) bool {
+        const a_ptr = ctx.paths[a_idx];
+        const b_ptr = ctx.paths[b_idx];
+        const a_len = ctx.lengths[a_idx];
+        const b_len = ctx.lengths[b_idx];
 
-fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
-    var depth: usize = 1;
-    var i = start;
-    while (i < pattern.len) : (i += 1) {
-        if (pattern[i] == '{') {
-            depth += 1;
-        } else if (pattern[i] == '}') {
-            depth -= 1;
-            if (depth == 0) return i;
-        } else if (pattern[i] == '\\' and i + 1 < pattern.len) {
-            i += 1; // Skip escaped character
-        }
+        // Create slices using known lengths - O(1) instead of O(n) for mem.sliceTo
+        const slice_a = @as([*]const u8, @ptrCast(a_ptr))[0..a_len];
+        const slice_b = @as([*]const u8, @ptrCast(b_ptr))[0..b_len];
+
+        return simdStrCmp(slice_a, slice_b) == .lt;
     }
-    return null;
-}
+};
 
-fn expandBraces(allocator: std.mem.Allocator, pattern: []const u8, results: *ResultsList) !void {
-    // Find first unescaped opening brace
-    var brace_start: ?usize = null;
+/// Sort paths in-place using pre-computed lengths from zlo_pathlen
+/// This is much faster than C's qsort with mem.sliceTo because:
+/// 1. We use known lengths instead of scanning for null terminators
+/// 2. Zig's sort is cache-friendly and doesn't require function pointer indirection
+fn sortPathsWithLengths(paths: [*][*c]u8, lengths: [*]usize, count: usize) void {
+    if (count <= 1) return;
+
+    // Create index array for indirect sorting
+    // We sort indices and then rearrange paths/lengths accordingly
+    var indices_buf: [4096]usize = undefined;
+    const indices = indices_buf[0..count];
+    for (indices, 0..) |*idx, i| {
+        idx.* = i;
+    }
+
+    const ctx = PathSortContext{ .paths = paths, .lengths = lengths };
+    std.mem.sort(usize, indices, ctx, PathSortContext.lessThan);
+
+    // Rearrange paths and lengths according to sorted indices using cycle sort
+    // This is O(n) with O(1) extra space for the swap temps
+    var visited_buf: [4096]bool = undefined;
+    const visited = visited_buf[0..count];
+    @memset(visited, false);
+
     var i: usize = 0;
-    while (i < pattern.len) : (i += 1) {
-        if (pattern[i] == '\\' and i + 1 < pattern.len) {
-            i += 1; // Skip escaped character
+    while (i < count) : (i += 1) {
+        if (visited[i] or indices[i] == i) {
+            visited[i] = true;
             continue;
         }
-        if (pattern[i] == '{') {
-            brace_start = i;
-            break;
+
+        // Follow the cycle
+        var j = i;
+        const temp_path = paths[i];
+        const temp_len = lengths[i];
+
+        while (indices[j] != i) {
+            const next = indices[j];
+            paths[j] = paths[next];
+            lengths[j] = lengths[next];
+            visited[j] = true;
+            j = next;
         }
-    }
 
-    // No braces found, just copy the pattern
-    if (brace_start == null) {
-        const copy = try allocator.allocSentinel(u8, pattern.len, 0);
-        @memcpy(copy[0..pattern.len], pattern);
-        const str: [*c]u8 = @ptrCast(copy.ptr);
-        try results.append(str);
-        return;
-    }
-
-    const brace_open = brace_start.?;
-    const brace_close = findClosingBrace(pattern, brace_open + 1) orelse {
-        // No matching closing brace, treat as literal
-        const copy = try allocator.allocSentinel(u8, pattern.len, 0);
-        @memcpy(copy[0..pattern.len], pattern);
-        const str: [*c]u8 = @ptrCast(copy.ptr);
-        try results.append(str);
-        return;
-    };
-
-    const prefix = pattern[0..brace_open];
-    const suffix = pattern[brace_close + 1 ..];
-    const brace_content = pattern[brace_open + 1 .. brace_close];
-
-    // Split brace content by commas
-    var start: usize = 0;
-    var alternatives = ResultsList.init(allocator);
-    defer alternatives.deinit();
-
-    i = 0;
-    while (i <= brace_content.len) : (i += 1) {
-        if (i == brace_content.len or brace_content[i] == ',') {
-            const alt = brace_content[start..i];
-
-            const new_len = prefix.len + alt.len + suffix.len;
-            const new_str_buf = try allocator.allocSentinel(u8, new_len, 0);
-            const new_str: [*c]u8 = @ptrCast(new_str_buf.ptr);
-
-            if (prefix.len > 0) @memcpy(new_str_buf[0..prefix.len], prefix);
-            if (alt.len > 0) @memcpy(new_str_buf[prefix.len..][0..alt.len], alt);
-            if (suffix.len > 0) @memcpy(new_str_buf[prefix.len + alt.len ..][0..suffix.len], suffix);
-
-            try alternatives.append(new_str);
-            start = i + 1;
-        }
-    }
-
-    // Recursively expand each alternative
-    for (alternatives.items) |alt_pattern| {
-        const alt_slice = mem.sliceTo(alt_pattern, 0);
-        try expandBraces(allocator, alt_slice, results);
-        allocator.free(alt_slice);
+        paths[j] = temp_path;
+        lengths[j] = temp_len;
+        visited[j] = true;
     }
 }
 
@@ -654,126 +713,6 @@ fn buildPathInBuffer(buf: []u8, dir: []const u8, name: []const u8) []const u8 {
     return buf[0..len];
 }
 
-fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, pzlob: *zlob_t, directories_only: bool) !?void {
-    var components: [64][]const u8 = undefined;
-    var component_count: usize = 0;
-
-    var start: usize = 0;
-    for (pattern, 0..) |ch, idx| {
-        if (ch == '/') {
-            if (idx > start) {
-                components[component_count] = pattern[start..idx];
-                component_count += 1;
-            }
-            start = idx + 1;
-        }
-    }
-    if (start < pattern.len) {
-        components[component_count] = pattern[start..];
-        component_count += 1;
-    }
-
-    var result_paths = ResultsList.init(allocator);
-    defer result_paths.deinit();
-    errdefer {
-        for (result_paths.items) |path| {
-            const path_slice = mem.sliceTo(path, 0);
-            allocator.free(path_slice);
-        }
-    }
-
-    try expandWildcardComponents(allocator, ".", components[0..component_count], 0, &result_paths, directories_only);
-
-    if (result_paths.items.len == 0) {
-        if (flags.nocheck) {
-            const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
-            @memcpy(pat_copy[0..pattern.len], pattern);
-            const path: [*c]u8 = @ptrCast(pat_copy.ptr);
-
-            const pathv_buf = allocator.alloc([*c]u8, 2) catch return error.OutOfMemory;
-            const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-            result[0] = path;
-            result[1] = null;
-
-            const pathlen_buf = allocator.alloc(usize, 1) catch return error.OutOfMemory;
-            pathlen_buf[0] = pattern.len;
-
-            pzlob.zlo_pathc = 1;
-            pzlob.zlo_pathv = result;
-            pzlob.zlo_pathlen = pathlen_buf.ptr;
-            pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
-            return;
-        }
-        return null;
-    }
-
-    if (!flags.nosort) {
-        qsort(@ptrCast(result_paths.items.ptr), result_paths.items.len, @sizeOf([*c]u8), c_cmp_strs);
-    }
-
-    // Handle ZLOB_APPEND flag - merge with existing results
-    if (flags.append and pzlob.zlo_pathv != null and pzlob.zlo_pathc > 0) {
-        const old_count = pzlob.zlo_pathc;
-        const new_count = result_paths.items.len;
-        const total_count = old_count + new_count;
-
-        const pathv_buf = allocator.alloc([*c]u8, total_count + 1) catch return error.OutOfMemory;
-        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-
-        // Copy old results
-        var i: usize = 0;
-        while (i < old_count) : (i += 1) {
-            result[i] = pzlob.zlo_pathv[i];
-        }
-
-        // Append new results
-        var j: usize = 0;
-        while (j < new_count) : (j += 1) {
-            result[old_count + j] = result_paths.items[j];
-        }
-        result[total_count] = null;
-
-        const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
-        var li: usize = 0;
-        while (li < old_count) : (li += 1) {
-            pathlen_buf[li] = pzlob.zlo_pathlen[li];
-        }
-        var lj: usize = 0;
-        while (lj < new_count) : (lj += 1) {
-            pathlen_buf[old_count + lj] = mem.len(result_paths.items[lj]);
-        }
-
-        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[0 .. old_count + 1];
-        allocator.free(old_pathv_slice);
-        const old_pathlen_slice = pzlob.zlo_pathlen[0..old_count];
-        allocator.free(old_pathlen_slice);
-
-        pzlob.zlo_pathc = total_count;
-        pzlob.zlo_pathv = result;
-        pzlob.zlo_pathlen = pathlen_buf.ptr;
-        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
-    } else {
-        // No APPEND or first call
-        const pathv_buf = allocator.alloc([*c]u8, result_paths.items.len + 1) catch return error.OutOfMemory;
-        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-
-        const pathlen_buf = allocator.alloc(usize, result_paths.items.len) catch return error.OutOfMemory;
-
-        var i: usize = 0;
-        while (i < result_paths.items.len) : (i += 1) {
-            result[i] = result_paths.items[i];
-            pathlen_buf[i] = mem.len(result_paths.items[i]);
-        }
-        result[result_paths.items.len] = null;
-
-        pzlob.zlo_pathc = result_paths.items.len;
-        pzlob.zlo_pathv = result;
-        pzlob.zlo_pathlen = pathlen_buf.ptr;
-        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
-    }
-}
-
-// Optimized version that uses pattern info to start from literal prefix
 fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
     // Note: gitignore filtering is not fully implemented in this path
     // The main recursive and filtered paths handle gitignore
@@ -802,8 +741,8 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     var result_paths = ResultsList.init(allocator);
     defer result_paths.deinit();
     errdefer {
-        for (result_paths.items) |path| {
-            const path_slice = mem.sliceTo(path, 0);
+        for (result_paths.paths.items, result_paths.lengths.items) |path, path_len| {
+            const path_slice = @as([*]u8, @ptrCast(path))[0 .. path_len + 1];
             allocator.free(path_slice);
         }
     }
@@ -823,7 +762,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
 
     try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc, base_dir);
 
-    if (result_paths.items.len == 0) {
+    if (result_paths.len() == 0) {
         if (flags.nocheck) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
             @memcpy(pat_copy[0..pattern.len], pattern);
@@ -846,70 +785,8 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         return null;
     }
 
-    if (!flags.nosort) {
-        qsort(@ptrCast(result_paths.items.ptr), result_paths.items.len, @sizeOf([*c]u8), c_cmp_strs);
-    }
-
-    // Handle ZLOB_APPEND flag - merge with existing results
-    if (flags.append and pzlob.zlo_pathv != null and pzlob.zlo_pathc > 0) {
-        const old_count = pzlob.zlo_pathc;
-        const new_count = result_paths.items.len;
-        const total_count = old_count + new_count;
-
-        const pathv_buf = allocator.alloc([*c]u8, total_count + 1) catch return error.OutOfMemory;
-        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-
-        // Copy old results
-        var i: usize = 0;
-        while (i < old_count) : (i += 1) {
-            result[i] = pzlob.zlo_pathv[i];
-        }
-
-        // Append new results
-        var j: usize = 0;
-        while (j < new_count) : (j += 1) {
-            result[old_count + j] = result_paths.items[j];
-        }
-        result[total_count] = null;
-
-        const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
-        var li: usize = 0;
-        while (li < old_count) : (li += 1) {
-            pathlen_buf[li] = pzlob.zlo_pathlen[li];
-        }
-        var lj: usize = 0;
-        while (lj < new_count) : (lj += 1) {
-            pathlen_buf[old_count + lj] = mem.len(result_paths.items[lj]);
-        }
-
-        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[0 .. old_count + 1];
-        allocator.free(old_pathv_slice);
-        const old_pathlen_slice = pzlob.zlo_pathlen[0..old_count];
-        allocator.free(old_pathlen_slice);
-
-        pzlob.zlo_pathc = total_count;
-        pzlob.zlo_pathv = result;
-        pzlob.zlo_pathlen = pathlen_buf.ptr;
-        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
-    } else {
-        // No APPEND or first call
-        const pathv_buf = allocator.alloc([*c]u8, result_paths.items.len + 1) catch return error.OutOfMemory;
-        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-
-        const pathlen_buf = allocator.alloc(usize, result_paths.items.len) catch return error.OutOfMemory;
-
-        var i: usize = 0;
-        while (i < result_paths.items.len) : (i += 1) {
-            result[i] = result_paths.items[i];
-            pathlen_buf[i] = mem.len(result_paths.items[i]);
-        }
-        result[result_paths.items.len] = null;
-
-        pzlob.zlo_pathc = result_paths.items.len;
-        pzlob.zlo_pathv = result;
-        pzlob.zlo_pathlen = pathlen_buf.ptr;
-        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
-    }
+    // Note: sorting is now handled inside finalizeResults using pre-computed lengths
+    return finalizeResults(allocator, &result_paths, flags, pzlob);
 }
 
 // Recursive helper to expand wildcard components level by level
@@ -933,7 +810,7 @@ fn expandWildcardComponents(
         const path_copy = try allocator.allocSentinel(u8, current_dir.len, 0);
         @memcpy(path_copy[0..current_dir.len], current_dir);
         const path: [*c]u8 = @ptrCast(path_copy.ptr);
-        try results.append(path);
+        try results.append(path, current_dir.len);
         return;
     }
 
@@ -1425,25 +1302,21 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
 
 // Expand brace patterns and glob each independently (no ZLOB_APPEND manipulation)
 fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
-    var expanded = ResultsList.init(allocator);
+    // Use brace_optimizer.expandBraces for consistent nested brace handling
+    const expanded = try brace_optimizer.expandBraces(allocator, pattern);
     defer {
-        for (expanded.items) |item| {
-            const item_mem = mem.sliceTo(item, 0);
-            allocator.free(item_mem);
+        for (expanded) |item| {
+            allocator.free(item);
         }
-        expanded.deinit();
+        allocator.free(expanded);
     }
-
-    try expandBraces(allocator, pattern, &expanded);
 
     // Collect all results from all expanded patterns
     var all_results = ResultsList.init(allocator);
     defer all_results.deinit();
 
     // Glob each expanded pattern independently (NO ZLOB_APPEND)
-    for (expanded.items) |exp_pattern| {
-        const exp_slice = mem.sliceTo(exp_pattern, 0);
-
+    for (expanded) |exp_slice| {
         // Create a temporary pzlob for this pattern
         var temp_pzlob: zlob_t = undefined;
         temp_pzlob.zlo_pathc = 0;
@@ -1455,7 +1328,7 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
         // Collect results from temp_pzlob
         if (temp_pzlob.zlo_pathc > 0) {
             for (0..temp_pzlob.zlo_pathc) |i| {
-                try all_results.append(temp_pzlob.zlo_pathv[i]);
+                try all_results.append(temp_pzlob.zlo_pathv[i], temp_pzlob.zlo_pathlen[i]);
             }
             // Don't free the paths yet, we're transferring ownership
             // Free the pathv array and pathlen array, but not the paths themselves
@@ -1466,7 +1339,7 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
         }
     }
 
-    if (all_results.items.len == 0) {
+    if (all_results.len() == 0) {
         if (flags.nocheck) {
             const pat_copy = try allocator.allocSentinel(u8, pattern.len, 0);
             @memcpy(pat_copy[0..pattern.len], pattern);
@@ -1489,24 +1362,25 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
         return null;
     }
 
-    // Sort results if needed
-    if (!flags.nosort) {
-        qsort(@ptrCast(all_results.items.ptr), all_results.items.len, @sizeOf([*c]u8), c_cmp_strs);
-    }
+    const count = all_results.len();
 
-    // Build final result
-    const pathv_buf = try allocator.alloc([*c]u8, all_results.items.len + 1);
+    // Build result arrays - use pre-computed lengths, no strlen() calls!
+    const pathv_buf = try allocator.alloc([*c]u8, count + 1);
+    const pathlen_buf = try allocator.alloc(usize, count);
+
+    // Single memcpy operations instead of element-by-element loops
+    @memcpy(pathv_buf[0..count], all_results.paths.items);
+    @memcpy(pathlen_buf, all_results.lengths.items);
+    pathv_buf[count] = null;
+
     const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
-    const pathlen_buf = try allocator.alloc(usize, all_results.items.len);
-
-    for (all_results.items, 0..) |path, i| {
-        result[i] = path;
-        pathlen_buf[i] = mem.len(path);
+    // Sort using pre-computed lengths - no strlen() calls!
+    if (!flags.nosort) {
+        sortPathsWithLengths(@ptrCast(result), pathlen_buf.ptr, count);
     }
-    result[all_results.items.len] = null;
 
-    pzlob.zlo_pathc = all_results.items.len;
+    pzlob.zlo_pathc = count;
     pzlob.zlo_pathv = result;
     pzlob.zlo_pathlen = pathlen_buf.ptr;
     pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
@@ -1717,14 +1591,11 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
         try globRecursiveHelperCollect(allocator, &rec_pattern, start_dir, flags, &all_results, 0, &info, errfunc, base_dir);
     }
 
-    if (all_results.items.len == 0) {
+    if (all_results.len() == 0) {
         return null;
     }
 
-    if (!flags.nosort) {
-        qsort(@ptrCast(all_results.items.ptr), all_results.items.len, @sizeOf([*c]u8), c_cmp_strs);
-    }
-
+    // Note: sorting is now handled inside finalizeResults using pre-computed lengths
     return finalizeResults(allocator, &all_results, flags, pzlob);
 }
 
@@ -1806,7 +1677,7 @@ fn globWithBracedComponents(
         _ = root.statFile(start_dir) catch return null;
         const path_copy = try allocator.allocSentinel(u8, start_dir.len, 0);
         @memcpy(path_copy[0..start_dir.len], start_dir);
-        try all_results.append(@ptrCast(path_copy.ptr));
+        try all_results.append(@ptrCast(path_copy.ptr), start_dir.len);
         return finalizeResults(allocator, &all_results, flags, pzlob);
     }
 
@@ -1832,19 +1703,16 @@ fn globWithBracedComponents(
             fn onComplete(alloc: std.mem.Allocator, path: []const u8, results: *ResultsList, _: bool) !void {
                 const path_copy = try alloc.allocSentinel(u8, path.len, 0);
                 @memcpy(path_copy[0..path.len], path);
-                try results.append(@ptrCast(path_copy.ptr));
+                try results.append(@ptrCast(path_copy.ptr), path.len);
             }
         }.onComplete,
     );
 
-    if (all_results.items.len == 0) {
+    if (all_results.len() == 0) {
         return null;
     }
 
-    if (!flags.nosort) {
-        qsort(@ptrCast(all_results.items.ptr), all_results.items.len, @sizeOf([*c]u8), c_cmp_strs);
-    }
-
+    // Note: sorting is now handled inside finalizeResults using pre-computed lengths
     return finalizeResults(allocator, &all_results, flags, pzlob);
 }
 
@@ -1898,12 +1766,19 @@ const ComponentMatcher = struct {
 };
 
 /// Check if entry should be skipped (. and .., hidden files)
+/// When is_hidden_ok is true (pattern starts with '.'), we allow . and .. through
+/// to be tested against the pattern - this is POSIX compliant behavior
 inline fn shouldSkipEntry(name: []const u8, is_hidden_ok: bool) bool {
     if (name.len == 0) return true;
     if (name[0] == '.') {
-        // Always skip . and ..
-        if (name.len == 1 or (name.len == 2 and name[1] == '.')) return true;
-        // Skip hidden unless allowed
+        // When pattern starts with '.', allow . and .. through to be matched
+        // This is POSIX compliant: if pattern explicitly matches leading period,
+        // then . and .. should be eligible for matching
+        if (name.len == 1 or (name.len == 2 and name[1] == '.')) {
+            // Only allow . and .. if pattern starts with '.' (is_hidden_ok)
+            return !is_hidden_ok;
+        }
+        // Skip other hidden files unless allowed
         if (!is_hidden_ok) return true;
     }
     return false;
@@ -2056,43 +1931,30 @@ fn globRecursiveWithBracedPrefix(
     }
 }
 
-// Helper to finalize results from ArrayList to zlob_t
 fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: ZlobFlags, pzlob: *zlob_t) !?void {
     const offs = if (flags.dooffs) pzlob.zlo_offs else 0;
+    const new_count = results.len();
 
-    // Handle ZLOB_APPEND - merge with existing results
+    // ZLOB_APPEND - merge with existing results
     if (flags.append and pzlob.zlo_pathv != null and pzlob.zlo_pathc > 0) {
         const old_count = pzlob.zlo_pathc;
-        const new_count = results.items.len;
         const total_count = old_count + new_count;
 
         const pathv_buf = allocator.alloc([*c]u8, offs + total_count + 1) catch return error.OutOfMemory;
+        const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
+
+        @memset(pathv_buf[0..offs], null);
+
+        const old_pathv = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[offs..][0..old_count];
+        @memcpy(pathv_buf[offs..][0..old_count], old_pathv);
+        @memcpy(pathlen_buf[0..old_count], pzlob.zlo_pathlen[0..old_count]);
+        @memcpy(pathv_buf[offs + old_count ..][0..new_count], results.paths.items);
+        @memcpy(pathlen_buf[old_count..][0..new_count], results.lengths.items);
+
+        pathv_buf[offs + total_count] = null;
         const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
-        var k: usize = 0;
-        while (k < offs) : (k += 1) result[k] = null;
-
-        var i: usize = 0;
-        while (i < old_count) : (i += 1) {
-            result[offs + i] = pzlob.zlo_pathv[offs + i];
-        }
-
-        var j: usize = 0;
-        while (j < new_count) : (j += 1) {
-            result[offs + old_count + j] = results.items[j];
-        }
-        result[offs + total_count] = null;
-
-        const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
-        var li: usize = 0;
-        while (li < old_count) : (li += 1) {
-            pathlen_buf[li] = pzlob.zlo_pathlen[li];
-        }
-        var lj: usize = 0;
-        while (lj < new_count) : (lj += 1) {
-            pathlen_buf[old_count + lj] = mem.len(results.items[lj]);
-        }
-
+        // Free old arrays
         const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[0 .. offs + old_count + 1];
         allocator.free(old_pathv_slice);
         const old_pathlen_slice = pzlob.zlo_pathlen[0..old_count];
@@ -2102,28 +1964,44 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
         pzlob.zlo_pathv = result;
         pzlob.zlo_pathlen = pathlen_buf.ptr;
         pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
+
+        if (!flags.nosort and new_count > 0) {
+            sortPathsWithLengths(@ptrCast(result + offs + old_count), pathlen_buf.ptr + old_count, new_count);
+        }
+    } else if (offs == 0) {
+        // Fast path: no offset slots needed, transfer ownership directly from ResultsList
+        // This avoids allocating new buffers and copying data (just shrinks to exact size)
+        const pathv_buf = results.toOwnedPathv() catch return error.OutOfMemory;
+        const pathlen_buf = results.toOwnedLengths() catch return error.OutOfMemory;
+
+        pzlob.zlo_pathc = new_count;
+        pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
+        pzlob.zlo_pathlen = pathlen_buf.ptr;
+        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
+
+        if (!flags.nosort) {
+            sortPathsWithLengths(@ptrCast(pzlob.zlo_pathv), pathlen_buf.ptr, new_count);
+        }
     } else {
-        // Fresh allocation
-        const pathv_buf = allocator.alloc([*c]u8, offs + results.items.len + 1) catch return error.OutOfMemory;
+        // ZLOB_DOOFFS: need offset slots at the beginning, must allocate fresh buffers
+        const pathv_buf = allocator.alloc([*c]u8, offs + new_count + 1) catch return error.OutOfMemory;
+        const pathlen_buf = allocator.alloc(usize, new_count) catch return error.OutOfMemory;
+
+        @memset(pathv_buf[0..offs], null);
+        @memcpy(pathv_buf[offs..][0..new_count], results.paths.items);
+        @memcpy(pathlen_buf, results.lengths.items);
+
+        pathv_buf[offs + new_count] = null;
         const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
-        const pathlen_buf = allocator.alloc(usize, results.items.len) catch return error.OutOfMemory;
-
-        var k: usize = 0;
-        while (k < offs) : (k += 1) result[k] = null;
-
-        // Copy results and lengths
-        var i: usize = 0;
-        while (i < results.items.len) : (i += 1) {
-            result[offs + i] = results.items[i];
-            pathlen_buf[i] = mem.len(results.items[i]);
-        }
-        result[offs + results.items.len] = null;
-
-        pzlob.zlo_pathc = results.items.len;
+        pzlob.zlo_pathc = new_count;
         pzlob.zlo_pathv = result;
         pzlob.zlo_pathlen = pathlen_buf.ptr;
         pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
+
+        if (!flags.nosort) {
+            sortPathsWithLengths(@ptrCast(result + offs), pathlen_buf.ptr, new_count);
+        }
     }
 }
 
@@ -2240,15 +2118,17 @@ inline fn globRecursiveWithZigWalk(
                     @memcpy(path_buf_slice[start_dir.len + 1 ..][0..entry.path.len], entry.path);
 
                     var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
+                    var final_path_len = full_path_len;
 
                     if (maybeAppendSlash(allocator, path, full_path_len, is_dir, flags) catch {
                         allocator.free(path_buf_slice);
                         return error.OutOfMemory;
                     }) |new_path| {
                         path = new_path;
+                        final_path_len += 1; // Account for added '/'
                     }
 
-                    results.append(path) catch return error.OutOfMemory;
+                    results.append(path, final_path_len) catch return error.OutOfMemory;
                 }
             }
         }
@@ -2339,8 +2219,8 @@ fn walkWithGitignore(
                 fnmatchWithContext(pattern_ctx, name);
 
             if (matches) {
-                const full_path_len = start_dir.len + 1 + entry_rel_path.len;
-                const path_buf_slice = allocator.allocSentinel(u8, full_path_len, 0) catch return error.OutOfMemory;
+                var final_path_len = start_dir.len + 1 + entry_rel_path.len;
+                const path_buf_slice = allocator.allocSentinel(u8, final_path_len, 0) catch return error.OutOfMemory;
 
                 @memcpy(path_buf_slice[0..start_dir.len], start_dir);
                 path_buf_slice[start_dir.len] = '/';
@@ -2348,14 +2228,15 @@ fn walkWithGitignore(
 
                 var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
 
-                if (maybeAppendSlash(allocator, path, full_path_len, is_dir, flags) catch {
+                if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
                     allocator.free(path_buf_slice);
                     return error.OutOfMemory;
                 }) |new_path| {
                     path = new_path;
+                    final_path_len += 1; // Account for added '/'
                 }
 
-                results.append(path) catch return error.OutOfMemory;
+                results.append(path, final_path_len) catch return error.OutOfMemory;
             }
         }
     }
@@ -2614,7 +2495,7 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
 
                 const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
                 var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-                const path_len = path_buf_slice.len;
+                var final_path_len = path_buf_slice.len;
 
                 const is_dir = entry.kind == .directory;
 
@@ -2624,21 +2505,22 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
                 }
 
                 if (gitignore_filter) |gi| {
-                    const rel_path = if (use_dirname) path_buf_slice[0..path_len] else name;
+                    const rel_path = if (use_dirname) path_buf_slice[0..final_path_len] else name;
                     if (gi.isIgnored(rel_path, is_dir)) {
                         allocator.free(path_buf_slice);
                         continue;
                     }
                 }
 
-                if (maybeAppendSlash(allocator, path, path_len, is_dir, flags) catch {
+                if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
                     allocator.free(path_buf_slice);
                     return error.OutOfMemory;
                 }) |new_path| {
                     path = new_path;
+                    final_path_len += 1; // Account for added '/'
                 }
 
-                results.append(path) catch return error.OutOfMemory;
+                results.append(path, final_path_len) catch return error.OutOfMemory;
             }
         }
         return;
@@ -2699,7 +2581,7 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
 
             const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
             var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-            const path_len = path_buf_slice.len;
+            var final_path_len = path_buf_slice.len;
 
             var is_dir = entry.type == DT_DIR;
             if (entry.type == DT_UNKNOWN) {
@@ -2722,7 +2604,7 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
             if (gitignore_filter) |gi| {
                 // Build relative path for gitignore check
                 const rel_path = if (use_dirname)
-                    path_buf_slice[0..path_len]
+                    path_buf_slice[0..final_path_len]
                 else
                     name;
                 if (gi.isIgnored(rel_path, is_dir)) {
@@ -2731,15 +2613,16 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
                 }
             }
 
-            if (maybeAppendSlash(allocator, path, path_len, is_dir, flags) catch {
+            if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
                 @branchHint(.unlikely);
                 allocator.free(path_buf_slice);
                 return error.OutOfMemory;
             }) |new_path| {
                 path = new_path;
+                final_path_len += 1; // Account for added '/'
             }
 
-            results.append(path) catch return error.OutOfMemory;
+            results.append(path, final_path_len) catch return error.OutOfMemory;
         }
     }
 }
@@ -2775,9 +2658,16 @@ pub inline fn shouldSkipFile(name: []const u8, pattern_ctx: *const PatternContex
         const is_dot = name.len == 1;
         const is_dotdot = name.len == 2 and name[1] == '.';
 
-        // Don't skip if pattern explicitly asks for "." or ".."
+        // Handle "." and ".." entries
+        // POSIX: if pattern explicitly starts with '.', then '.' and '..'
+        // should be eligible for matching (e.g., ".*" matches "." and "..")
         if (is_dot or is_dotdot) {
+            // Don't skip if pattern explicitly asks for "." or ".."
             if (pattern_ctx.is_dot_or_dotdot) return false;
+            // Don't skip if pattern starts with '.' - allow through to match
+            // This is POSIX compliant: ".*" should match "." and ".."
+            if (pattern_ctx.starts_with_dot) return false;
+            // Skip otherwise (e.g., pattern is "*")
             return true;
         }
 
@@ -2884,7 +2774,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
 
                 const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
                 var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-                const path_len = path_buf_slice.len;
+                var final_path_len = path_buf_slice.len;
 
                 const is_dir = entry.kind == .directory;
 
@@ -2894,28 +2784,60 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
                 }
 
                 if (gitignore_filter) |gi| {
-                    const rel_path = if (use_dirname) path_buf_slice[0..path_len] else name;
+                    const rel_path = if (use_dirname) path_buf_slice[0..final_path_len] else name;
                     if (gi.isIgnored(rel_path, is_dir)) {
                         allocator.free(path_buf_slice);
                         continue;
                     }
                 }
 
-                if (maybeAppendSlash(allocator, path, path_len, is_dir, flags) catch {
+                if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
                     allocator.free(path_buf_slice);
                     return error.OutOfMemory;
                 }) |new_path| {
                     path = new_path;
+                    final_path_len += 1; // Account for added '/'
                 }
 
-                names.append(path) catch return error.OutOfMemory;
+                names.append(path, final_path_len) catch return error.OutOfMemory;
             }
         }
 
-        if (names.items.len == 0) return null;
-        if (!flags.nosort) {
-            qsort(@ptrCast(names.items.ptr), names.items.len, @sizeOf([*c]u8), c_cmp_strs);
+        // Zig's iterator skips "." and "..", but when pattern
+        // starts with '.', we need to check if they match the pattern.
+        // This is because POSIX says: "if a filename begins with a <period>, the
+        // <period> shall be explicitly matched" - meaning patterns like ".*"
+        // should match "." and ".."
+        if (pattern_ctx.starts_with_dot and !directories_only) {
+            const dot_entries = [_][]const u8{ ".", ".." };
+
+            for (dot_entries) |dot_name| {
+                const dot_matches = if (enable_extglob and extglob.containsExtglob(pattern)) blk: {
+                    initExtglob();
+                    break :blk extglob.fnmatchExtglob(pattern, dot_name);
+                } else fnmatchWithContext(&pattern_ctx, dot_name);
+
+                if (dot_matches) {
+                    // no gitignore check for . and .. (they're special)
+                    const path_buf_slice = buildFullPath(allocator, dirname, dot_name, use_dirname) catch return error.OutOfMemory;
+                    var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
+                    var final_path_len = path_buf_slice.len;
+
+                    // . and .. are always directories, add trailing slash if MARK flag
+                    if (maybeAppendSlash(allocator, path, final_path_len, true, flags) catch {
+                        allocator.free(path_buf_slice);
+                        return error.OutOfMemory;
+                    }) |new_path| {
+                        path = new_path;
+                        final_path_len += 1; // Account for added '/'
+                    }
+
+                    names.append(path, final_path_len) catch return error.OutOfMemory;
+                }
+            }
         }
+
+        if (names.len() == 0) return null;
         return finalizeResults(allocator, &names, flags, pzlob);
     }
 
@@ -2990,7 +2912,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
 
             const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
             var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-            const path_len = path_buf_slice.len;
+            var final_path_len = path_buf_slice.len;
 
             var is_dir = entry.type == DT_DIR;
             if (entry.type == DT_UNKNOWN) {
@@ -3010,7 +2932,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
 
             if (gitignore_filter) |gi| {
                 const rel_path = if (use_dirname)
-                    path_buf_slice[0..path_len]
+                    path_buf_slice[0..final_path_len]
                 else
                     name;
                 if (gi.isIgnored(rel_path, is_dir)) {
@@ -3019,18 +2941,19 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
                 }
             }
 
-            if (maybeAppendSlash(allocator, path, path_len, is_dir, flags) catch {
+            if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
                 allocator.free(path_buf_slice);
                 return error.OutOfMemory;
             }) |new_path| {
                 path = new_path;
+                final_path_len += 1; // Account for added '/'
             }
 
-            names.append(path) catch return error.OutOfMemory;
+            names.append(path, final_path_len) catch return error.OutOfMemory;
         }
     }
 
-    if (names.items.len == 0) {
+    if (names.len() == 0) {
         if (flags.nocheck) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
             @memcpy(pat_copy[0..pattern.len], pattern);
@@ -3053,80 +2976,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         return null;
     }
 
-    if (!flags.nosort) {
-        qsort(@ptrCast(names.items.ptr), names.items.len, @sizeOf([*c]u8), c_cmp_strs);
-    }
-
-    // Handle ZLOB_APPEND flag - merge with existing results
-    if (flags.append and pzlob.zlo_pathv != null and pzlob.zlo_pathc > 0) {
-        const old_count = pzlob.zlo_pathc;
-        const new_count = names.items.len;
-        const total_count = old_count + new_count;
-        const offs = if (flags.dooffs) pzlob.zlo_offs else 0;
-
-        const pathv_buf = allocator.alloc([*c]u8, offs + total_count + 1) catch return error.OutOfMemory;
-        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-
-        var k: usize = 0;
-        while (k < offs) : (k += 1) {
-            result[k] = null;
-        }
-
-        var i: usize = 0;
-        while (i < old_count) : (i += 1) {
-            result[offs + i] = pzlob.zlo_pathv[offs + i];
-        }
-
-        var j: usize = 0;
-        while (j < new_count) : (j += 1) {
-            result[offs + old_count + j] = names.items[j];
-        }
-        result[offs + total_count] = null;
-
-        const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
-        var li: usize = 0;
-        while (li < old_count) : (li += 1) {
-            pathlen_buf[li] = pzlob.zlo_pathlen[li];
-        }
-        var lj: usize = 0;
-        while (lj < new_count) : (lj += 1) {
-            pathlen_buf[old_count + lj] = mem.len(names.items[lj]);
-        }
-
-        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[0 .. offs + old_count + 1];
-        allocator.free(old_pathv_slice);
-        const old_pathlen_slice = pzlob.zlo_pathlen[0..old_count];
-        allocator.free(old_pathlen_slice);
-
-        pzlob.zlo_pathc = total_count;
-        pzlob.zlo_pathv = result;
-        pzlob.zlo_pathlen = pathlen_buf.ptr;
-        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
-    } else {
-        // No APPEND or first call - allocate fresh result array
-        const offs = if (flags.dooffs) pzlob.zlo_offs else 0;
-        const pathv_buf = allocator.alloc([*c]u8, offs + names.items.len + 1) catch return error.OutOfMemory;
-        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-
-        var k: usize = 0;
-        while (k < offs) : (k += 1) {
-            result[k] = null;
-        }
-
-        const pathlen_buf = allocator.alloc(usize, names.items.len) catch return error.OutOfMemory;
-
-        var i: usize = 0;
-        while (i < names.items.len) : (i += 1) {
-            result[offs + i] = names.items[i];
-            pathlen_buf[i] = mem.len(names.items[i]);
-        }
-        result[offs + names.items.len] = null;
-
-        pzlob.zlo_pathc = names.items.len;
-        pzlob.zlo_pathv = result;
-        pzlob.zlo_pathlen = pathlen_buf.ptr;
-        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
-    }
+    return finalizeResults(allocator, &names, flags, pzlob);
 }
 
 // SIMD character search - find all positions of a character
@@ -3200,15 +3050,24 @@ pub inline fn fnmatchWithContext(ctx: *const PatternContext, string: []const u8)
 /// Full fnmatch implementation - exposed for gitignore module
 /// Note: This treats ** as regular * (no special directory handling)
 /// For ** directory matching, use the gitignore module's matchGlob
+/// By default, processes POSIX escape sequences (backslash escapes next char)
 pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
+    return fnmatchWithFlags(pattern, string, true);
+}
+
+/// fnmatch implementation with configurable escape handling
+/// enable_escapes: if true, backslash escapes the next character (POSIX default)
+///                 if false, backslash is treated as literal (NOESCAPE mode)
+pub fn fnmatchWithFlags(pattern: []const u8, string: []const u8, enable_escapes: bool) bool {
     var pi: usize = 0;
     var si: usize = 0;
 
-    // Fast path: check literal prefix before first wildcard
+    // Fast path: check literal prefix before first wildcard or escape
     // This avoids entering the slow recursive path for non-matching strings
     while (pi < pattern.len) {
         const p = pattern[pi];
         if (p == '*' or p == '?' or p == '[') break;
+        if (enable_escapes and p == '\\') break;
 
         if (si >= string.len or string[si] != p) return false;
         pi += 1;
@@ -3222,21 +3081,39 @@ pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
     while (pi < pattern.len) {
         const p = pattern[pi];
 
+        if (enable_escapes and p == '\\') {
+            // POSIX escape: backslash quotes the next character
+            pi += 1;
+            if (pi >= pattern.len) {
+                // Trailing backslash matches literal backslash
+                if (si >= string.len or string[si] != '\\') return false;
+                si += 1;
+            } else {
+                // Match the escaped character literally
+                const escaped = pattern[pi];
+                pi += 1;
+                if (si >= string.len or string[si] != escaped) return false;
+                si += 1;
+            }
+            continue;
+        }
+
         switch (p) {
             '*' => {
                 pi += 1;
                 while (pi < pattern.len and pattern[pi] == '*') pi += 1;
                 if (pi >= pattern.len) return true;
 
-                // If next pattern char is a literal, use SIMD to find it
+                // If next pattern char is a literal (not wildcard/bracket/escape), use SIMD
                 const next = pattern[pi];
-                if (next != '*' and next != '?' and next != '[') {
+                const is_special = next == '*' or next == '?' or next == '[' or (enable_escapes and next == '\\');
+                if (!is_special) {
                     // SIMD search for next literal character
                     var search_start = si;
                     while (search_start <= string.len) {
                         if (simdFindChar(string[search_start..], next)) |offset| {
                             const pos = search_start + offset;
-                            if (fnmatchFull(pattern[pi..], string[pos..])) {
+                            if (fnmatchWithFlags(pattern[pi..], string[pos..], enable_escapes)) {
                                 return true;
                             }
                             search_start = pos + 1;
@@ -3246,9 +3123,9 @@ pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
                     }
                     return false;
                 } else {
-                    // Fallback for wildcards/brackets
+                    // Fallback for wildcards/brackets/escapes
                     while (si <= string.len) : (si += 1) {
-                        if (fnmatchFull(pattern[pi..], string[si..])) {
+                        if (fnmatchWithFlags(pattern[pi..], string[si..], enable_escapes)) {
                             return true;
                         }
                     }
@@ -3268,7 +3145,8 @@ pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
                 si += 1;
 
                 var negate = false;
-                if (pi < pattern.len and pattern[pi] == '!') {
+                // POSIX allows both ! and ^ for negation
+                if (pi < pattern.len and (pattern[pi] == '!' or pattern[pi] == '^')) {
                     negate = true;
                     pi += 1;
                 }
@@ -3311,6 +3189,7 @@ pub fn fnmatchWithExtglob(pattern: []const u8, string: []const u8, enable_extglo
 
 /// Fast bracket expression matching using branchless techniques
 /// Returns the match result and the new pattern index after the closing ']'
+/// Supports POSIX character classes like [[:alpha:]], [[:digit:]], etc.
 inline fn matchBracketExpressionFast(pattern: []const u8, start_pi: usize, ch: u8) struct { matched: bool, new_pi: usize } {
     var pi = start_pi;
     const bracket_start = pi;
@@ -3325,6 +3204,18 @@ inline fn matchBracketExpressionFast(pattern: []const u8, start_pi: usize, ch: u
         // First character is always part of set (even if it's ']')
         // Only subsequent ']' closes the bracket expression
         if (set_c == ']' and pi > bracket_start) break;
+
+        // Check for POSIX character class [[:class:]]
+        if (set_c == '[' and pi + 2 < pattern.len and pattern[pi + 1] == ':') {
+            // Find the closing :]]
+            const class_result = parsePosixCharClass(pattern, pi);
+            if (class_result.valid) {
+                // Add all characters matching this class to the bitmap
+                addPosixClassToBitmap(&bitmap, class_result.class_type);
+                pi = class_result.end_pi;
+                continue;
+            }
+        }
 
         pi += 1;
 
@@ -3357,6 +3248,147 @@ inline fn matchBracketExpressionFast(pattern: []const u8, start_pi: usize, ch: u
     const matched = (bitmap[ch >> 3] & (@as(u8, 1) << @as(u3, @truncate(ch & 7)))) != 0;
 
     return .{ .matched = matched, .new_pi = pi };
+}
+
+/// POSIX character class types
+const PosixCharClass = enum {
+    alpha, // [[:alpha:]] - alphabetic
+    digit, // [[:digit:]] - digits
+    alnum, // [[:alnum:]] - alphanumeric
+    space, // [[:space:]] - whitespace
+    blank, // [[:blank:]] - space and tab
+    lower, // [[:lower:]] - lowercase
+    upper, // [[:upper:]] - uppercase
+    punct, // [[:punct:]] - punctuation
+    xdigit, // [[:xdigit:]] - hex digits
+    cntrl, // [[:cntrl:]] - control characters
+    graph, // [[:graph:]] - visible characters
+    print, // [[:print:]] - printable characters
+    invalid,
+};
+
+/// Parse a POSIX character class starting at pattern[pi] which should be '['
+/// Returns the class type and the index after the closing ']]'
+fn parsePosixCharClass(pattern: []const u8, start_pi: usize) struct { valid: bool, class_type: PosixCharClass, end_pi: usize } {
+    // Pattern should be [[:classname:]]
+    // start_pi points to the first '['
+    if (start_pi + 2 >= pattern.len) return .{ .valid = false, .class_type = .invalid, .end_pi = start_pi };
+    if (pattern[start_pi] != '[' or pattern[start_pi + 1] != ':') {
+        return .{ .valid = false, .class_type = .invalid, .end_pi = start_pi };
+    }
+
+    // Find the closing :]]
+    var pi = start_pi + 2;
+    const class_start = pi;
+
+    while (pi + 1 < pattern.len) {
+        if (pattern[pi] == ':' and pattern[pi + 1] == ']') {
+            const class_name = pattern[class_start..pi];
+            const class_type = getPosixClassType(class_name);
+            if (class_type != .invalid) {
+                return .{ .valid = true, .class_type = class_type, .end_pi = pi + 2 };
+            }
+            return .{ .valid = false, .class_type = .invalid, .end_pi = start_pi };
+        }
+        pi += 1;
+    }
+
+    return .{ .valid = false, .class_type = .invalid, .end_pi = start_pi };
+}
+
+/// Get POSIX class type from class name
+fn getPosixClassType(name: []const u8) PosixCharClass {
+    if (mem.eql(u8, name, "alpha")) return .alpha;
+    if (mem.eql(u8, name, "digit")) return .digit;
+    if (mem.eql(u8, name, "alnum")) return .alnum;
+    if (mem.eql(u8, name, "space")) return .space;
+    if (mem.eql(u8, name, "blank")) return .blank;
+    if (mem.eql(u8, name, "lower")) return .lower;
+    if (mem.eql(u8, name, "upper")) return .upper;
+    if (mem.eql(u8, name, "punct")) return .punct;
+    if (mem.eql(u8, name, "xdigit")) return .xdigit;
+    if (mem.eql(u8, name, "cntrl")) return .cntrl;
+    if (mem.eql(u8, name, "graph")) return .graph;
+    if (mem.eql(u8, name, "print")) return .print;
+    return .invalid;
+}
+
+/// Add all characters matching a POSIX class to the bitmap
+fn addPosixClassToBitmap(bitmap: *[32]u8, class_type: PosixCharClass) void {
+    switch (class_type) {
+        .alpha => {
+            // A-Z
+            addRangeToBitmap(bitmap, 'A', 'Z');
+            // a-z
+            addRangeToBitmap(bitmap, 'a', 'z');
+        },
+        .digit => {
+            // 0-9
+            addRangeToBitmap(bitmap, '0', '9');
+        },
+        .alnum => {
+            // A-Z, a-z, 0-9
+            addRangeToBitmap(bitmap, 'A', 'Z');
+            addRangeToBitmap(bitmap, 'a', 'z');
+            addRangeToBitmap(bitmap, '0', '9');
+        },
+        .space => {
+            // space, \t, \n, \r, \f, \v
+            const space_chars = [_]u8{ ' ', '\t', '\n', '\r', 0x0C, 0x0B };
+            for (space_chars) |sc| {
+                bitmap[sc >> 3] |= @as(u8, 1) << @as(u3, @truncate(sc & 7));
+            }
+        },
+        .blank => {
+            // space and tab only
+            bitmap[' ' >> 3] |= @as(u8, 1) << @as(u3, @truncate(' ' & 7));
+            bitmap['\t' >> 3] |= @as(u8, 1) << @as(u3, @truncate('\t' & 7));
+        },
+        .lower => {
+            // a-z
+            addRangeToBitmap(bitmap, 'a', 'z');
+        },
+        .upper => {
+            // A-Z
+            addRangeToBitmap(bitmap, 'A', 'Z');
+        },
+        .punct => {
+            // Punctuation: !"#$%&'()*+,-./:;<=>?@[\]^_`{|}~
+            const punct_chars = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+            for (punct_chars) |pc| {
+                bitmap[pc >> 3] |= @as(u8, 1) << @as(u3, @truncate(pc & 7));
+            }
+        },
+        .xdigit => {
+            // 0-9, A-F, a-f
+            addRangeToBitmap(bitmap, '0', '9');
+            addRangeToBitmap(bitmap, 'A', 'F');
+            addRangeToBitmap(bitmap, 'a', 'f');
+        },
+        .cntrl => {
+            // Control characters: 0x00-0x1F and 0x7F
+            addRangeToBitmap(bitmap, 0x00, 0x1F);
+            bitmap[0x7F >> 3] |= @as(u8, 1) << @as(u3, @truncate(0x7F & 7));
+        },
+        .graph => {
+            // Visible characters: 0x21-0x7E (printable except space)
+            addRangeToBitmap(bitmap, 0x21, 0x7E);
+        },
+        .print => {
+            // Printable characters: 0x20-0x7E
+            addRangeToBitmap(bitmap, 0x20, 0x7E);
+        },
+        .invalid => {},
+    }
+}
+
+/// Helper to add a range of characters to the bitmap
+inline fn addRangeToBitmap(bitmap: *[32]u8, start: u8, end: u8) void {
+    var ch: u8 = start;
+    while (ch <= end) : (ch += 1) {
+        bitmap[ch >> 3] |= @as(u8, 1) << @as(u3, @truncate(ch & 7));
+        if (ch == 255) break; // Prevent overflow
+    }
 }
 
 /// Internal globfree function - frees zlob_t structure

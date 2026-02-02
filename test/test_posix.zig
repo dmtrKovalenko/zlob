@@ -1109,3 +1109,6 @@ test "literal path - ZLOB_MARK and ZLOB_ONLYDIR together" {
     try testing.expectEqualStrings("dir1/", path);
     try testing.expectEqual(5, pzlob.zlo_pathlen[0]);
 }
+
+// SIMD helper function tests
+

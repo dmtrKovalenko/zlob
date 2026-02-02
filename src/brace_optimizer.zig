@@ -20,6 +20,67 @@ pub fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
     return null;
 }
 
+pub fn expandBraces(allocator: Allocator, pattern: []const u8) ![][]const u8 {
+    var results = std.ArrayListUnmanaged([]const u8){};
+    errdefer {
+        for (results.items) |item| allocator.free(item);
+        results.deinit(allocator);
+    }
+
+    try recursivelyExpandBraces(allocator, pattern, &results);
+
+    return results.toOwnedSlice(allocator);
+}
+
+fn recursivelyExpandBraces(allocator: Allocator, pattern: []const u8, results: *std.ArrayListUnmanaged([]const u8)) !void {
+    // Find first unescaped opening brace
+    var brace_start: ?usize = null;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        if (pattern[i] == '\\' and i + 1 < pattern.len) {
+            i += 1; // Skip escaped character
+            continue;
+        }
+        if (pattern[i] == '{') {
+            brace_start = i;
+            break;
+        }
+    }
+
+    // No braces found, just copy the pattern
+    if (brace_start == null) {
+        const copy = try allocator.dupe(u8, pattern);
+        try results.append(allocator, copy);
+        return;
+    }
+
+    const brace_open = brace_start.?;
+    const brace_close = findClosingBrace(pattern, brace_open + 1) orelse {
+        // No matching closing brace, treat as literal
+        const copy = try allocator.dupe(u8, pattern);
+        try results.append(allocator, copy);
+        return;
+    };
+
+    const prefix = pattern[0..brace_open];
+    const suffix = pattern[brace_close + 1 ..];
+    const brace_content = pattern[brace_open + 1 .. brace_close];
+
+    // Split brace content by commas (respecting nested braces)
+    const alternatives = try splitBraceContent(allocator, brace_content);
+    defer {
+        for (alternatives) |alt| allocator.free(alt);
+        allocator.free(alternatives);
+    }
+
+    // For each alternative, construct new pattern and recursively expand
+    for (alternatives) |alt| {
+        const new_pattern = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, alt, suffix });
+        defer allocator.free(new_pattern);
+        try recursivelyExpandBraces(allocator, new_pattern, results);
+    }
+}
+
 pub fn containsBraces(pattern: []const u8) bool {
     // SIMD optimization for longer patterns
     if (pattern.len >= 32) {
@@ -145,13 +206,24 @@ fn splitBraceContent(allocator: Allocator, content: []const u8) ![][]const u8 {
 
     var start: usize = 0;
     var i: usize = 0;
+    var brace_depth: usize = 0;
 
     while (i < content.len) : (i += 1) {
-        if (content[i] == '\\' and i + 1 < content.len) {
+        const ch = content[i];
+        if (ch == '\\' and i + 1 < content.len) {
             i += 1;
             continue;
         }
-        if (content[i] == ',') {
+        if (ch == '{') {
+            brace_depth += 1;
+            continue;
+        }
+        if (ch == '}') {
+            if (brace_depth > 0) brace_depth -= 1;
+            continue;
+        }
+        // Only split on commas at depth 0 (top-level)
+        if (ch == ',' and brace_depth == 0) {
             const alt = try allocator.dupe(u8, content[start..i]);
             try alternatives.append(alt);
             start = i + 1;
@@ -166,8 +238,7 @@ fn splitBraceContent(allocator: Allocator, content: []const u8) ![][]const u8 {
 
 fn expandBracesAsAlternatives(allocator: Allocator, component: []const u8) !?[][]const u8 {
     const brace_start = mem.indexOf(u8, component, "{") orelse return null;
-    const brace_end = mem.indexOf(u8, component[brace_start..], "}") orelse return null;
-    const brace_end_abs = brace_start + brace_end;
+    const brace_end_abs = findClosingBrace(component, brace_start + 1) orelse return null;
 
     const prefix = component[0..brace_start];
     const brace_content = component[brace_start + 1 .. brace_end_abs];
@@ -187,7 +258,18 @@ fn expandBracesAsAlternatives(allocator: Allocator, component: []const u8) !?[][
 
     for (inner_alts) |inner| {
         const full = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, inner, suffix });
-        try alternatives.append(full);
+        if (mem.indexOf(u8, full, "{") != null) {
+            const expanded = try expandBracesAsAlternatives(allocator, full);
+            allocator.free(full);
+            if (expanded) |exps| {
+                defer allocator.free(exps);
+                for (exps) |exp| {
+                    try alternatives.append(exp);
+                }
+            }
+        } else {
+            try alternatives.append(full);
+        }
     }
 
     return try alternatives.toOwnedSlice();

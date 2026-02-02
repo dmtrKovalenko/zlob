@@ -1,0 +1,397 @@
+//! Comprehensive tests for fnmatch core functionality
+//!
+//! Tests edge cases and corner cases in pattern matching:
+//! - Escape sequences (\*, \?, \[)
+//! - Character class edge cases (reversed ranges, special chars)
+//! - Empty patterns and strings
+//! - Bracket expression edge cases
+//! - Consecutive wildcards
+
+const std = @import("std");
+const testing = std.testing;
+const zlob = @import("zlob");
+const glob = @import("zlob_core");
+const test_utils = @import("test_utils");
+const testMatchPathsOnly = test_utils.testMatchPathsOnly;
+const zlobIsomorphicTest = test_utils.zlobIsomorphicTest;
+const TestResult = test_utils.TestResult;
+
+// Empty string and empty pattern tests
+test "fnmatch - empty string matches empty pattern" {
+    try testing.expect(glob.fnmatchFull("", ""));
+}
+
+test "fnmatch - empty pattern does not match non-empty string" {
+    try testing.expect(!glob.fnmatchFull("", "hello"));
+}
+
+test "fnmatch - non-empty pattern does not match empty string" {
+    try testing.expect(!glob.fnmatchFull("hello", ""));
+}
+
+test "fnmatch - star matches empty string" {
+    try testing.expect(glob.fnmatchFull("*", ""));
+}
+
+test "fnmatch - star only matches anything" {
+    try testing.expect(glob.fnmatchFull("*", "hello"));
+    try testing.expect(glob.fnmatchFull("*", "x"));
+    try testing.expect(glob.fnmatchFull("*", ""));
+    try testing.expect(glob.fnmatchFull("*", "a/b/c"));
+}
+
+test "fnmatch - question mark does not match empty string" {
+    try testing.expect(!glob.fnmatchFull("?", ""));
+}
+
+test "fnmatch - question mark matches single char" {
+    try testing.expect(glob.fnmatchFull("?", "x"));
+    try testing.expect(!glob.fnmatchFull("?", "xy"));
+}
+
+// ============================================================================
+// Escape sequence tests (POSIX behavior)
+// Backslash quotes the following character, making it literal.
+// ============================================================================
+
+test "fnmatch - escaped star matches literal star" {
+    try testing.expect(glob.fnmatchFull("\\*", "*"));
+    try testing.expect(!glob.fnmatchFull("\\*", "a"));
+    try testing.expect(!glob.fnmatchFull("\\*", ""));
+}
+
+test "fnmatch - escaped question mark matches literal question mark" {
+    try testing.expect(glob.fnmatchFull("\\?", "?"));
+    try testing.expect(!glob.fnmatchFull("\\?", "a"));
+    try testing.expect(!glob.fnmatchFull("\\?", ""));
+}
+
+test "fnmatch - escaped bracket matches literal bracket" {
+    try testing.expect(glob.fnmatchFull("\\[", "["));
+    try testing.expect(!glob.fnmatchFull("\\[", "a"));
+}
+
+test "fnmatch - backslash at end of pattern" {
+    // Trailing backslash matches literal backslash
+    try testing.expect(glob.fnmatchFull("foo\\", "foo\\"));
+}
+
+test "fnmatch - escaped backslash" {
+    try testing.expect(glob.fnmatchFull("\\\\", "\\"));
+}
+
+test "fnmatch - escape followed by regular char" {
+    // \a should match literal 'a'
+    try testing.expect(glob.fnmatchFull("\\a", "a"));
+}
+
+test "fnmatch - escape in middle of pattern" {
+    try testing.expect(glob.fnmatchFull("foo\\*bar", "foo*bar"));
+    try testing.expect(!glob.fnmatchFull("foo\\*bar", "fooXbar"));
+}
+
+// ============================================================================
+// Character class (bracket expression) tests
+// ============================================================================
+
+test "fnmatch - basic character class" {
+    try testing.expect(glob.fnmatchFull("[abc]", "a"));
+    try testing.expect(glob.fnmatchFull("[abc]", "b"));
+    try testing.expect(glob.fnmatchFull("[abc]", "c"));
+    try testing.expect(!glob.fnmatchFull("[abc]", "d"));
+    try testing.expect(!glob.fnmatchFull("[abc]", ""));
+}
+
+test "fnmatch - character range" {
+    try testing.expect(glob.fnmatchFull("[a-z]", "m"));
+    try testing.expect(glob.fnmatchFull("[a-z]", "a"));
+    try testing.expect(glob.fnmatchFull("[a-z]", "z"));
+    try testing.expect(!glob.fnmatchFull("[a-z]", "A"));
+    try testing.expect(!glob.fnmatchFull("[a-z]", "0"));
+}
+
+test "fnmatch - numeric range" {
+    try testing.expect(glob.fnmatchFull("[0-9]", "0"));
+    try testing.expect(glob.fnmatchFull("[0-9]", "5"));
+    try testing.expect(glob.fnmatchFull("[0-9]", "9"));
+    try testing.expect(!glob.fnmatchFull("[0-9]", "a"));
+}
+
+test "fnmatch - negated character class" {
+    try testing.expect(!glob.fnmatchFull("[!abc]", "a"));
+    try testing.expect(!glob.fnmatchFull("[!abc]", "b"));
+    try testing.expect(!glob.fnmatchFull("[!abc]", "c"));
+    try testing.expect(glob.fnmatchFull("[!abc]", "d"));
+    try testing.expect(glob.fnmatchFull("[!abc]", "x"));
+}
+
+test "fnmatch - negated range" {
+    try testing.expect(!glob.fnmatchFull("[!0-9]", "5"));
+    try testing.expect(glob.fnmatchFull("[!0-9]", "a"));
+    try testing.expect(glob.fnmatchFull("[!0-9]", "Z"));
+}
+
+test "fnmatch - bracket expression with closing bracket as first char" {
+    // ]abc] matches ], a, b, or c
+    try testing.expect(glob.fnmatchFull("[]abc]", "]"));
+    try testing.expect(glob.fnmatchFull("[]abc]", "a"));
+    try testing.expect(glob.fnmatchFull("[]abc]", "b"));
+    try testing.expect(glob.fnmatchFull("[]abc]", "c"));
+    try testing.expect(!glob.fnmatchFull("[]abc]", "d"));
+}
+
+test "fnmatch - bracket expression with hyphen" {
+    // [-abc] matches -, a, b, or c (hyphen at start is literal)
+    try testing.expect(glob.fnmatchFull("[-abc]", "-"));
+    try testing.expect(glob.fnmatchFull("[-abc]", "a"));
+}
+
+test "fnmatch - bracket expression with hyphen at end" {
+    // [abc-] matches a, b, c, or - (hyphen at end is literal)
+    try testing.expect(glob.fnmatchFull("[abc-]", "-"));
+    try testing.expect(glob.fnmatchFull("[abc-]", "a"));
+}
+
+test "fnmatch - multiple ranges in bracket expression" {
+    try testing.expect(glob.fnmatchFull("[a-zA-Z]", "m"));
+    try testing.expect(glob.fnmatchFull("[a-zA-Z]", "M"));
+    try testing.expect(!glob.fnmatchFull("[a-zA-Z]", "5"));
+}
+
+test "fnmatch - bracket with special characters" {
+    // Note: [!@#$%] is a NEGATED class (! at start means NOT @#$%)
+    // Use [@#$%!] to match these chars literally (! not at start)
+    try testing.expect(glob.fnmatchFull("[@#$%!]", "!"));
+    try testing.expect(glob.fnmatchFull("[@#$%!]", "@"));
+    try testing.expect(glob.fnmatchFull("[@#$%!]", "#"));
+    try testing.expect(!glob.fnmatchFull("[@#$%!]", "a"));
+}
+
+// ============================================================================
+// Consecutive wildcard tests
+// ============================================================================
+
+test "fnmatch - consecutive stars" {
+    try testing.expect(glob.fnmatchFull("**", "hello"));
+    try testing.expect(glob.fnmatchFull("**", ""));
+    try testing.expect(glob.fnmatchFull("***", "hello"));
+}
+
+test "fnmatch - star star star pattern" {
+    try testing.expect(glob.fnmatchFull("a***b", "ab"));
+    try testing.expect(glob.fnmatchFull("a***b", "aXb"));
+    try testing.expect(glob.fnmatchFull("a***b", "aXXXb"));
+}
+
+test "fnmatch - question and star combination" {
+    try testing.expect(glob.fnmatchFull("?*", "a"));
+    try testing.expect(glob.fnmatchFull("?*", "ab"));
+    try testing.expect(glob.fnmatchFull("?*", "abc"));
+    try testing.expect(!glob.fnmatchFull("?*", ""));
+}
+
+test "fnmatch - star and question combination" {
+    try testing.expect(glob.fnmatchFull("*?", "a"));
+    try testing.expect(glob.fnmatchFull("*?", "ab"));
+    try testing.expect(glob.fnmatchFull("*?", "abc"));
+    try testing.expect(!glob.fnmatchFull("*?", ""));
+}
+
+test "fnmatch - multiple question marks" {
+    try testing.expect(glob.fnmatchFull("???", "abc"));
+    try testing.expect(!glob.fnmatchFull("???", "ab"));
+    try testing.expect(!glob.fnmatchFull("???", "abcd"));
+}
+
+test "fnmatch - mixed wildcards" {
+    try testing.expect(glob.fnmatchFull("a*b?c", "aXXbYc"));
+    try testing.expect(glob.fnmatchFull("a*b?c", "abXc"));
+    try testing.expect(!glob.fnmatchFull("a*b?c", "abc"));
+    try testing.expect(!glob.fnmatchFull("a*b?c", "aXXbc"));
+}
+
+// ============================================================================
+// Complex pattern tests
+// ============================================================================
+
+test "fnmatch - complex real-world patterns" {
+    // Git-style patterns
+    try testing.expect(glob.fnmatchFull("*.c", "main.c"));
+    try testing.expect(glob.fnmatchFull("*.c", "test.c"));
+    try testing.expect(!glob.fnmatchFull("*.c", "main.h"));
+
+    // Multiple extensions
+    try testing.expect(glob.fnmatchFull("test.[ch]", "test.c"));
+    try testing.expect(glob.fnmatchFull("test.[ch]", "test.h"));
+    try testing.expect(!glob.fnmatchFull("test.[ch]", "test.o"));
+
+    // Prefix matching
+    try testing.expect(glob.fnmatchFull("test_*.txt", "test_001.txt"));
+    try testing.expect(glob.fnmatchFull("test_*.txt", "test_.txt"));
+    try testing.expect(!glob.fnmatchFull("test_*.txt", "test.txt"));
+}
+
+test "fnmatch - pattern with literal dot" {
+    try testing.expect(glob.fnmatchFull("a.b", "a.b"));
+    try testing.expect(!glob.fnmatchFull("a.b", "aXb"));
+}
+
+test "fnmatch - pattern ending with star" {
+    try testing.expect(glob.fnmatchFull("hello*", "hello"));
+    try testing.expect(glob.fnmatchFull("hello*", "hello world"));
+    try testing.expect(!glob.fnmatchFull("hello*", "hell"));
+}
+
+test "fnmatch - pattern starting with star" {
+    try testing.expect(glob.fnmatchFull("*world", "world"));
+    try testing.expect(glob.fnmatchFull("*world", "hello world"));
+    try testing.expect(!glob.fnmatchFull("*world", "worlds"));
+}
+
+test "fnmatch - star in middle" {
+    try testing.expect(glob.fnmatchFull("a*z", "az"));
+    try testing.expect(glob.fnmatchFull("a*z", "abcdefghijklmnopqrstuvwxyz"));
+    try testing.expect(!glob.fnmatchFull("a*z", "a"));
+    try testing.expect(!glob.fnmatchFull("a*z", "z"));
+}
+
+// ============================================================================
+// matchPaths integration tests for edge cases
+// ============================================================================
+
+test "matchPaths - empty file list with NOCHECK" {
+    const paths = [_][]const u8{};
+    var result = try zlob.matchPaths(testing.allocator, "*.txt", &paths, zlob.ZLOB_NOCHECK);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqualStrings("*.txt", result.paths[0]);
+}
+
+test "matchPaths - literal pattern matching" {
+    const paths = [_][]const u8{
+        "exact_match.txt",
+        "no_match.txt",
+    };
+    var result = try zlob.matchPaths(testing.allocator, "exact_match.txt", &paths, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqualStrings("exact_match.txt", result.paths[0]);
+}
+
+test "matchPaths - pattern with all wildcards" {
+    const paths = [_][]const u8{
+        "a",
+        "abc",
+        "xyz123",
+    };
+    var result = try zlob.matchPaths(testing.allocator, "*", &paths, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 3), result.match_count);
+}
+
+test "matchPaths - bracket expression with path" {
+    const paths = [_][]const u8{
+        "file1.txt",
+        "file2.txt",
+        "file3.txt",
+        "filea.txt",
+    };
+    var result = try zlob.matchPaths(testing.allocator, "file[123].txt", &paths, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 3), result.match_count);
+}
+
+test "matchPaths - case sensitivity" {
+    const paths = [_][]const u8{
+        "Test.TXT",
+        "test.txt",
+        "TEST.txt",
+    };
+    var result = try zlob.matchPaths(testing.allocator, "test.txt", &paths, 0);
+    defer result.deinit();
+
+    // Glob is case-sensitive by default
+    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqualStrings("test.txt", result.paths[0]);
+}
+
+// ============================================================================
+// Pattern template fast-path tests
+// ============================================================================
+
+test "PatternContext - literal template" {
+    const ctx = glob.PatternContext.init("exact.txt");
+    try testing.expectEqual(glob.PatternTemplate.literal, ctx.template);
+    try testing.expect(!ctx.has_wildcards);
+}
+
+test "PatternContext - star_only template" {
+    const ctx = glob.PatternContext.init("*");
+    try testing.expectEqual(glob.PatternTemplate.star_only, ctx.template);
+    try testing.expect(ctx.has_wildcards);
+}
+
+test "PatternContext - star_dot_ext template" {
+    const ctx = glob.PatternContext.init("*.txt");
+    try testing.expectEqual(glob.PatternTemplate.star_dot_ext, ctx.template);
+    try testing.expectEqualStrings(".txt", ctx.template_suffix);
+}
+
+test "PatternContext - prefix_star template" {
+    const ctx = glob.PatternContext.init("test_*");
+    try testing.expectEqual(glob.PatternTemplate.prefix_star, ctx.template);
+    try testing.expectEqualStrings("test_", ctx.template_prefix);
+}
+
+test "PatternContext - prefix_star_ext template" {
+    const ctx = glob.PatternContext.init("test_*.txt");
+    try testing.expectEqual(glob.PatternTemplate.prefix_star_ext, ctx.template);
+    try testing.expectEqualStrings("test_", ctx.template_prefix);
+    try testing.expectEqualStrings(".txt", ctx.template_suffix);
+}
+
+test "PatternContext - bracket_with_affixes template" {
+    const ctx = glob.PatternContext.init("file[123].txt");
+    try testing.expectEqual(glob.PatternTemplate.bracket_with_affixes, ctx.template);
+    try testing.expectEqualStrings("file", ctx.template_prefix);
+    try testing.expectEqualStrings(".txt", ctx.template_suffix);
+    try testing.expect(ctx.bracket_bitmap != null);
+}
+
+test "PatternContext - required_last_char extraction" {
+    const ctx1 = glob.PatternContext.init("*.txt");
+    try testing.expectEqual(@as(?u8, 't'), ctx1.required_last_char);
+
+    const ctx2 = glob.PatternContext.init("test*");
+    try testing.expectEqual(@as(?u8, null), ctx2.required_last_char);
+
+    const ctx3 = glob.PatternContext.init("exact");
+    try testing.expectEqual(@as(?u8, 't'), ctx3.required_last_char);
+}
+
+// SIMD helper function tests
+
+test "hasWildcardsSIMD - detects wildcards" {
+    try testing.expect(glob.hasWildcardsSIMD("*.txt"));
+    try testing.expect(glob.hasWildcardsSIMD("file?.c"));
+    try testing.expect(glob.hasWildcardsSIMD("[abc]"));
+    try testing.expect(!glob.hasWildcardsSIMD("no_wildcards"));
+    try testing.expect(!glob.hasWildcardsSIMD(""));
+}
+
+test "indexOfCharSIMD - finds character" {
+    try testing.expectEqual(@as(?usize, 5), glob.indexOfCharSIMD("hello world", ' '));
+    try testing.expectEqual(@as(?usize, 0), glob.indexOfCharSIMD("hello", 'h'));
+    try testing.expectEqual(@as(?usize, null), glob.indexOfCharSIMD("hello", 'x'));
+}
+
+test "lastIndexOfCharSIMD - finds last occurrence" {
+    // "a/b/c/d" has slashes at indices 1, 3, 5. Last is at 5.
+    try testing.expectEqual(@as(?usize, 5), glob.lastIndexOfCharSIMD("a/b/c/d", '/'));
+    try testing.expectEqual(@as(?usize, 0), glob.lastIndexOfCharSIMD("/single", '/'));
+    try testing.expectEqual(@as(?usize, null), glob.lastIndexOfCharSIMD("no_slash", '/'));
+}

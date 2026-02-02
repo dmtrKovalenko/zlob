@@ -158,7 +158,18 @@ fn findClosingBracket(pattern: []const u8, bracket_start: usize) ?usize {
 fn detectPatternTemplate(pattern: []const u8) struct { template: PatternTemplate, prefix: []const u8, suffix: []const u8, bracket_bitmap: ?BracketBitmap } {
     // Check for literal (no wildcards)
     if (!hasWildcardsSIMD(pattern)) {
+        // Also check for escape sequences - if present, we can't use literal fast path
+        // because the pattern needs escape processing
+        if (mem.indexOfScalar(u8, pattern, '\\') != null) {
+            return .{ .template = .none, .prefix = "", .suffix = "", .bracket_bitmap = null };
+        }
         return .{ .template = .literal, .prefix = pattern, .suffix = "", .bracket_bitmap = null };
+    }
+
+    // If pattern contains escape sequences, don't use template optimization
+    // because templates don't handle POSIX escape processing
+    if (mem.indexOfScalar(u8, pattern, '\\') != null) {
+        return .{ .template = .none, .prefix = "", .suffix = "", .bracket_bitmap = null };
     }
 
     // Check for single * only

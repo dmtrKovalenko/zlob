@@ -17,14 +17,8 @@ const fnmatchWithContext = glob.fnmatchWithContext;
 const fnmatchWithExtglob = glob.fnmatchWithExtglob;
 const containsExtglob = glob.containsExtglob;
 
-// Re-export types and flags
-pub const GlobResults = glob.GlobResults;
-pub const ZLOB_NOSORT = glob.ZLOB_NOSORT;
-pub const ZLOB_PERIOD = glob.ZLOB_PERIOD;
-pub const ZLOB_NOCHECK = glob.ZLOB_NOCHECK;
-pub const ZLOB_NOESCAPE = glob.ZLOB_NOESCAPE;
-pub const ZLOB_BRACE = glob.ZLOB_BRACE;
-pub const ZLOB_EXTGLOB = glob.ZLOB_EXTGLOB;
+const GlobResults = glob.GlobResults;
+const ZlobFlags = glob.ZlobFlags;
 
 const PatternSegments = struct {
     segments: [][]const u8,
@@ -262,69 +256,7 @@ pub fn extractSuffixFromPattern(pattern: []const u8) struct { suffix: ?[]const u
     return .{ .suffix = after_star };
 }
 
-// Expand brace patterns like "{a,b,c}" into multiple patterns
-fn expandBraces(allocator: Allocator, pattern: []const u8, results: *std.array_list.AlignedManaged([]const u8, null)) !void {
-    // Find first unescaped opening brace
-    var brace_start: ?usize = null;
-    var i: usize = 0;
-    while (i < pattern.len) : (i += 1) {
-        if (pattern[i] == '\\' and i + 1 < pattern.len) {
-            i += 1; // Skip escaped character
-            continue;
-        }
-        if (pattern[i] == '{') {
-            brace_start = i;
-            break;
-        }
-    }
-
-    // No braces found, just copy the pattern
-    if (brace_start == null) {
-        const copy = try allocator.dupe(u8, pattern);
-        try results.append(copy);
-        return;
-    }
-
-    const brace_open = brace_start.?;
-    const brace_close = brace_optimizer.findClosingBrace(pattern, brace_open + 1) orelse {
-        // No matching closing brace, treat as literal
-        const copy = try allocator.dupe(u8, pattern);
-        try results.append(copy);
-        return;
-    };
-
-    const prefix = pattern[0..brace_open];
-    const suffix = pattern[brace_close + 1 ..];
-    const brace_content = pattern[brace_open + 1 .. brace_close];
-
-    // Split brace content by commas
-    var start: usize = 0;
-    var alternatives = std.array_list.AlignedManaged([]const u8, null).init(allocator);
-    defer {
-        for (alternatives.items) |alt| {
-            allocator.free(alt);
-        }
-        alternatives.deinit();
-    }
-
-    i = 0;
-    while (i <= brace_content.len) : (i += 1) {
-        if (i == brace_content.len or brace_content[i] == ',') {
-            const alt = brace_content[start..i];
-
-            const new_str = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, alt, suffix });
-            try alternatives.append(new_str);
-            start = i + 1;
-        }
-    }
-
-    // Recursively expand each alternative
-    for (alternatives.items) |alt_pattern| {
-        try expandBraces(allocator, alt_pattern, results);
-    }
-}
-
-fn shouldSkipHidden(path_component: []const u8, pattern: []const u8, flags: u32) bool {
+fn shouldSkipHidden(path_component: []const u8, pattern: []const u8, flags: ZlobFlags) bool {
     if (path_component.len == 0 or path_component[0] != '.') {
         return false;
     }
@@ -333,7 +265,7 @@ fn shouldSkipHidden(path_component: []const u8, pattern: []const u8, flags: u32)
         return true;
     }
 
-    if (flags & ZLOB_PERIOD != 0) {
+    if (flags.period) {
         return false;
     }
 
@@ -361,11 +293,11 @@ fn matchPathSegments(
     pattern_contexts: []PatternContext,
     initial_segment_idx: usize,
     initial_path_idx: usize,
-    flags: u32,
+    flags: ZlobFlags,
 ) bool {
     const pat_len = pattern_segments.len - initial_segment_idx;
     const path_len = path_components.len - initial_path_idx;
-    const enable_extglob = (flags & ZLOB_EXTGLOB) != 0;
+    const enable_extglob = flags.extglob;
 
     if (pat_len == 0) return path_len == 0;
 
@@ -438,16 +370,17 @@ fn matchPathSegments(
 fn matchSinglePath(
     pattern_segments: *const PatternSegments,
     path: []const u8,
-    flags: u32,
+    flags: ZlobFlags,
 ) !bool {
-    const enable_extglob = (flags & ZLOB_EXTGLOB) != 0;
+    const enable_extglob = flags.extglob;
+    const enable_escapes = !flags.noescape; // NOESCAPE means escapes are disabled
 
     if (!pattern_segments.has_doublestar) {
-        // For simple patterns without **, use extglob-aware matching if enabled
         if (enable_extglob and containsExtglob(pattern_segments.original_pattern)) {
             return fnmatchWithExtglob(pattern_segments.original_pattern, path, true);
         }
-        return fnmatchWithContext(&pattern_segments.pattern_context, path);
+        // Use fnmatchWithFlags to properly handle escape sequences based on NOESCAPE flag
+        return glob.fnmatchWithFlags(pattern_segments.original_pattern, path, enable_escapes);
     }
 
     var component_buffer: [64][]const u8 = undefined;
@@ -508,38 +441,51 @@ pub fn matchPaths(
     allocator: Allocator,
     pattern: []const u8,
     paths: []const []const u8,
-    flags: u32,
+    flags: ZlobFlags,
 ) !GlobResults {
-    // Handle ZLOB_BRACE expansion first
-    if (flags & ZLOB_BRACE != 0) {
-        var expanded_patterns = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+    // Handle ZLOB_BRACE - expand pattern and match against any alternative
+    if (flags.brace) {
+        const expanded_patterns = try brace_optimizer.expandBraces(allocator, pattern);
         defer {
-            for (expanded_patterns.items) |p| {
+            for (expanded_patterns) |p| {
                 allocator.free(p);
             }
-            expanded_patterns.deinit();
+            allocator.free(expanded_patterns);
         }
 
-        try expandBraces(allocator, pattern, &expanded_patterns);
+        // If only one pattern after expansion (no actual braces), just match it directly
+        if (expanded_patterns.len == 1) {
+            return matchPaths(allocator, expanded_patterns[0], paths, flags.without(.{ .brace = true }));
+        }
 
-        // Match each expanded pattern and combine results
-        var all_matches = std.StringHashMap(void).init(allocator);
-        defer all_matches.deinit();
+        // Pre-compute pattern segments for each alternative
+        var pattern_segments_list = try allocator.alloc(PatternSegments, expanded_patterns.len);
+        defer {
+            for (pattern_segments_list) |*ps| ps.deinit();
+            allocator.free(pattern_segments_list);
+        }
+        for (expanded_patterns, 0..) |exp_pattern, i| {
+            pattern_segments_list[i] = try splitPatternByDoublestar(allocator, exp_pattern);
+        }
 
-        for (expanded_patterns.items) |exp_pattern| {
-            // Recursively call matchPaths without ZLOB_BRACE flag to avoid infinite recursion
-            var result = try matchPaths(allocator, exp_pattern, paths, flags & ~@as(u32, ZLOB_BRACE));
-            defer result.deinit();
+        var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+        defer matches.deinit();
 
-            // Add matches to our set for deduplication
-            for (result.paths) |path| {
-                try all_matches.put(path, {});
+        const inner_flags = flags.without(.{ .brace = true, .nocheck = true });
+
+        // Single pass through paths - check if ANY alternative matches
+        for (paths) |path| {
+            for (pattern_segments_list) |*ps| {
+                if (try matchSinglePath(ps, path, inner_flags)) {
+                    try matches.append(path);
+                    break; // Path matched, no need to check other alternatives
+                }
             }
         }
 
-        // Convert set back to array
-        if (all_matches.count() == 0) {
-            if (flags & ZLOB_NOCHECK != 0) {
+        // Handle no matches
+        if (matches.items.len == 0) {
+            if (flags.nocheck) {
                 var result_paths = try allocator.alloc([]const u8, 1);
                 result_paths[0] = try allocator.dupe(u8, pattern);
                 return GlobResults{
@@ -558,16 +504,10 @@ pub fn matchPaths(
             };
         }
 
-        var result_paths = try allocator.alloc([]const u8, all_matches.count());
-        var i: usize = 0;
-        var iter = all_matches.keyIterator();
-        while (iter.next()) |key| {
-            result_paths[i] = key.*;
-            i += 1;
-        }
+        const result_paths = try matches.toOwnedSlice();
 
         // Sort if needed
-        if (flags & ZLOB_NOSORT == 0) {
+        if (!flags.nosort) {
             mem.sort([]const u8, result_paths, {}, struct {
                 fn lessThan(_: void, a: []const u8, b: []const u8) bool {
                     return mem.order(u8, a, b) == .lt;
@@ -584,7 +524,7 @@ pub fn matchPaths(
     }
 
     if (paths.len == 0) {
-        if (flags & ZLOB_NOCHECK != 0) {
+        if (flags.nocheck) {
             var result_paths = try allocator.alloc([]const u8, 1);
             result_paths[0] = try allocator.dupe(u8, pattern);
             return GlobResults{
@@ -607,7 +547,7 @@ pub fn matchPaths(
     // If pattern contains no wildcards, use direct string equality.
     // Paths must be normalized (no consecutive slashes).
     // Note: If extglob is enabled, we need to check for extglob patterns too
-    const has_extglob = (flags & ZLOB_EXTGLOB != 0) and containsExtglob(pattern);
+    const has_extglob = flags.extglob and containsExtglob(pattern);
     if (!hasWildcardsSIMD(pattern) and !has_extglob) {
         var norm_pattern_buf: [4096]u8 = undefined;
         const norm_pattern = blk: {
@@ -640,7 +580,7 @@ pub fn matchPaths(
             }
         }
 
-        if (matches.items.len == 0 and flags & ZLOB_NOCHECK != 0) {
+        if (matches.items.len == 0 and flags.nocheck) {
             var result_paths = try allocator.alloc([]const u8, 1);
             result_paths[0] = try allocator.dupe(u8, pattern);
             return GlobResults{
@@ -725,7 +665,7 @@ pub fn matchPaths(
         }
     }
 
-    if (matches.items.len == 0 and flags & ZLOB_NOCHECK != 0) {
+    if (matches.items.len == 0 and flags.nocheck) {
         var result_paths = try allocator.alloc([]const u8, 1);
         result_paths[0] = try allocator.dupe(u8, pattern);
         return GlobResults{
@@ -748,7 +688,7 @@ pub fn matchPaths(
 
     const result_paths = try matches.toOwnedSlice();
 
-    if (flags & ZLOB_NOSORT == 0) {
+    if (!flags.nosort) {
         mem.sort([]const u8, result_paths, {}, struct {
             fn lessThan(_: void, a: []const u8, b: []const u8) bool {
                 return mem.order(u8, a, b) == .lt;

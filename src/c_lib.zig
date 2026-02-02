@@ -134,7 +134,7 @@ pub export fn zlob_match_paths(
         zig_paths_storage[i] = mem.sliceTo(paths[i], 0);
     }
 
-    var results = zlob_impl.path_matcher.matchPaths(allocator, pattern_slice, zig_paths_storage, @intCast(flags)) catch |err| {
+    var results = zlob_impl.path_matcher.matchPaths(allocator, pattern_slice, zig_paths_storage, ZlobFlags.fromInt(flags)) catch |err| {
         return switch (err) {
             error.OutOfMemory => ZLOB_NOSPACE,
         };
@@ -183,7 +183,7 @@ pub export fn zlob_match_paths_slice(
     // UNSAFE: Relies on Zig ABI compatibility
     const zig_paths: []const []const u8 = @ptrCast(paths[0..path_count]);
 
-    var results = zlob_impl.path_matcher.matchPaths(allocator, pattern_slice, zig_paths, @intCast(flags)) catch |err| {
+    var results = zlob_impl.path_matcher.matchPaths(allocator, pattern_slice, zig_paths, ZlobFlags.fromInt(flags)) catch |err| {
         return switch (err) {
             error.OutOfMemory => ZLOB_NOSPACE,
         };

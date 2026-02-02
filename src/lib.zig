@@ -140,7 +140,7 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: any
 /// - Paths from filesystem operations are typically already normalized
 pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !GlobResults {
     const zflags = flagsToZlobFlags(flags_param);
-    return glob.path_matcher.matchPaths(allocator, pattern, paths, zflags.toU32());
+    return glob.path_matcher.matchPaths(allocator, pattern, paths, zflags);
 }
 
 /// Perform file system walking within a specified base directory and collect matching results.

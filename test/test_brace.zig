@@ -1282,3 +1282,91 @@ test "ZLOB_BRACE filesystem - brace dir AND wildcard dir AND brace extension" {
     // lib/common/shared.c, lib/common/shared.h
     try testing.expect(pzlob.zlo_pathc >= 6);
 }
+
+test "ZLOB_BRACE - nested braces {a,{b,c}}.txt" {
+    const files = [_][]const u8{
+        "a.txt",
+        "b.txt",
+        "c.txt",
+        "d.txt",
+    };
+
+    // {a,{b,c}}.txt should expand to a.txt, b.txt, c.txt
+    try zlobIsomorphicTest(&files, "{a,{b,c}}.txt", zlob.ZLOB_BRACE, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expect(result.hasPath("a.txt"));
+            try testing.expect(result.hasPath("b.txt"));
+            try testing.expect(result.hasPath("c.txt"));
+        }
+    }.assert, @src());
+}
+
+test "ZLOB_BRACE - deeply nested braces {{a,b},{c,d}}.txt" {
+    const files = [_][]const u8{
+        "a.txt",
+        "b.txt",
+        "c.txt",
+        "d.txt",
+    };
+
+    // {{a,b},{c,d}}.txt should expand to a.txt, b.txt, c.txt, d.txt
+    try zlobIsomorphicTest(&files, "{{a,b},{c,d}}.txt", zlob.ZLOB_BRACE, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 4), result.count);
+            try testing.expect(result.hasPath("a.txt"));
+            try testing.expect(result.hasPath("b.txt"));
+            try testing.expect(result.hasPath("c.txt"));
+            try testing.expect(result.hasPath("d.txt"));
+        }
+    }.assert, @src());
+}
+
+test "ZLOB_BRACE - mixed nested {a,b,{c,d}}.txt" {
+    const files = [_][]const u8{
+        "a.txt",
+        "b.txt",
+        "c.txt",
+        "d.txt",
+    };
+
+    // {a,b,{c,d}}.txt should expand to a.txt, b.txt, c.txt, d.txt
+    try zlobIsomorphicTest(&files, "{a,b,{c,d}}.txt", zlob.ZLOB_BRACE, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 4), result.count);
+            try testing.expect(result.hasPath("a.txt"));
+            try testing.expect(result.hasPath("b.txt"));
+            try testing.expect(result.hasPath("c.txt"));
+            try testing.expect(result.hasPath("d.txt"));
+        }
+    }.assert, @src());
+}
+
+test "combined flags - BRACE and NOCHECK" {
+    const files = [_][]const u8{
+        "a.txt",
+    };
+
+    // With BRACE + NOCHECK when NO alternatives match:
+    // libc behavior: returns the ORIGINAL unexpanded pattern as a single result
+    // (not each expanded alternative separately)
+    var result = try zlob.matchPaths(testing.allocator, "{x,y,z}.txt", &files, zlob.ZLOB_BRACE | zlob.ZLOB_NOCHECK);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqualStrings("{x,y,z}.txt", result.paths[0]);
+
+    const filesPartial = [_][]const u8{
+        "a.txt",
+        "b.txt",
+    };
+
+    // With BRACE + NOCHECK when SOME alternatives match:
+    // libc behavior: returns only the matching files (not the non-matching patterns)
+    var resultPartial = try zlob.matchPaths(testing.allocator, "{a,x,y}.txt", &filesPartial, zlob.ZLOB_BRACE | zlob.ZLOB_NOCHECK);
+    defer resultPartial.deinit();
+
+    try testing.expectEqual(@as(usize, 1), resultPartial.match_count);
+    try testing.expectEqualStrings("a.txt", resultPartial.paths[0]);
+}
+
