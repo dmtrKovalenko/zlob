@@ -71,19 +71,19 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: any
     const opt_result = try glob.glob(allocator, pattern_z.ptr, zflags.toInt(), null, &pzlob);
 
     if (opt_result) |_| {
-        var paths = try allocator.alloc([]const u8, pzlob.gl_pathc);
+        var paths = try allocator.alloc([]const u8, pzlob.zlo_pathc);
         errdefer allocator.free(paths);
 
         var i: usize = 0;
-        while (i < pzlob.gl_pathc) : (i += 1) {
-            const c_path = pzlob.gl_pathv[i];
-            const path_len = pzlob.gl_pathlen[i];
+        while (i < pzlob.zlo_pathc) : (i += 1) {
+            const c_path = pzlob.zlo_pathv[i];
+            const path_len = pzlob.zlo_pathlen[i];
             paths[i] = c_path[0..path_len];
         }
 
         return GlobResults{
             .paths = paths,
-            .match_count = pzlob.gl_pathc,
+            .match_count = pzlob.zlo_pathc,
             .allocator = allocator,
             .pzlob = pzlob,
         };
@@ -169,19 +169,19 @@ pub fn matchAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []c
     const opt_result = try glob.globAt(allocator, base_path, pattern_z.ptr, zflags.toInt(), null, &pzlob);
 
     if (opt_result) |_| {
-        var paths = try allocator.alloc([]const u8, pzlob.gl_pathc);
+        var paths = try allocator.alloc([]const u8, pzlob.zlo_pathc);
         errdefer allocator.free(paths);
 
         var i: usize = 0;
-        while (i < pzlob.gl_pathc) : (i += 1) {
-            const c_path = pzlob.gl_pathv[i];
-            const path_len = pzlob.gl_pathlen[i];
+        while (i < pzlob.zlo_pathc) : (i += 1) {
+            const c_path = pzlob.zlo_pathv[i];
+            const path_len = pzlob.zlo_pathlen[i];
             paths[i] = c_path[0..path_len];
         }
 
         return GlobResults{
             .paths = paths,
-            .match_count = pzlob.gl_pathc,
+            .match_count = pzlob.zlo_pathc,
             .allocator = allocator,
             .pzlob = pzlob,
         };

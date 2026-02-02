@@ -59,7 +59,7 @@ fn runBenchmark(tc: TestCase, warmup_iterations: usize) !BenchmarkResult {
         var pzlob: zlob_t = undefined;
         const result = c_lib.zlob(tc.pattern.ptr, flags, null, &pzlob);
         if (result == 0) {
-            matches = pzlob.gl_pathc;
+            matches = pzlob.zlo_pathc;
             c_lib.zlobfree(&pzlob);
         }
     }
@@ -72,7 +72,7 @@ fn runBenchmark(tc: TestCase, warmup_iterations: usize) !BenchmarkResult {
         var pzlob: zlob_t = undefined;
         const result = c_lib.zlob(tc.pattern.ptr, flags, null, &pzlob);
         if (result == 0) {
-            matches = pzlob.gl_pathc;
+            matches = pzlob.zlo_pathc;
             c_lib.zlobfree(&pzlob);
         }
     }

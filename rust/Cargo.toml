@@ -12,7 +12,7 @@ readme = "README.md"
 bitflags = "2"
 
 [build-dependencies]
-# No external dependencies - we invoke zig directly
+bindgen = "0.70"
 
 [dev-dependencies]
 tempfile = "3"

@@ -91,8 +91,7 @@ fn makeDirRecursive(path: []const u8) !void {
 ///     try zlobIsomorphicTest(&files, "*.@(js|ts)", zlob.ZLOB_EXTGLOB, struct {
 ///         fn assert(result: TestResult) !void {
 ///             try testing.expectEqual(@as(usize, 2), result.count);
-///             try testing.expect(result.hasPath("foo.js"));
-///             try testing.expect(result.hasPath("bar.ts"));
+///             try testing.expect(result.hasPath("foo.js")); try testing.expect(result.hasPath("bar.ts"));
 ///         }
 ///     }.assert);
 /// }
@@ -102,6 +101,7 @@ pub fn zlobIsomorphicTest(
     pattern: []const u8,
     flags: u32,
     assertFn: AssertFn,
+    src: std.builtin.SourceLocation,
 ) !void {
     const allocator = testing.allocator;
 
@@ -124,9 +124,17 @@ pub fn zlobIsomorphicTest(
     // Part 2: Test with filesystem match
     // ========================================
     {
-        // Create temp directory with unique name
-        var tmp_dir_buf: [256]u8 = undefined;
-        const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_test_{d}", .{std.time.milliTimestamp()});
+        // Create temp directory with unique name based on test name (from @src())
+        // This is deterministic and avoids race conditions between parallel tests
+        var tmp_dir_buf: [512]u8 = undefined;
+
+        // Hash the test function name to create a unique but deterministic suffix
+        var hasher = std.hash.Fnv1a_64.init();
+        hasher.update(src.fn_name);
+        hasher.update(src.file);
+        const hash = hasher.final();
+
+        const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_test_{x}", .{hash});
 
         // Create the temp directory
         std.fs.makeDirAbsolute(tmp_dir) catch |err| {

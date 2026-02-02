@@ -8,9 +8,9 @@ extern "c" fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: ?*const anyopa
 extern "c" fn globfree(pzlob: *GlobT) void;
 
 const GlobT = extern struct {
-    gl_pathc: usize,
-    gl_pathv: [*c][*c]u8,
-    gl_offs: usize,
+    pathc: usize,
+    pathv: [*c][*c]u8,
+    offs: usize,
 };
 
 fn benchmarkLibcGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
@@ -84,7 +84,7 @@ pub fn main() !void {
     // First, count the matches
     var zlob_buf: GlobT = undefined;
     const result = glob(pattern_z.ptr, 0, null, &zlob_buf);
-    const libc_count = if (result == 0) zlob_buf.gl_pathc else 0;
+    const libc_count = if (result == 0) zlob_buf.pathc else 0;
     if (result == 0) {
         globfree(&zlob_buf);
     }
@@ -93,7 +93,7 @@ pub fn main() !void {
     var zlob_buf2: c_lib.zlob_t = undefined;
     const zlob_result = c_lib.zlob(pattern_z.ptr, 0, null, &zlob_buf2);
     if (zlob_result == 0) {
-        zlob_count = zlob_buf2.gl_pathc;
+        zlob_count = zlob_buf2.zlo_pathc;
         c_lib.zlobfree(&zlob_buf2);
     }
 

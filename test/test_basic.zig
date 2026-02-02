@@ -1,6 +1,9 @@
 const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
+const test_utils = @import("test_utils");
+const zlobIsomorphicTest = test_utils.zlobIsomorphicTest;
+const TestResult = test_utils.TestResult;
 
 test "matchPaths - simple wildcard" {
     const files = [_][]const u8{
@@ -11,20 +14,13 @@ test "matchPaths - simple wildcard" {
         "readme.md",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "*.txt", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 2), result.match_count);
-
-    // Check that we got the right files
-    var found_test = false;
-    var found_file = false;
-    for (result.paths) |path| {
-        if (std.mem.eql(u8, path, "test.txt")) found_test = true;
-        if (std.mem.eql(u8, path, "file.txt")) found_file = true;
-    }
-    try testing.expect(found_test);
-    try testing.expect(found_file);
+    try zlobIsomorphicTest(&files, "*.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath("test.txt"));
+            try testing.expect(result.hasPath("file.txt"));
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - question mark" {
@@ -35,10 +31,13 @@ test "matchPaths - question mark" {
         "x.txt",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "?.txt", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try zlobIsomorphicTest(&files, "?.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath("a.txt"));
+            try testing.expect(result.hasPath("x.txt"));
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - character class" {
@@ -49,10 +48,13 @@ test "matchPaths - character class" {
         "d4.txt",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "[ab]*.txt", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try zlobIsomorphicTest(&files, "[ab]*.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath("a1.txt"));
+            try testing.expect(result.hasPath("b2.txt"));
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - negated character class" {
@@ -62,10 +64,13 @@ test "matchPaths - negated character class" {
         "c3.txt",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "[!a]*.txt", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try zlobIsomorphicTest(&files, "[!a]*.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath("b2.txt"));
+            try testing.expect(result.hasPath("c3.txt"));
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - with paths" {
@@ -76,10 +81,13 @@ test "matchPaths - with paths" {
         "docs/readme.md",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "src/*.zig", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try zlobIsomorphicTest(&files, "src/*.zig", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath("src/main.zig"));
+            try testing.expect(result.hasPath("src/test.zig"));
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - recursive pattern" {
@@ -89,11 +97,13 @@ test "matchPaths - recursive pattern" {
         "docs/readme.md",
     };
 
-    // Use recursive pattern to match test.txt at any depth
-    var result = try zlob.matchPaths(testing.allocator, "**/test.txt", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try zlobIsomorphicTest(&files, "**/test.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath("src/test.txt"));
+            try testing.expect(result.hasPath("lib/test.txt"));
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - no matches" {
@@ -102,19 +112,21 @@ test "matchPaths - no matches" {
         "main.zig",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "*.log", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 0), result.match_count);
+    try zlobIsomorphicTest(&files, "*.log", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 0), result.count);
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - empty file list" {
     const files = [_][]const u8{};
 
-    var result = try zlob.matchPaths(testing.allocator, "*.txt", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 0), result.match_count);
+    try zlobIsomorphicTest(&files, "*.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 0), result.count);
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - exact match" {
@@ -124,11 +136,12 @@ test "matchPaths - exact match" {
         "file.txt",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "test.txt", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 1), result.match_count);
-    try testing.expect(std.mem.eql(u8, result.paths[0], "test.txt"));
+    try zlobIsomorphicTest(&files, "test.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 1), result.count);
+            try testing.expect(result.hasPath("test.txt"));
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - complex pattern" {
@@ -139,10 +152,13 @@ test "matchPaths - complex pattern" {
         "test_ab.txt",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "test_[0-9]*.txt", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try zlobIsomorphicTest(&files, "test_[0-9]*.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath("test_01.txt"));
+            try testing.expect(result.hasPath("test_02.txt"));
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - sorted results" {
@@ -152,18 +168,19 @@ test "matchPaths - sorted results" {
         "b.txt",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "*.txt", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 3), result.match_count);
-
-    // Should be sorted
-    try testing.expect(std.mem.eql(u8, result.paths[0], "a.txt"));
-    try testing.expect(std.mem.eql(u8, result.paths[1], "b.txt"));
-    try testing.expect(std.mem.eql(u8, result.paths[2], "c.txt"));
+    try zlobIsomorphicTest(&files, "*.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 3), result.count);
+            // Should be sorted
+            try testing.expectEqualStrings("a.txt", result.paths[0]);
+            try testing.expectEqualStrings("b.txt", result.paths[1]);
+            try testing.expectEqualStrings("c.txt", result.paths[2]);
+        }
+    }.assert, @src());
 }
 
 test "matchPaths - NOSORT flag" {
+    // NOSORT is matchPaths-specific, no filesystem equivalent
     const files = [_][]const u8{
         "c.txt",
         "a.txt",
@@ -178,6 +195,7 @@ test "matchPaths - NOSORT flag" {
 }
 
 test "matchPaths - large file list" {
+    // Large file list test - matchPaths only for performance
     var files: [1000][]const u8 = undefined;
     var file_buffers: [1000][20]u8 = undefined;
 
@@ -202,8 +220,10 @@ test "matchPaths - SIMD fast path" {
     };
 
     // Long literal pattern should use SIMD fast path
-    var result = try zlob.matchPaths(testing.allocator, "very_long_filename_that_triggers_simd.txt", &files, 0);
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try zlobIsomorphicTest(&files, "very_long_filename_that_triggers_simd.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 1), result.count);
+            try testing.expect(result.hasPath("very_long_filename_that_triggers_simd.txt"));
+        }
+    }.assert, @src());
 }

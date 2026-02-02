@@ -8,7 +8,7 @@ const GitIgnore = zlobcore.GitIgnore;
 test "gitignore parse - empty content" {
     var gi = try GitIgnore.parse(testing.allocator, "");
     defer gi.deinit();
-    try testing.expectEqual(@as(usize, 0), gi.patterns.len);
+    try testing.expectEqual(0, gi.patterns.len);
 }
 
 test "gitignore parse - comments and blank lines" {
@@ -19,7 +19,7 @@ test "gitignore parse - comments and blank lines" {
         \\
     );
     defer gi.deinit();
-    try testing.expectEqual(@as(usize, 0), gi.patterns.len);
+    try testing.expectEqual(0, gi.patterns.len);
 }
 
 test "gitignore parse - simple patterns" {
@@ -30,7 +30,7 @@ test "gitignore parse - simple patterns" {
     );
     defer gi.deinit();
 
-    try testing.expectEqual(@as(usize, 3), gi.patterns.len);
+    try testing.expectEqual(3, gi.patterns.len);
 
     // *.log
     try testing.expectEqualStrings("*.log", gi.patterns[0].text);
@@ -57,7 +57,7 @@ test "gitignore parse - anchored patterns" {
     );
     defer gi.deinit();
 
-    try testing.expectEqual(@as(usize, 2), gi.patterns.len);
+    try testing.expectEqual(2, gi.patterns.len);
 
     // /root.txt - leading / makes it anchored
     try testing.expectEqualStrings("root.txt", gi.patterns[0].text);
@@ -75,7 +75,7 @@ test "gitignore parse - double star patterns" {
     );
     defer gi.deinit();
 
-    try testing.expectEqual(@as(usize, 2), gi.patterns.len);
+    try testing.expectEqual(2, gi.patterns.len);
     try testing.expect(gi.patterns[0].has_double_star);
     try testing.expect(gi.patterns[1].has_double_star);
 }

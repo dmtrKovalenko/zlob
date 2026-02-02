@@ -20,7 +20,7 @@ test "matchPaths - ** matches zero directories" {
     var result = try matchPaths(testing.allocator, "**/file.txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(3, result.match_count);
 }
 
 test "matchPaths - ** matches multiple directories" {
@@ -34,7 +34,7 @@ test "matchPaths - ** matches multiple directories" {
     var result = try matchPaths(testing.allocator, "**/file.c", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 4), result.match_count);
+    try testing.expectEqual(4, result.match_count);
 }
 
 test "matchPaths - prefix before **" {
@@ -48,7 +48,7 @@ test "matchPaths - prefix before **" {
     var result = try matchPaths(testing.allocator, "/users/**/main.c", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(3, result.match_count);
 }
 
 test "matchPaths - ** in middle of pattern" {
@@ -62,7 +62,7 @@ test "matchPaths - ** in middle of pattern" {
     var result = try matchPaths(testing.allocator, "src/**/test.zig", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(3, result.match_count);
 }
 
 test "matchPaths - multiple ** in pattern" {
@@ -79,7 +79,7 @@ test "matchPaths - multiple ** in pattern" {
     // Should match paths that have 'a', then any depth, then 'c', then any depth, then 'e.txt'
     // Matches: a/b/c/d/e.txt (a→[b]→c→[d]→e.txt), a/c/e.txt (a→[]→c→[]→e.txt), a/b/c/e.txt (a→[b]→c→[]→e.txt)
     // Does not match: a/b/d/e.txt (no 'c' component)
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(3, result.match_count);
 }
 
 // Test wildcard combinations
@@ -95,7 +95,7 @@ test "matchPaths - ** with * wildcard" {
     var result = try matchPaths(testing.allocator, "dir?/**/test.c", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqual(2, result.match_count);
 }
 
 test "matchPaths - ** with character class" {
@@ -109,7 +109,7 @@ test "matchPaths - ** with character class" {
     var result = try matchPaths(testing.allocator, "dir1/**/[ab]/file.txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqual(2, result.match_count);
 }
 
 // Test flags
@@ -124,7 +124,7 @@ test "matchPaths - ZLOB_NOSORT flag" {
     var result = try matchPaths(testing.allocator, "*.txt", &paths, ZLOB_NOSORT);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(3, result.match_count);
     // Results should be in input order, not sorted
     try testing.expectEqualStrings("zebra.txt", result.paths[0]);
     try testing.expectEqualStrings("alpha.txt", result.paths[1]);
@@ -137,7 +137,7 @@ test "matchPaths - ZLOB_NOCHECK flag" {
     var result = try matchPaths(testing.allocator, "*.zig", &paths, ZLOB_NOCHECK);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqual(1, result.match_count);
     try testing.expectEqualStrings("*.zig", result.paths[0]);
 }
 
@@ -150,7 +150,7 @@ test "matchPaths - ZLOB_PERIOD allows hidden files" {
     var result = try matchPaths(testing.allocator, "**/file.txt", &paths, ZLOB_PERIOD);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqual(2, result.match_count);
 }
 
 test "matchPaths - hidden files blocked without ZLOB_PERIOD" {
@@ -162,7 +162,7 @@ test "matchPaths - hidden files blocked without ZLOB_PERIOD" {
     var result = try matchPaths(testing.allocator, "**/file.txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqual(1, result.match_count);
     try testing.expectEqualStrings("visible/file.txt", result.paths[0]);
 }
 
@@ -175,7 +175,7 @@ test "matchPaths - explicit dot in pattern matches hidden" {
     var result = try matchPaths(testing.allocator, ".*/*", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqual(1, result.match_count);
     try testing.expectEqualStrings(".hidden/file.txt", result.paths[0]);
 }
 
@@ -187,7 +187,7 @@ test "matchPaths - empty input array" {
     var result = try matchPaths(testing.allocator, "*.txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 0), result.match_count);
+    try testing.expectEqual(0, result.match_count);
 }
 
 test "matchPaths - empty input array with ZLOB_NOCHECK" {
@@ -196,7 +196,7 @@ test "matchPaths - empty input array with ZLOB_NOCHECK" {
     var result = try matchPaths(testing.allocator, "*.txt", &paths, ZLOB_NOCHECK);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqual(1, result.match_count);
     try testing.expectEqualStrings("*.txt", result.paths[0]);
 }
 
@@ -206,7 +206,7 @@ test "matchPaths - no matches" {
     var result = try matchPaths(testing.allocator, "*.zig", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 0), result.match_count);
+    try testing.expectEqual(0, result.match_count);
 }
 
 test "matchPaths - pattern is just **" {
@@ -219,7 +219,7 @@ test "matchPaths - pattern is just **" {
     var result = try matchPaths(testing.allocator, "**", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(3, result.match_count);
 }
 
 test "matchPaths - absolute vs relative paths - absolute pattern" {
@@ -231,7 +231,7 @@ test "matchPaths - absolute vs relative paths - absolute pattern" {
     var result = try matchPaths(testing.allocator, "/**/file.txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqual(1, result.match_count);
     try testing.expectEqualStrings("/absolute/path/file.txt", result.paths[0]);
 }
 
@@ -244,7 +244,7 @@ test "matchPaths - absolute vs relative paths - relative pattern" {
     var result = try matchPaths(testing.allocator, "**/file.txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqual(2, result.match_count);
 }
 
 test "matchPaths - consecutive slashes in path" {
@@ -257,7 +257,7 @@ test "matchPaths - consecutive slashes in path" {
     defer result.deinit();
 
     // Only normalized paths match (paths must be pre-normalized)
-    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqual(1, result.match_count);
     try testing.expectEqualStrings("dir/file.txt", result.paths[0]);
 }
 
@@ -275,7 +275,7 @@ test "matchPaths - **/*.c finds all C files" {
     var result = try matchPaths(testing.allocator, "**/*.c", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 4), result.match_count);
+    try testing.expectEqual(4, result.match_count);
 }
 
 test "matchPaths - test files in any test directory" {
@@ -293,7 +293,7 @@ test "matchPaths - test files in any test directory" {
     // Pattern **/test/test_*.zig means: any depth, then 'test' directory, then files matching 'test_*.zig'
     // Matches: src/test/test_helper.zig and test/test_immediate.zig
     // Does not match: test/unit/test_foo.zig (has 'unit' after 'test'), test/integration/test_bar.zig (has 'integration' after 'test')
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqual(2, result.match_count);
 }
 
 test "matchPaths - src directory recursive" {
@@ -308,7 +308,7 @@ test "matchPaths - src directory recursive" {
     var result = try matchPaths(testing.allocator, "src/**/*.zig", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(3, result.match_count);
 }
 
 // Test sorting behavior
@@ -324,7 +324,7 @@ test "matchPaths - results are sorted by default" {
     var result = try matchPaths(testing.allocator, "*.txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 4), result.match_count);
+    try testing.expectEqual(4, result.match_count);
     try testing.expectEqualStrings("alpha.txt", result.paths[0]);
     try testing.expectEqualStrings("beta.txt", result.paths[1]);
     try testing.expectEqualStrings("gamma.txt", result.paths[2]);
@@ -342,7 +342,7 @@ test "matchPaths - literal pattern without wildcards" {
     var result = try matchPaths(testing.allocator, "exact/match/file.txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 1), result.match_count);
+    try testing.expectEqual(1, result.match_count);
     try testing.expectEqualStrings("exact/match/file.txt", result.paths[0]);
 }
 
@@ -359,7 +359,7 @@ test "matchPaths - complex pattern with multiple wildcards" {
     var result = try matchPaths(testing.allocator, "src/*/test_*.zig", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqual(2, result.match_count);
 }
 
 test "matchPaths - ** at the beginning" {
@@ -372,7 +372,7 @@ test "matchPaths - ** at the beginning" {
     var result = try matchPaths(testing.allocator, "**/code/main.c", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(3, result.match_count);
 }
 
 test "matchPaths - ** at the end" {
@@ -386,7 +386,7 @@ test "matchPaths - ** at the end" {
     var result = try matchPaths(testing.allocator, "src/**", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(3, result.match_count);
 }
 
 // Test user's original examples
@@ -401,7 +401,7 @@ test "matchPaths - user example 1: **/code/*.c" {
     var result = try matchPaths(testing.allocator, "**/code/*.c", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqual(2, result.match_count);
 }
 
 test "matchPaths - user example 2: /users/**/code/*.c" {
@@ -414,7 +414,7 @@ test "matchPaths - user example 2: /users/**/code/*.c" {
     var result = try matchPaths(testing.allocator, "/users/**/code/*.c", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqual(2, result.match_count);
 }
 
 test "matchPaths - user example 3: **/*.txt" {
@@ -427,7 +427,7 @@ test "matchPaths - user example 3: **/*.txt" {
     var result = try matchPaths(testing.allocator, "**/*.txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(3, result.match_count);
 }
 
 // ============================================================================
@@ -465,7 +465,7 @@ test "matchPaths - ZLOB_PERIOD should NOT match hidden files by default" {
     }
 
     try testing.expect(!has_hidden);
-    try testing.expectEqual(@as(usize, 2), result.match_count); // 2 non-hidden .txt files
+    try testing.expectEqual(2, result.match_count); // 2 non-hidden .txt files
 }
 
 test "matchPaths - ZLOB_PERIOD matches hidden files with flag" {
@@ -499,5 +499,5 @@ test "matchPaths - ZLOB_PERIOD matches hidden files with flag" {
     }
 
     try testing.expect(hidden_count >= 1); // Should match hidden .txt files
-    try testing.expectEqual(@as(usize, 4), result.match_count); // All 4 .txt files including hidden
+    try testing.expectEqual(4, result.match_count); // All 4 .txt files including hidden
 }

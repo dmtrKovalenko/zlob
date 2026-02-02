@@ -87,13 +87,13 @@ test "ZLOB_MARK - appends slash to directories" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expect(pzlob.gl_pathc >= 3); // At least 3 directories
+    try testing.expectEqual(0, result);
+    try testing.expect(pzlob.zlo_pathc >= 3); // At least 3 directories
 
     // Count directories with trailing slash
     var dir_with_slash_count: usize = 0;
-    for (0..pzlob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+    for (0..pzlob.zlo_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
         if (path.len > 0 and path[path.len - 1] == '/') {
             dir_with_slash_count += 1;
         }
@@ -130,12 +130,12 @@ test "ZLOB_MARK - does not append slash to files" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expect(pzlob.gl_pathc >= 1);
+    try testing.expectEqual(0, result);
+    try testing.expect(pzlob.zlo_pathc >= 1);
 
     // Files should NOT have trailing slash
-    for (0..pzlob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+    for (0..pzlob.zlo_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
         try testing.expect(path.len == 0 or path[path.len - 1] != '/');
     }
 }
@@ -169,15 +169,15 @@ test "ZLOB_MARK - works with recursive glob" {
     try testing.expect(result == 0 or result == glob.ZLOB_NOMATCH);
     if (result == 0) {
         // All matches should be directories with trailing slash
-        for (0..pzlob.gl_pathc) |i| {
-            const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+        for (0..pzlob.zlo_pathc) |i| {
+            const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
             try testing.expect(path.len > 0 and path[path.len - 1] == '/');
         }
     }
 }
 
 // ============================================================================
-// ZLOB_DOOFFS - Reserve gl_offs slots at beginning
+// ZLOB_DOOFFS - Reserve offs slots at beginning
 // ============================================================================
 
 test "ZLOB_DOOFFS - reserves offset slots at beginning" {
@@ -203,21 +203,21 @@ test "ZLOB_DOOFFS - reserves offset slots at beginning" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    pzlob.gl_offs = 3; // Request 3 offset slots
+    pzlob.zlo_offs = 3; // Request 3 offset slots
 
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOOFFS, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expect(pzlob.gl_pathc >= 1);
+    try testing.expectEqual(0, result);
+    try testing.expect(pzlob.zlo_pathc >= 1);
 
-    // First gl_offs entries should be NULL
-    try testing.expect(pzlob.gl_pathv[0] == null);
-    try testing.expect(pzlob.gl_pathv[1] == null);
-    try testing.expect(pzlob.gl_pathv[2] == null);
+    // First offs entries should be NULL
+    try testing.expect(pzlob.zlo_pathv[0] == null);
+    try testing.expect(pzlob.zlo_pathv[1] == null);
+    try testing.expect(pzlob.zlo_pathv[2] == null);
 
-    // First actual match should be at gl_pathv[gl_offs]
-    const first_match = pzlob.gl_pathv[pzlob.gl_offs];
+    // First actual match should be at pathv[offs]
+    const first_match = pzlob.zlo_pathv[pzlob.zlo_offs];
     try testing.expect(first_match != null);
     const path = std.mem.sliceTo(first_match, 0);
     try testing.expect(path.len > 0);
@@ -244,14 +244,14 @@ test "ZLOB_DOOFFS - works with ZLOB_APPEND" {
     defer std.posix.chdir(old_cwd) catch {};
 
     var pzlob: glob.zlob_t = undefined;
-    pzlob.gl_offs = 2;
+    pzlob.zlo_offs = 2;
 
     // First glob
     const pattern1 = try allocator.dupeZ(u8, "*.txt");
     defer allocator.free(pattern1);
     const result1 = c_lib.zlob(pattern1.ptr, glob.ZLOB_DOOFFS, null, &pzlob);
-    try testing.expectEqual(@as(c_int, 0), result1);
-    const first_count = pzlob.gl_pathc;
+    try testing.expectEqual(0, result1);
+    const first_count = pzlob.zlo_pathc;
 
     // Second glob with APPEND
     const pattern2 = try allocator.dupeZ(u8, "*.c");
@@ -259,12 +259,12 @@ test "ZLOB_DOOFFS - works with ZLOB_APPEND" {
     const result2 = c_lib.zlob(pattern2.ptr, glob.ZLOB_DOOFFS | glob.ZLOB_APPEND, null, &pzlob);
     defer c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result2);
-    try testing.expect(pzlob.gl_pathc > first_count);
+    try testing.expectEqual(0, result2);
+    try testing.expect(pzlob.zlo_pathc > first_count);
 
     // Offset slots still NULL
-    try testing.expect(pzlob.gl_pathv[0] == null);
-    try testing.expect(pzlob.gl_pathv[1] == null);
+    try testing.expect(pzlob.zlo_pathv[0] == null);
+    try testing.expect(pzlob.zlo_pathv[1] == null);
 }
 
 // ============================================================================
@@ -300,12 +300,12 @@ test "ZLOB_PERIOD - matches hidden files with wildcard" {
     const result = c_lib.zlob(pattern.ptr, ZLOB_PERIOD, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
 
     // Count matches that start with '.'
     var hidden_count: usize = 0;
-    for (0..pzlob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+    for (0..pzlob.zlo_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
         if (path.len > 0 and path[0] == '.') {
             hidden_count += 1;
         }
@@ -341,11 +341,11 @@ test "ZLOB_PERIOD - without flag does not match hidden files" {
     const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
 
     // Should NOT match hidden files
-    for (0..pzlob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+    for (0..pzlob.zlo_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
         try testing.expect(path.len == 0 or path[0] != '.');
     }
 }
@@ -376,12 +376,12 @@ test "ZLOB_PERIOD - explicit dot still matches" {
     const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
 
     // Should match hidden files even without ZLOB_PERIOD
     var hidden_count: usize = 0;
-    for (0..pzlob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+    for (0..pzlob.zlo_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
         if (path.len > 0 and path[0] == '.') {
             hidden_count += 1;
         }
@@ -414,10 +414,10 @@ test "ZLOB_TILDE - expands tilde to home directory" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
 
-    const matched_path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
+    const matched_path = std.mem.sliceTo(pzlob.zlo_pathv[0], 0);
     try testing.expect(std.mem.startsWith(u8, matched_path, home));
 }
 
@@ -446,10 +446,10 @@ test "ZLOB_TILDE - expands ~username to user home" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_TILDE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
 
-    const matched_path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
+    const matched_path = std.mem.sliceTo(pzlob.zlo_pathv[0], 0);
     try testing.expect(std.mem.startsWith(u8, matched_path, home));
 }
 
@@ -497,10 +497,10 @@ test "ZLOB_TILDE_CHECK - without flag returns tilde literal on unknown user" {
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Without ZLOB_TILDE_CHECK, should fall back to literal tilde
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
 
-    const path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
+    const path = std.mem.sliceTo(pzlob.zlo_pathv[0], 0);
     try testing.expect(std.mem.startsWith(u8, path, "~nonexistentuser99999"));
 }
 
@@ -599,8 +599,8 @@ test "ZLOB_NOMAGIC - succeeds for literal that exists" {
     const result = c_lib.zlob(pattern.ptr, ZLOB_NOMAGIC, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
 }
 
 // ============================================================================
@@ -635,12 +635,12 @@ test "ZLOB_MARK and ZLOB_PERIOD together" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK | ZLOB_PERIOD, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
 
     // Should match hidden files/dirs AND add trailing slash to directories
     var hidden_dir_with_slash: bool = false;
-    for (0..pzlob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+    for (0..pzlob.zlo_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
         if (path.len > 0 and path[0] == '.' and path[path.len - 1] == '/') {
             hidden_dir_with_slash = true;
         }
@@ -673,8 +673,8 @@ test "ZLOB_TILDE with recursive glob" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_TILDE | glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expect(pzlob.gl_pathc >= 1);
+    try testing.expectEqual(0, result);
+    try testing.expect(pzlob.zlo_pathc >= 1);
 }
 
 // ============================================================================
@@ -708,11 +708,11 @@ test "ZLOB_PERIOD - recursive glob should not match hidden files by default" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
 
     // Should NOT match any hidden files or files inside hidden directories
-    for (0..pzlob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+    for (0..pzlob.zlo_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
 
         // Check that path doesn't contain /.hidden anywhere
         if (std.mem.indexOf(u8, path, "/.hidden") != null) {
@@ -762,14 +762,14 @@ test "ZLOB_PERIOD - recursive glob matches hidden files with flag" {
     const result = c_lib.zlob(pattern.ptr, ZLOB_PERIOD | glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
 
     // Count hidden files/directories
     var hidden_file_count: usize = 0;
     var hidden_in_path_count: usize = 0;
 
-    for (0..pzlob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+    for (0..pzlob.zlo_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
 
         // Check if path contains .hidden_dir
         if (std.mem.indexOf(u8, path, ".hidden_dir") != null) {
@@ -821,13 +821,13 @@ test "ZLOB_PERIOD - explicit dot pattern still matches without flag in recursive
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
 
     // Should match .hidden_file and .hidden_dir because pattern explicitly starts with '.'
-    try testing.expect(pzlob.gl_pathc >= 1);
+    try testing.expect(pzlob.zlo_pathc >= 1);
 
-    for (0..pzlob.gl_pathc) |i| {
-        const path = std.mem.sliceTo(pzlob.gl_pathv[i], 0);
+    for (0..pzlob.zlo_pathc) |i| {
+        const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
         try testing.expect(std.mem.indexOf(u8, path, ".hidden") != null);
     }
 }
@@ -858,10 +858,10 @@ test "literal path - file exists" {
     const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
-    try testing.expectEqualStrings("file1.txt", std.mem.sliceTo(pzlob.gl_pathv[0], 0));
-    try testing.expectEqual(@as(usize, 9), pzlob.gl_pathlen[0]);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
+    try testing.expectEqualStrings("file1.txt", std.mem.sliceTo(pzlob.zlo_pathv[0], 0));
+    try testing.expectEqual(9, pzlob.zlo_pathlen[0]);
 }
 
 test "literal path - directory exists" {
@@ -886,9 +886,9 @@ test "literal path - directory exists" {
     const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
-    try testing.expectEqualStrings("dir1", std.mem.sliceTo(pzlob.gl_pathv[0], 0));
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
+    try testing.expectEqualStrings("dir1", std.mem.sliceTo(pzlob.zlo_pathv[0], 0));
 }
 
 test "literal path - ZLOB_ONLYDIR with directory" {
@@ -913,9 +913,9 @@ test "literal path - ZLOB_ONLYDIR with directory" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_ONLYDIR, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
-    try testing.expectEqualStrings("dir1", std.mem.sliceTo(pzlob.gl_pathv[0], 0));
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
+    try testing.expectEqualStrings("dir1", std.mem.sliceTo(pzlob.zlo_pathv[0], 0));
 }
 
 test "literal path - ZLOB_ONLYDIR with file (should fail)" {
@@ -965,11 +965,11 @@ test "literal path - ZLOB_MARK with directory" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
-    const path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
+    const path = std.mem.sliceTo(pzlob.zlo_pathv[0], 0);
     try testing.expectEqualStrings("dir1/", path);
-    try testing.expectEqual(@as(usize, 5), pzlob.gl_pathlen[0]);
+    try testing.expectEqual(5, pzlob.zlo_pathlen[0]);
 }
 
 test "literal path - ZLOB_MARK with file (no slash)" {
@@ -994,9 +994,9 @@ test "literal path - ZLOB_MARK with file (no slash)" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
-    const path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
+    const path = std.mem.sliceTo(pzlob.zlo_pathv[0], 0);
     try testing.expectEqualStrings("file1.txt", path);
 }
 
@@ -1022,10 +1022,10 @@ test "literal path - ./ prefix normalization" {
     const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
     // Should normalize away the "./" prefix
-    try testing.expectEqualStrings("file1.txt", std.mem.sliceTo(pzlob.gl_pathv[0], 0));
+    try testing.expectEqualStrings("file1.txt", std.mem.sliceTo(pzlob.zlo_pathv[0], 0));
 }
 
 test "literal path - ZLOB_NOCHECK returns pattern when not found" {
@@ -1050,10 +1050,10 @@ test "literal path - ZLOB_NOCHECK returns pattern when not found" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_NOCHECK, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
     // Should return the pattern itself
-    try testing.expectEqualStrings("nonexistent.txt", std.mem.sliceTo(pzlob.gl_pathv[0], 0));
+    try testing.expectEqualStrings("nonexistent.txt", std.mem.sliceTo(pzlob.zlo_pathv[0], 0));
 }
 
 test "literal path - not found without ZLOB_NOCHECK" {
@@ -1103,9 +1103,9 @@ test "literal path - ZLOB_MARK and ZLOB_ONLYDIR together" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_MARK | glob.ZLOB_ONLYDIR, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
-    const path = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
+    const path = std.mem.sliceTo(pzlob.zlo_pathv[0], 0);
     try testing.expectEqualStrings("dir1/", path);
-    try testing.expectEqual(@as(usize, 5), pzlob.gl_pathlen[0]);
+    try testing.expectEqual(5, pzlob.zlo_pathlen[0]);
 }

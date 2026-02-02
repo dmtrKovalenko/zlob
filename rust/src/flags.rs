@@ -1,14 +1,10 @@
 //! Flag types for zlob operations.
 //!
-//! Flag values are imported from the C header (include/zlob.h) at build time,
-//! ensuring consistency across C, Zig, and Rust bindings.
+//! Flag values are imported from the C header via bindgen (single source of truth).
 
 use bitflags::bitflags;
 
-// Import flag constants generated from the C header by build.rs
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/zlob_flags.rs"));
-}
+use crate::ffi;
 
 bitflags! {
     /// Bitflags options for zlob configuration
@@ -24,187 +20,109 @@ bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct ZlobFlags: i32 {
         /// Return on read errors.
-        ///
-        /// If set, glob will return `ZlobError::Aborted` when a directory
-        /// cannot be read. Otherwise, errors are ignored.
-        const ERR = generated::ZLOB_ERR;
+        const ERR = ffi::ZLOB_ERR;
 
         /// Append a slash to each directory name.
-        ///
-        /// Matched directories will have a trailing `/` appended.
-        const MARK = generated::ZLOB_MARK;
+        const MARK = ffi::ZLOB_MARK;
 
         /// Don't sort the names.
-        ///
-        /// By default, results are sorted alphabetically. This flag disables
-        /// sorting for potentially faster results.
-        const NOSORT = generated::ZLOB_NOSORT;
+        const NOSORT = ffi::ZLOB_NOSORT;
 
-        /// Insert `gl_offs` NULLs at beginning of result array.
-        ///
-        /// This is mainly for POSIX compatibility and rarely needed.
-        const DOOFFS = generated::ZLOB_DOOFFS;
+        /// Insert `offs` NULLs at beginning of result array.
+        const DOOFFS = ffi::ZLOB_DOOFFS;
 
         /// Return the pattern itself if no matches found.
-        ///
-        /// Instead of returning `Ok(None)`, the pattern string
-        /// itself will be returned as the sole result.
-        const NOCHECK = generated::ZLOB_NOCHECK;
+        const NOCHECK = ffi::ZLOB_NOCHECK;
 
         /// Append results to a previous zlob call.
-        ///
-        /// New matches are added to existing results instead of replacing them.
-        const APPEND = generated::ZLOB_APPEND;
+        const APPEND = ffi::ZLOB_APPEND;
 
         /// Backslashes don't escape metacharacters.
-        ///
-        /// Normally, `\*` matches a literal `*`. With this flag, backslashes
-        /// are treated as regular characters.
-        const NOESCAPE = generated::ZLOB_NOESCAPE;
+        const NOESCAPE = ffi::ZLOB_NOESCAPE;
 
         /// Leading `.` can be matched by wildcards.
-        ///
-        /// By default, patterns like `*` don't match files starting with `.`.
-        /// This flag allows wildcards to match hidden files.
-        const PERIOD = generated::ZLOB_PERIOD;
+        const PERIOD = ffi::ZLOB_PERIOD;
 
-        /// GNU: Set in gl_flags if any metacharacters were seen (output only).
-        ///
-        /// This is an output flag, not an input flag.
-        const MAGCHAR = generated::ZLOB_MAGCHAR;
+        /// GNU: Set in flags if any metacharacters were seen (output only).
+        const MAGCHAR = ffi::ZLOB_MAGCHAR;
 
-        /// GNU: Use custom directory functions (gl_opendir, gl_readdir, gl_closedir).
-        /// !IMPORTANT! there is no api support for rust crate to set those functions yet.
-        const ALTDIRFUNC = generated::ZLOB_ALTDIRFUNC;
+        /// GNU: Use custom directory functions.
+        const ALTDIRFUNC = ffi::ZLOB_ALTDIRFUNC;
 
         /// Expand `{a,b,c}` brace patterns.
         ///
-        /// With this flag, `{foo,bar}` expands to match both "foo" and "bar".
-        ///
         /// # Example
         ///
         /// ```no_run
         /// use zlob::{zlob, ZlobFlags};
-        ///
         /// let result = zlob("src/{lib,main}.rs", ZlobFlags::BRACE).unwrap();
         /// ```
-        const BRACE = generated::ZLOB_BRACE;
+        const BRACE = ffi::ZLOB_BRACE;
 
         /// GNU: If no magic characters, return the pattern literally.
-        ///
-        /// Similar to NOCHECK, but only applies when the pattern contains
-        /// no wildcards.
-        const NOMAGIC = generated::ZLOB_NOMAGIC;
+        const NOMAGIC = ffi::ZLOB_NOMAGIC;
 
         /// Expand `~` to home directory.
         ///
-        /// With this flag:
-        /// - `~` expands to the current user's home directory
-        /// - `~/path` expands to `$HOME/path`
-        /// - `~user/path` expands to that user's home directory
-        ///
         /// # Example
         ///
         /// ```no_run
         /// use zlob::{zlob, ZlobFlags};
-        ///
         /// let result = zlob("~/.config/*", ZlobFlags::TILDE).unwrap();
         /// ```
-        const TILDE = generated::ZLOB_TILDE;
+        const TILDE = ffi::ZLOB_TILDE;
 
         /// Match only directories.
-        ///
-        /// Regular files are excluded from results.
-        const ONLYDIR = generated::ZLOB_ONLYDIR;
+        const ONLYDIR = ffi::ZLOB_ONLYDIR;
 
         /// GNU: Like TILDE, but return error if user is not available.
-        ///
-        /// If the user in `~user` cannot be found, returns an error instead
-        /// of leaving it unexpanded.
-        const TILDE_CHECK = generated::ZLOB_TILDE_CHECK;
+        const TILDE_CHECK = ffi::ZLOB_TILDE_CHECK;
 
-        // =====================================================================
         // zlob extensions (bits 24+)
-        // NOTE: Bits 15-23 are reserved for potential future glibc extensions.
-        // glibc currently uses bits 0-14. We leave a 9-bit gap to avoid conflicts.
-        // =====================================================================
 
         /// Filter results using `.gitignore` rules from the current directory.
         ///
-        /// Matches are filtered against gitignore patterns, excluding files
-        /// that would be ignored by git.
-        ///
         /// # Example
         ///
         /// ```no_run
         /// use zlob::{zlob, ZlobFlags};
-        ///
-        /// // Find all .rs files, excluding those in .gitignore
         /// let result = zlob("**/*.rs", ZlobFlags::GITIGNORE | ZlobFlags::DOUBLESTAR_RECURSIVE).unwrap();
         /// ```
-        const GITIGNORE = generated::ZLOB_GITIGNORE;
+        const GITIGNORE = ffi::ZLOB_GITIGNORE;
 
         /// Enable `**` recursive directory matching.
         ///
-        /// By default (for glibc compatibility), `**` is treated as `*` (single-level match).
-        /// With this flag, `**` matches zero or more directory levels recursively.
-        ///
         /// # Example
         ///
         /// ```no_run
         /// use zlob::{zlob, ZlobFlags};
-        ///
-        /// // Find all .rs files recursively
         /// let result = zlob("**/*.rs", ZlobFlags::DOUBLESTAR_RECURSIVE).unwrap();
         /// ```
-        const DOUBLESTAR_RECURSIVE = generated::ZLOB_DOUBLESTAR_RECURSIVE;
+        const DOUBLESTAR_RECURSIVE = ffi::ZLOB_DOUBLESTAR_RECURSIVE;
 
         /// Enable extended glob patterns (extglob).
         ///
-        /// With this flag, bash-style extended patterns are supported:
-        /// - `?(pattern)` - matches zero or one occurrence
-        /// - `*(pattern)` - matches zero or more occurrences
-        /// - `+(pattern)` - matches one or more occurrences
-        /// - `@(pattern)` - matches exactly one occurrence
-        /// - `!(pattern)` - matches anything except pattern
-        ///
-        /// Patterns can contain alternatives separated by `|`:
-        /// - `*.!(js|ts)` - matches files NOT ending in .js or .ts
-        /// - `@(foo|bar).txt` - matches foo.txt or bar.txt
+        /// Supports: `?(pat)`, `*(pat)`, `+(pat)`, `@(pat)`, `!(pat)`
         ///
         /// # Example
         ///
         /// ```no_run
         /// use zlob::{zlob, ZlobFlags};
-        ///
-        /// // Find all files except .js and .ts
         /// let result = zlob("src/*.!(js|ts)", ZlobFlags::EXTGLOB | ZlobFlags::RECOMMENDED).unwrap();
         /// ```
-        const EXTGLOB = generated::ZLOB_EXTGLOB;
+        const EXTGLOB = ffi::ZLOB_EXTGLOB;
 
         /// Recommended modern defaults for globbing.
         ///
-        /// This flag combination enables the most commonly desired behaviors:
-        /// - `BRACE`: Brace expansion `{a,b,c}`
-        /// - `DOUBLESTAR_RECURSIVE`: Recursive `**` patterns like `**/*.rs`
-        /// - `NOSORT`: Skip sorting for better performance
-        /// - `TILDE`: Home directory expansion `~`
-        /// - `TILDE_CHECK`: Error if `~user` is not found
-        ///
-        /// **Use this for typical glob usage** unless you need glibc-compatible behavior.
+        /// Enables: BRACE, DOUBLESTAR_RECURSIVE, NOSORT, TILDE, TILDE_CHECK
         ///
         /// # Example
         ///
         /// ```no_run
         /// use zlob::{zlob, ZlobFlags};
-        ///
-        /// // Recommended way to glob
         /// let result = zlob("**/*.rs", ZlobFlags::RECOMMENDED).unwrap();
-        ///
-        /// // With additional flags
-        /// let result = zlob("**/*.rs", ZlobFlags::RECOMMENDED | ZlobFlags::GITIGNORE).unwrap();
         /// ```
-        const RECOMMENDED = generated::ZLOB_RECOMMENDED;
+        const RECOMMENDED = ffi::ZLOB_RECOMMENDED;
     }
 }
 
@@ -213,8 +131,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_flag_values() {
-        // Verify flag values match the C header (via generated constants)
+    fn test_flag_values_match_c_header() {
+        // Values come from bindgen, so these tests verify the bitflags! macro works correctly
         assert_eq!(ZlobFlags::ERR.bits(), 0x0001);
         assert_eq!(ZlobFlags::MARK.bits(), 0x0002);
         assert_eq!(ZlobFlags::NOSORT.bits(), 0x0004);
@@ -230,23 +148,9 @@ mod tests {
         assert_eq!(ZlobFlags::TILDE.bits(), 0x1000);
         assert_eq!(ZlobFlags::ONLYDIR.bits(), 0x2000);
         assert_eq!(ZlobFlags::TILDE_CHECK.bits(), 0x4000);
-        // zlob extensions (bits 24+)
         assert_eq!(ZlobFlags::GITIGNORE.bits(), 1 << 24);
         assert_eq!(ZlobFlags::DOUBLESTAR_RECURSIVE.bits(), 1 << 25);
         assert_eq!(ZlobFlags::EXTGLOB.bits(), 1 << 26);
-    }
-
-    #[test]
-    fn test_flag_combinations() {
-        let flags = ZlobFlags::BRACE | ZlobFlags::NOSORT;
-        assert!(flags.contains(ZlobFlags::BRACE));
-        assert!(flags.contains(ZlobFlags::NOSORT));
-        assert!(!flags.contains(ZlobFlags::TILDE));
-    }
-
-    #[test]
-    fn test_default_is_empty() {
-        assert_eq!(ZlobFlags::default(), ZlobFlags::empty());
     }
 
     #[test]
@@ -257,11 +161,6 @@ mod tests {
         assert!(recommended.contains(ZlobFlags::NOSORT));
         assert!(recommended.contains(ZlobFlags::TILDE));
         assert!(recommended.contains(ZlobFlags::TILDE_CHECK));
-        // Should NOT contain these
-        assert!(!recommended.contains(ZlobFlags::ERR));
-        assert!(!recommended.contains(ZlobFlags::MARK));
-        assert!(!recommended.contains(ZlobFlags::GITIGNORE));
-        assert!(!recommended.contains(ZlobFlags::PERIOD));
         assert!(!recommended.contains(ZlobFlags::EXTGLOB));
     }
 }

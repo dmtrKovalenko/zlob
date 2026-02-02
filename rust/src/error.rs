@@ -6,16 +6,9 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ZlobError {
     /// Out of memory (ZLOB_NOSPACE).
-    ///
-    /// The operation failed because memory allocation failed.
     NoSpace,
 
     /// Read error or operation aborted (ZLOB_ABORTED).
-    ///
-    /// This error occurs when:
-    /// - A directory cannot be read and `ZlobFlags::ERR` is set
-    /// - The error callback returned non-zero to abort
-    /// - An internal error occurred
     Aborted,
 }
 
@@ -33,11 +26,11 @@ impl std::error::Error for ZlobError {}
 impl ZlobError {
     pub(crate) fn from_code(code: i32) -> Result<bool, Self> {
         match code {
-            0 => Ok(true),                  // Success with matches
-            ffi::ZLOB_NOMATCH => Ok(false), // No matches (not an error)
+            0 => Ok(true),
+            ffi::ZLOB_NOMATCH => Ok(false),
             ffi::ZLOB_NOSPACE => Err(ZlobError::NoSpace),
             ffi::ZLOB_ABORTED => Err(ZlobError::Aborted),
-            _ => Err(ZlobError::Aborted), // Unknown error treated as aborted
+            _ => Err(ZlobError::Aborted),
         }
     }
 }

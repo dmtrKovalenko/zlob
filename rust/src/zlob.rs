@@ -8,7 +8,7 @@ use std::slice;
 /// Result of a `zlob()` call.
 ///
 /// This type automatically frees the allocated memory when dropped.
-/// It provides zero-copy access to matched paths via the `gl_pathlen` array.
+/// It provides zero-copy access to matched paths via the `pathlen` array.
 ///
 /// # Example
 ///
@@ -39,7 +39,7 @@ impl Zlob {
     /// Returns the number of matched paths.
     #[inline]
     pub fn len(&self) -> usize {
-        self.inner.gl_pathc
+        self.inner.zlo_pathc
     }
 
     /// Returns `true` if no paths matched.
@@ -50,7 +50,7 @@ impl Zlob {
 
     /// Returns the path at the given index, or `None` if out of bounds.
     ///
-    /// This is a zero-copy operation that uses `gl_pathlen` to create
+    /// This is a zero-copy operation that uses `pathlen` to create
     /// a string slice without calling `strlen()`.
     #[inline]
     pub fn get(&self, index: usize) -> Option<&str> {
@@ -58,8 +58,8 @@ impl Zlob {
             return None;
         }
         unsafe {
-            let ptr = *self.inner.gl_pathv.add(index) as *const u8;
-            let len = *self.inner.gl_pathlen.add(index);
+            let ptr = *self.inner.zlo_pathv.add(index) as *const u8;
+            let len = *self.inner.zlo_pathlen.add(index);
             let bytes = slice::from_raw_parts(ptr, len);
             // SAFETY: zlob guarantees UTF-8 valid paths (they come from the filesystem)
             Some(std::str::from_utf8_unchecked(bytes))
@@ -103,8 +103,8 @@ impl Zlob {
     /// - `pathv[i]` is a pointer to the i-th path (null-terminated)
     /// - `pathlen[i]` is the length of the i-th path (excluding null terminator)
     pub unsafe fn raw_parts(&self) -> (&[*mut c_char], &[usize]) {
-        let pathv = slice::from_raw_parts(self.inner.gl_pathv, self.len());
-        let pathlen = slice::from_raw_parts(self.inner.gl_pathlen, self.len());
+        let pathv = slice::from_raw_parts(self.inner.zlo_pathv, self.len());
+        let pathlen = slice::from_raw_parts(self.inner.zlo_pathlen, self.len());
         (pathv, pathlen)
     }
 }
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_extglob_filesystem_negation() {
-        use std::fs::{self, File};
+        use std::fs::File;
         use tempfile::tempdir;
 
         // Create temp directory with test files

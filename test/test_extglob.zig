@@ -20,13 +20,13 @@ test "@(pattern) matches exactly one alternative" {
 
     try zlobIsomorphicTest(&files, "@(foo|bar).js", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expectEqual(2, result.count);
             try testing.expect(result.hasPath("foo.js"));
             try testing.expect(result.hasPath("bar.js"));
             try testing.expect(!result.hasPath("baz.js"));
             try testing.expect(!result.hasPath("qux.js"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "@(a|b|c) multiple alternatives" {
@@ -34,12 +34,13 @@ test "@(a|b|c) multiple alternatives" {
 
     try zlobIsomorphicTest(&files, "test.@(c|h|cpp)", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("test.c"));
             try testing.expect(result.hasPath("test.h"));
             try testing.expect(result.hasPath("test.cpp"));
             try testing.expect(!result.hasPath("test.txt"));
-        } }.assert);
+        }
+    }.assert, @src());
 }
 
 test "*.@(js|ts) extension matching" {
@@ -47,12 +48,12 @@ test "*.@(js|ts) extension matching" {
 
     try zlobIsomorphicTest(&files, "*.@(js|ts)", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("app.js"));
             try testing.expect(result.hasPath("app.ts"));
             try testing.expect(result.hasPath("index.js"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "@(foo) single alternative" {
@@ -60,10 +61,10 @@ test "@(foo) single alternative" {
 
     try zlobIsomorphicTest(&files, "@(foo).txt", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 1), result.count);
+            try testing.expectEqual(1, result.count);
             try testing.expect(result.hasPath("foo.txt"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 // ============================================================================
@@ -75,11 +76,11 @@ test "?(pattern) matches zero occurrences" {
 
     try zlobIsomorphicTest(&files, "test?(_suffix).txt", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expectEqual(2, result.count);
             try testing.expect(result.hasPath("test.txt"));
             try testing.expect(result.hasPath("test_suffix.txt"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "?(pattern) matches one occurrence" {
@@ -87,9 +88,9 @@ test "?(pattern) matches one occurrence" {
 
     try zlobIsomorphicTest(&files, "file?(.backup).txt", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expectEqual(2, result.count);
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "?(a|b) with multiple alternatives" {
@@ -97,13 +98,13 @@ test "?(a|b) with multiple alternatives" {
 
     try zlobIsomorphicTest(&files, "main?(_debug|_release).c", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("main.c"));
             try testing.expect(result.hasPath("main_debug.c"));
             try testing.expect(result.hasPath("main_release.c"));
             try testing.expect(!result.hasPath("main_test.c"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 // ============================================================================
@@ -115,9 +116,9 @@ test "*(pattern) matches zero occurrences" {
 
     try zlobIsomorphicTest(&files, "a*(X)b", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expectEqual(3, result.count);
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "*(pattern) matches multiple occurrences" {
@@ -125,9 +126,9 @@ test "*(pattern) matches multiple occurrences" {
 
     try zlobIsomorphicTest(&files, "test*(ABC)", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 4), result.count);
+            try testing.expectEqual(4, result.count);
         }
-    }.assert);
+    }.assert, @src());
 }
 
 // ============================================================================
@@ -140,13 +141,13 @@ test "+(pattern) requires at least one match" {
     try zlobIsomorphicTest(&files, "a+(X)b", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             // Should NOT match "ab" (zero X's), but should match the others
-            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expectEqual(3, result.count);
             try testing.expect(!result.hasPath("ab"));
             try testing.expect(result.hasPath("aXb"));
             try testing.expect(result.hasPath("aXXb"));
             try testing.expect(result.hasPath("aXXXb"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "+(a|b) with alternatives" {
@@ -155,10 +156,10 @@ test "+(a|b) with alternatives" {
     try zlobIsomorphicTest(&files, "X+(a|b)", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             // Should NOT match "X" (zero occurrences)
-            try testing.expectEqual(@as(usize, 5), result.count);
+            try testing.expectEqual(5, result.count);
             try testing.expect(!result.hasPath("X"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 // ============================================================================
@@ -170,14 +171,14 @@ test "*.!(js) matches non-js files" {
 
     try zlobIsomorphicTest(&files, "*.!(js)", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 4), result.count);
+            try testing.expectEqual(4, result.count);
             try testing.expect(result.noPathEndsWith(".js"));
             try testing.expect(result.hasPathEndingWith(".json"));
             try testing.expect(result.hasPathEndingWith(".ts"));
             try testing.expect(result.hasPathEndingWith(".zig"));
             try testing.expect(result.hasPathEndingWith(".html"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "*.!(js|ts) matches non-js-ts files" {
@@ -185,11 +186,11 @@ test "*.!(js|ts) matches non-js-ts files" {
 
     try zlobIsomorphicTest(&files, "*.!(js|ts)", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expectEqual(3, result.count);
             try testing.expect(result.noPathEndsWith(".js"));
             try testing.expect(result.noPathEndsWith(".ts"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "prefix.!(ext) with prefix" {
@@ -197,10 +198,10 @@ test "prefix.!(ext) with prefix" {
 
     try zlobIsomorphicTest(&files, "config.!(json)", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expectEqual(3, result.count);
             try testing.expect(result.noPathEndsWith(".json"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "negation with wildcards *.!(j*)" {
@@ -208,7 +209,7 @@ test "negation with wildcards *.!(j*)" {
 
     try zlobIsomorphicTest(&files, "*.!(j*)", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expectEqual(2, result.count);
             // Should not include files with extension starting with 'j'
             for (result.paths) |path| {
                 const ext_start = std.mem.lastIndexOfScalar(u8, path, '.') orelse continue;
@@ -216,7 +217,7 @@ test "negation with wildcards *.!(j*)" {
                 try testing.expect(ext.len == 0 or ext[0] != 'j');
             }
         }
-    }.assert);
+    }.assert, @src());
 }
 
 // ============================================================================
@@ -235,10 +236,10 @@ test "**/*.!(js) recursive negation" {
 
     try zlobIsomorphicTest(&files, "**/*.!(js)", zlob.ZLOB_EXTGLOB | zlob.ZLOB_DOUBLESTAR_RECURSIVE, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expectEqual(3, result.count);
             try testing.expect(result.noPathEndsWith(".js"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "**/@(foo|bar)/*.txt recursive with extglob directory" {
@@ -251,10 +252,10 @@ test "**/@(foo|bar)/*.txt recursive with extglob directory" {
 
     try zlobIsomorphicTest(&files, "**/@(foo|bar)/*.txt", zlob.ZLOB_EXTGLOB | zlob.ZLOB_DOUBLESTAR_RECURSIVE, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expectEqual(3, result.count);
             try testing.expect(!result.hasPathEndingWith("baz/test.txt"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 // ============================================================================
@@ -266,11 +267,11 @@ test "@() combined with regular wildcards" {
 
     try zlobIsomorphicTest(&files, "test_@(foo|bar).*", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expectEqual(2, result.count);
             try testing.expect(result.hasPath("test_foo.c"));
             try testing.expect(result.hasPath("test_bar.c"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "complex pattern with multiple extglobs" {
@@ -278,10 +279,10 @@ test "complex pattern with multiple extglobs" {
 
     try zlobIsomorphicTest(&files, "@(src|lib)/*.@(c|h)", zlob.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expectEqual(3, result.count);
             try testing.expect(!result.hasPathEndingWith("test/test.c"));
         }
-    }.assert);
+    }.assert, @src());
 }
 
 test "extglob combined with brace expansion" {
@@ -289,13 +290,13 @@ test "extglob combined with brace expansion" {
 
     try zlobIsomorphicTest(&files, "{src,lib}/*.!(h)", zlob.ZLOB_EXTGLOB | zlob.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expectEqual(2, result.count);
             // Should only include .c files
             for (result.paths) |path| {
                 try testing.expect(std.mem.endsWith(u8, path, ".c"));
             }
         }
-    }.assert);
+    }.assert, @src());
 }
 
 // ============================================================================
@@ -310,7 +311,7 @@ test "without ZLOB_EXTGLOB - @( is treated as literal" {
     try testMatchPathsOnly(&files, "@(foo|bar).js", 0, struct {
         fn assert(result: TestResult) !void {
             // Should only match the literal filename
-            try testing.expectEqual(@as(usize, 1), result.count);
+            try testing.expectEqual(1, result.count);
             try testing.expect(result.hasPath("@(foo|bar).js"));
         }
     }.assert);
@@ -321,7 +322,7 @@ test "without ZLOB_EXTGLOB - +( is treated as literal" {
 
     try testMatchPathsOnly(&files, "a+(X)b", 0, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 1), result.count);
+            try testing.expectEqual(1, result.count);
             try testing.expect(result.hasPath("a+(X)b"));
         }
     }.assert);
@@ -332,7 +333,7 @@ test "without ZLOB_EXTGLOB - !( is treated as literal" {
 
     try testMatchPathsOnly(&files, "test.!(js)", 0, struct {
         fn assert(result: TestResult) !void {
-            try testing.expectEqual(@as(usize, 1), result.count);
+            try testing.expectEqual(1, result.count);
             try testing.expect(result.hasPath("test.!(js)"));
         }
     }.assert);

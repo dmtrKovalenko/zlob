@@ -34,7 +34,7 @@ impl<'a> ZlobMatch<'a> {
     /// Returns the number of matched paths.
     #[inline]
     pub fn len(&self) -> usize {
-        self.inner.gl_pathc
+        self.inner.zlo_pathc
     }
 
     /// Returns `true` if no paths matched.
@@ -52,8 +52,8 @@ impl<'a> ZlobMatch<'a> {
             return None;
         }
         unsafe {
-            let ptr = *self.inner.gl_pathv.add(index) as *const u8;
-            let len = *self.inner.gl_pathlen.add(index);
+            let ptr = *self.inner.zlo_pathv.add(index) as *const u8;
+            let len = *self.inner.zlo_pathlen.add(index);
             let bytes = slice::from_raw_parts(ptr, len);
             // SAFETY: The input was valid UTF-8 (&str), so the output is too
             Some(std::str::from_utf8_unchecked(bytes))

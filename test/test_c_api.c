@@ -13,42 +13,42 @@
 
 int main(void) {
 
-  // glob() - Filesystem walking
-  printf("glob() - Filesystem Walking\n");
+  // zlob() - Filesystem walking
+  printf("zlob() - Filesystem Walking\n");
   TEST("Match *.zig files in src/");
   {
     zlob_t pzlob;
-    int result = glob("src/*.zig", 0, NULL, &pzlob);
+    int result = zlob("src/*.zig", 0, NULL, &pzlob);
 
     if (result != 0 && result != ZLOB_NOMATCH) {
-      FAIL("glob() returned error");
+      FAIL("zlob() returned error");
     }
 
     if (result == 0) {
-      printf("    Found %zu matches\n", pzlob.gl_pathc);
+      printf("    Found %zu matches\n", pzlob.zlo_pathc);
 
       // Verify results structure
-      if (pzlob.gl_pathc == 0)
+      if (pzlob.zlo_pathc == 0)
         FAIL("Expected at least one match");
-      if (pzlob.gl_pathv == NULL)
-        FAIL("gl_pathv is NULL");
-      if (pzlob.gl_pathlen == NULL)
-        FAIL("gl_pathlen is NULL");
+      if (pzlob.zlo_pathv == NULL)
+        FAIL("pathv is NULL");
+      if (pzlob.zlo_pathlen == NULL)
+        FAIL("pathlen is NULL");
 
       // Verify first result
-      if (pzlob.gl_pathv[0] == NULL)
+      if (pzlob.zlo_pathv[0] == NULL)
         FAIL("First path is NULL");
-      size_t len = strlen(pzlob.gl_pathv[0]);
-      if (len != pzlob.gl_pathlen[0])
-        FAIL("gl_pathlen doesn't match strlen");
+      size_t len = strlen(pzlob.zlo_pathv[0]);
+      if (len != pzlob.zlo_pathlen[0])
+        FAIL("pathlen doesn't match strlen");
 
       // Verify NULL terminator
-      if (pzlob.gl_pathv[pzlob.gl_pathc] != NULL)
+      if (pzlob.zlo_pathv[pzlob.zlo_pathc] != NULL)
         FAIL("Array not NULL-terminated");
 
-      printf("    Example: %s (len=%zu)\n", pzlob.gl_pathv[0],
-             pzlob.gl_pathlen[0]);
-      globfree(&pzlob);
+      printf("    Example: %s (len=%zu)\n", pzlob.zlo_pathv[0],
+             pzlob.zlo_pathlen[0]);
+      zlobfree(&pzlob);
       PASS();
     } else {
       printf("    No matches (ZLOB_NOMATCH)\n");
@@ -56,25 +56,25 @@ int main(void) {
     }
   }
 
-  // glob() with recursive pattern
+  // zlob() with recursive pattern
   printf("\nglob() - Recursive Pattern\n");
   TEST("Match **/*.zig files");
   {
     zlob_t pzlob;
-    int result = glob("src/**/*.zig", 0, NULL, &pzlob);
+    int result = zlob("src/**/*.zig", 0, NULL, &pzlob);
 
     if (result == 0) {
-      printf("    Found %zu matches\n", pzlob.gl_pathc);
-      if (pzlob.gl_pathc > 0) {
-        printf("    Example: %s\n", pzlob.gl_pathv[0]);
+      printf("    Found %zu matches\n", pzlob.zlo_pathc);
+      if (pzlob.zlo_pathc > 0) {
+        printf("    Example: %s\n", pzlob.zlo_pathv[0]);
       }
-      globfree(&pzlob);
+      zlobfree(&pzlob);
       PASS();
     } else if (result == ZLOB_NOMATCH) {
       printf("    No matches (ZLOB_NOMATCH)\n");
       PASS();
     } else {
-      FAIL("glob() returned error");
+      FAIL("zlob() returned error");
     }
   }
 
@@ -92,20 +92,20 @@ int main(void) {
 
     if (result != 0)
       FAIL("zlob_match_paths() failed");
-    if (pzlob.gl_pathc != 3)
+    if (pzlob.zlo_pathc != 3)
       FAIL("Expected 3 matches");
-    if (pzlob.gl_pathv == NULL)
-      FAIL("gl_pathv is NULL");
-    if (pzlob.gl_pathlen == NULL)
-      FAIL("gl_pathlen is NULL");
+    if (pzlob.zlo_pathv == NULL)
+      FAIL("pathv is NULL");
+    if (pzlob.zlo_pathlen == NULL)
+      FAIL("pathlen is NULL");
 
-    printf("    Found %zu matches (expected 3)\n", pzlob.gl_pathc);
+    printf("    Found %zu matches (expected 3)\n", pzlob.zlo_pathc);
 
     // Verify zero-copy: pointers should reference original array
     int found_original = 0;
-    for (size_t i = 0; i < pzlob.gl_pathc; i++) {
+    for (size_t i = 0; i < pzlob.zlo_pathc; i++) {
       for (size_t j = 0; j < path_count; j++) {
-        if (pzlob.gl_pathv[i] == paths[j]) {
+        if (pzlob.zlo_pathv[i] == paths[j]) {
           found_original++;
           break;
         }
@@ -114,7 +114,7 @@ int main(void) {
     if (found_original != 3)
       FAIL("Zero-copy failed: pointers don't reference original memory");
 
-    globfree(&pzlob);
+    zlobfree(&pzlob);
     PASS();
   }
 
@@ -151,20 +151,20 @@ int main(void) {
 
     if (result != 0)
       FAIL("zlob_match_paths() failed");
-    if (pzlob.gl_pathc != 3)
+    if (pzlob.zlo_pathc != 3)
       FAIL("Expected 3 matches");
 
-    printf("    Found %zu matches (expected 3)\n", pzlob.gl_pathc);
-    for (size_t i = 0; i < pzlob.gl_pathc; i++) {
-      printf("      - %s (len=%zu)\n", pzlob.gl_pathv[i], pzlob.gl_pathlen[i]);
+    printf("    Found %zu matches (expected 3)\n", pzlob.zlo_pathc);
+    for (size_t i = 0; i < pzlob.zlo_pathc; i++) {
+      printf("      - %s (len=%zu)\n", pzlob.zlo_pathv[i], pzlob.zlo_pathlen[i]);
     }
 
-    globfree(&pzlob);
+    zlobfree(&pzlob);
     PASS();
   }
 
-  printf("\ngl_pathlen Field\n");
-  TEST("Verify gl_pathlen provides O(1) length access");
+  printf("\npathlen Field\n");
+  TEST("Verify pathlen provides O(1) length access");
   {
     const char *paths[] = {"short.c", "medium_name.c", "very_long_filename.c"};
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
@@ -176,17 +176,17 @@ int main(void) {
       FAIL("zlob_match_paths() failed");
 
     // Verify lengths match strlen
-    for (size_t i = 0; i < pzlob.gl_pathc; i++) {
-      size_t actual_len = strlen(pzlob.gl_pathv[i]);
-      if (pzlob.gl_pathlen[i] != actual_len) {
-        printf("    Path %zu: gl_pathlen=%zu, strlen=%zu\n", i,
-               pzlob.gl_pathlen[i], actual_len);
-        FAIL("gl_pathlen doesn't match strlen");
+    for (size_t i = 0; i < pzlob.zlo_pathc; i++) {
+      size_t actual_len = strlen(pzlob.zlo_pathv[i]);
+      if (pzlob.zlo_pathlen[i] != actual_len) {
+        printf("    Path %zu: pathlen=%zu, strlen=%zu\n", i,
+               pzlob.zlo_pathlen[i], actual_len);
+        FAIL("pathlen doesn't match strlen");
       }
     }
 
     printf("    All lengths correct (avoiding strlen overhead)\n");
-    globfree(&pzlob);
+    zlobfree(&pzlob);
     PASS();
   }
 
@@ -202,11 +202,11 @@ int main(void) {
     if (result != 0)
       FAIL("zlob_match_paths() failed");
 
-    if (pzlob.gl_pathc != 2)
+    if (pzlob.zlo_pathc != 2)
       FAIL("Expected 2 matches");
 
     printf("    All lengths correct (avoiding strlen overhead)\n");
-    globfree(&pzlob);
+    zlobfree(&pzlob);
     PASS();
   }
 

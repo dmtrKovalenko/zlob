@@ -8,6 +8,11 @@ const c = std.c;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 
+// Import C header for struct compatibility verification
+const c_zlob = @cImport({
+    @cInclude("zlob.h");
+});
+
 pub const PatternContext = pattern_context_mod.PatternContext;
 pub const hasWildcardsSIMD = pattern_context_mod.hasWildcardsSIMD;
 pub const indexOfCharSIMD = pattern_context_mod.indexOfCharSIMD;
@@ -20,31 +25,84 @@ const pwd = @cImport({
     @cInclude("pwd.h");
 });
 
-/// Directory entry returned by gl_readdir callback
+/// Directory entry returned by readdir callback
 pub const zlob_dirent_t = extern struct {
     d_name: [*:0]const u8, // Null-terminated entry name
     d_type: u8, // Entry type: DT_DIR, DT_REG, DT_UNKNOWN, etc.
+
+    // Comptime assertion: verify Zig struct matches C header struct
+    comptime {
+        const zig_t = zlob_dirent_t;
+        const c_t = c_zlob.zlob_dirent_t;
+
+        if (@sizeOf(zig_t) != @sizeOf(c_t)) {
+            @compileError("zlob_dirent_t size mismatch");
+        }
+        if (@offsetOf(zig_t, "d_name") != @offsetOf(c_t, "d_name")) {
+            @compileError("d_name offset mismatch");
+        }
+        if (@offsetOf(zig_t, "d_type") != @offsetOf(c_t, "d_type")) {
+            @compileError("d_type offset mismatch");
+        }
+    }
 };
 
 /// Function pointer types for custom directory access (matches glibc glob_t)
-pub const gl_opendir_t = ?*const fn (path: [*:0]const u8) callconv(.c) ?*anyopaque;
-pub const gl_readdir_t = ?*const fn (dir: ?*anyopaque) callconv(.c) ?*zlob_dirent_t;
-pub const gl_closedir_t = ?*const fn (dir: ?*anyopaque) callconv(.c) void;
+pub const opendir_t = ?*const fn (path: [*:0]const u8) callconv(.c) ?*anyopaque;
+pub const readdir_t = ?*const fn (dir: ?*anyopaque) callconv(.c) ?*zlob_dirent_t;
+pub const closedir_t = ?*const fn (dir: ?*anyopaque) callconv(.c) void;
 
 // Internal glob result structure (C-style, used internally during refactoring)
 // TODO: Remove this entirely once refactoring to pure Zig slices is complete
 pub const zlob_t = extern struct {
-    gl_pathc: usize,
-    gl_pathv: [*c][*c]u8,
-    gl_offs: usize,
-    gl_pathlen: [*]usize, // Array of path lengths (parallel to gl_pathv, for efficient FFI)
-    gl_flags: c_int, // Internal flags (not exposed in C header)
+    zlo_pathc: usize,
+    zlo_pathv: [*c][*c]u8,
+    zlo_offs: usize,
+    zlo_pathlen: [*]usize, // Array of path lengths (parallel to zlo_pathv, for efficient FFI)
+    zlo_flags: c_int, // Internal flags
 
     // ALTDIRFUNC: Custom directory access functions (GNU extension)
     // These are only used when ZLOB_ALTDIRFUNC flag is set
-    gl_opendir: gl_opendir_t = null,
-    gl_readdir: gl_readdir_t = null,
-    gl_closedir: gl_closedir_t = null,
+    zlo_opendir: opendir_t = null,
+    zlo_readdir: readdir_t = null,
+    zlo_closedir: closedir_t = null,
+
+    // Comptime assertion: verify Zig struct matches C header struct
+    comptime {
+        const zig_t = zlob_t;
+        const c_t = c_zlob.zlob_t;
+
+        // Verify struct sizes match
+        if (@sizeOf(zig_t) != @sizeOf(c_t)) {
+            @compileError("zlob_t size mismatch: Zig=" ++ @typeName(zig_t) ++ " C=" ++ @typeName(c_t));
+        }
+
+        // Verify field offsets match
+        if (@offsetOf(zig_t, "zlo_pathc") != @offsetOf(c_t, "zlo_pathc")) {
+            @compileError("zlo_pathc offset mismatch");
+        }
+        if (@offsetOf(zig_t, "zlo_pathv") != @offsetOf(c_t, "zlo_pathv")) {
+            @compileError("zlo_pathv offset mismatch");
+        }
+        if (@offsetOf(zig_t, "zlo_offs") != @offsetOf(c_t, "zlo_offs")) {
+            @compileError("zlo_offs offset mismatch");
+        }
+        if (@offsetOf(zig_t, "zlo_pathlen") != @offsetOf(c_t, "zlo_pathlen")) {
+            @compileError("zlo_pathlen offset mismatch");
+        }
+        if (@offsetOf(zig_t, "zlo_flags") != @offsetOf(c_t, "zlo_flags")) {
+            @compileError("zlo_flags offset mismatch");
+        }
+        if (@offsetOf(zig_t, "zlo_opendir") != @offsetOf(c_t, "zlo_opendir")) {
+            @compileError("zlo_opendir offset mismatch");
+        }
+        if (@offsetOf(zig_t, "zlo_readdir") != @offsetOf(c_t, "zlo_readdir")) {
+            @compileError("zlo_readdir offset mismatch");
+        }
+        if (@offsetOf(zig_t, "zlo_closedir") != @offsetOf(c_t, "zlo_closedir")) {
+            @compileError("zlo_closedir offset mismatch");
+        }
+    }
 };
 
 pub const DirIterator = struct {
@@ -54,8 +112,8 @@ pub const DirIterator = struct {
 
     // For ALTDIRFUNC mode
     custom_handle: ?*anyopaque = null,
-    readdir_fn: gl_readdir_t = null,
-    closedir_fn: gl_closedir_t = null,
+    readdir_fn: readdir_t = null,
+    closedir_fn: closedir_t = null,
 
     // Shared state
     is_altdirfunc: bool = false,
@@ -73,9 +131,9 @@ pub const DirIterator = struct {
     /// If base_dir is null, uses cwd(). ALTDIRFUNC takes precedence if set.
     pub fn openAt(path: []const u8, flags: c_int, pzlob: *const zlob_t, base_dir: ?std.fs.Dir) !DirIterator {
         const use_altdirfunc = (flags & ZLOB_ALTDIRFUNC) != 0 and
-            pzlob.gl_opendir != null and
-            pzlob.gl_readdir != null and
-            pzlob.gl_closedir != null;
+            pzlob.zlo_opendir != null and
+            pzlob.zlo_readdir != null and
+            pzlob.zlo_closedir != null;
 
         if (use_altdirfunc) {
             // ALTDIRFUNC takes precedence over base_dir
@@ -84,14 +142,14 @@ pub const DirIterator = struct {
             @memcpy(path_buf[0..path.len], path);
             path_buf[path.len] = 0;
 
-            const handle = pzlob.gl_opendir.?(&path_buf);
+            const handle = pzlob.zlo_opendir.?(&path_buf);
             if (handle == null) return error.FileNotFound;
 
             return DirIterator{
                 .is_altdirfunc = true,
                 .custom_handle = handle,
-                .readdir_fn = pzlob.gl_readdir,
-                .closedir_fn = pzlob.gl_closedir,
+                .readdir_fn = pzlob.zlo_readdir,
+                .closedir_fn = pzlob.zlo_closedir,
             };
         } else {
             // Use base_dir if provided, otherwise use cwd
@@ -175,10 +233,10 @@ fn globLiteralPath(allocator: Allocator, path: []const u8, flags: ZlobFlags, pzl
     const pathlen_buf = try allocator.alloc(usize, 1);
     pathlen_buf[0] = final_len; // Length from slice - no strlen()!
 
-    pzlob.gl_pathc = 1;
-    pzlob.gl_pathv = result;
-    pzlob.gl_pathlen = pathlen_buf.ptr;
-    pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+    pzlob.zlo_pathc = 1;
+    pzlob.zlo_pathv = result;
+    pzlob.zlo_pathlen = pathlen_buf.ptr;
+    pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
 
     return true;
 }
@@ -640,10 +698,10 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
             const pathlen_buf = allocator.alloc(usize, 1) catch return error.OutOfMemory;
             pathlen_buf[0] = pattern.len;
 
-            pzlob.gl_pathc = 1;
-            pzlob.gl_pathv = result;
-            pzlob.gl_pathlen = pathlen_buf.ptr;
-            pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+            pzlob.zlo_pathc = 1;
+            pzlob.zlo_pathv = result;
+            pzlob.zlo_pathlen = pathlen_buf.ptr;
+            pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
             return;
         }
         return null;
@@ -654,8 +712,8 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
     }
 
     // Handle ZLOB_APPEND flag - merge with existing results
-    if (flags.append and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
-        const old_count = pzlob.gl_pathc;
+    if (flags.append and pzlob.zlo_pathv != null and pzlob.zlo_pathc > 0) {
+        const old_count = pzlob.zlo_pathc;
         const new_count = result_paths.items.len;
         const total_count = old_count + new_count;
 
@@ -665,7 +723,7 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
         // Copy old results
         var i: usize = 0;
         while (i < old_count) : (i += 1) {
-            result[i] = pzlob.gl_pathv[i];
+            result[i] = pzlob.zlo_pathv[i];
         }
 
         // Append new results
@@ -678,22 +736,22 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
         const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
         var li: usize = 0;
         while (li < old_count) : (li += 1) {
-            pathlen_buf[li] = pzlob.gl_pathlen[li];
+            pathlen_buf[li] = pzlob.zlo_pathlen[li];
         }
         var lj: usize = 0;
         while (lj < new_count) : (lj += 1) {
             pathlen_buf[old_count + lj] = mem.len(result_paths.items[lj]);
         }
 
-        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.gl_pathv))[0 .. old_count + 1];
+        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[0 .. old_count + 1];
         allocator.free(old_pathv_slice);
-        const old_pathlen_slice = pzlob.gl_pathlen[0..old_count];
+        const old_pathlen_slice = pzlob.zlo_pathlen[0..old_count];
         allocator.free(old_pathlen_slice);
 
-        pzlob.gl_pathc = total_count;
-        pzlob.gl_pathv = result;
-        pzlob.gl_pathlen = pathlen_buf.ptr;
-        pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+        pzlob.zlo_pathc = total_count;
+        pzlob.zlo_pathv = result;
+        pzlob.zlo_pathlen = pathlen_buf.ptr;
+        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     } else {
         // No APPEND or first call
         const pathv_buf = allocator.alloc([*c]u8, result_paths.items.len + 1) catch return error.OutOfMemory;
@@ -708,10 +766,10 @@ fn globWithWildcardDirs(allocator: std.mem.Allocator, pattern: []const u8, flags
         }
         result[result_paths.items.len] = null;
 
-        pzlob.gl_pathc = result_paths.items.len;
-        pzlob.gl_pathv = result;
-        pzlob.gl_pathlen = pathlen_buf.ptr;
-        pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+        pzlob.zlo_pathc = result_paths.items.len;
+        pzlob.zlo_pathv = result;
+        pzlob.zlo_pathlen = pathlen_buf.ptr;
+        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     }
 }
 
@@ -779,10 +837,10 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
             const pathlen_buf = allocator.alloc(usize, 1) catch return error.OutOfMemory;
             pathlen_buf[0] = pattern.len;
 
-            pzlob.gl_pathc = 1;
-            pzlob.gl_pathv = result;
-            pzlob.gl_pathlen = pathlen_buf.ptr;
-            pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+            pzlob.zlo_pathc = 1;
+            pzlob.zlo_pathv = result;
+            pzlob.zlo_pathlen = pathlen_buf.ptr;
+            pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
             return;
         }
         return null;
@@ -793,8 +851,8 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     }
 
     // Handle ZLOB_APPEND flag - merge with existing results
-    if (flags.append and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
-        const old_count = pzlob.gl_pathc;
+    if (flags.append and pzlob.zlo_pathv != null and pzlob.zlo_pathc > 0) {
+        const old_count = pzlob.zlo_pathc;
         const new_count = result_paths.items.len;
         const total_count = old_count + new_count;
 
@@ -804,7 +862,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         // Copy old results
         var i: usize = 0;
         while (i < old_count) : (i += 1) {
-            result[i] = pzlob.gl_pathv[i];
+            result[i] = pzlob.zlo_pathv[i];
         }
 
         // Append new results
@@ -817,22 +875,22 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
         var li: usize = 0;
         while (li < old_count) : (li += 1) {
-            pathlen_buf[li] = pzlob.gl_pathlen[li];
+            pathlen_buf[li] = pzlob.zlo_pathlen[li];
         }
         var lj: usize = 0;
         while (lj < new_count) : (lj += 1) {
             pathlen_buf[old_count + lj] = mem.len(result_paths.items[lj]);
         }
 
-        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.gl_pathv))[0 .. old_count + 1];
+        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[0 .. old_count + 1];
         allocator.free(old_pathv_slice);
-        const old_pathlen_slice = pzlob.gl_pathlen[0..old_count];
+        const old_pathlen_slice = pzlob.zlo_pathlen[0..old_count];
         allocator.free(old_pathlen_slice);
 
-        pzlob.gl_pathc = total_count;
-        pzlob.gl_pathv = result;
-        pzlob.gl_pathlen = pathlen_buf.ptr;
-        pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+        pzlob.zlo_pathc = total_count;
+        pzlob.zlo_pathv = result;
+        pzlob.zlo_pathlen = pathlen_buf.ptr;
+        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     } else {
         // No APPEND or first call
         const pathv_buf = allocator.alloc([*c]u8, result_paths.items.len + 1) catch return error.OutOfMemory;
@@ -847,10 +905,10 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         }
         result[result_paths.items.len] = null;
 
-        pzlob.gl_pathc = result_paths.items.len;
-        pzlob.gl_pathv = result;
-        pzlob.gl_pathlen = pathlen_buf.ptr;
-        pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+        pzlob.zlo_pathc = result_paths.items.len;
+        pzlob.zlo_pathv = result;
+        pzlob.zlo_pathlen = pathlen_buf.ptr;
+        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     }
 }
 
@@ -1200,10 +1258,10 @@ fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, pzlo
     const pathlen_buf = try allocator.alloc(usize, 1);
     pathlen_buf[0] = pattern.len;
 
-    pzlob.gl_pathc = 1;
-    pzlob.gl_pathv = result;
-    pzlob.gl_pathlen = pathlen_buf.ptr;
-    pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+    pzlob.zlo_pathc = 1;
+    pzlob.zlo_pathv = result;
+    pzlob.zlo_pathlen = pathlen_buf.ptr;
+    pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     return;
 }
 
@@ -1293,10 +1351,10 @@ pub fn globAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: [*:0
 fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !?void {
     const gf = ZlobFlags.fromInt(flags);
     if (!gf.append) {
-        pzlob.gl_pathc = 0;
-        pzlob.gl_pathv = null;
+        pzlob.zlo_pathc = 0;
+        pzlob.zlo_pathv = null;
         if (!gf.dooffs) {
-            pzlob.gl_offs = 0;
+            pzlob.zlo_offs = 0;
         }
     }
 
@@ -1388,22 +1446,22 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
 
         // Create a temporary pzlob for this pattern
         var temp_pzlob: zlob_t = undefined;
-        temp_pzlob.gl_pathc = 0;
-        temp_pzlob.gl_pathv = null;
-        temp_pzlob.gl_offs = 0;
+        temp_pzlob.zlo_pathc = 0;
+        temp_pzlob.zlo_pathv = null;
+        temp_pzlob.zlo_offs = 0;
 
         _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true }), errfunc, &temp_pzlob, gitignore_filter, base_dir);
 
         // Collect results from temp_pzlob
-        if (temp_pzlob.gl_pathc > 0) {
-            for (0..temp_pzlob.gl_pathc) |i| {
-                try all_results.append(temp_pzlob.gl_pathv[i]);
+        if (temp_pzlob.zlo_pathc > 0) {
+            for (0..temp_pzlob.zlo_pathc) |i| {
+                try all_results.append(temp_pzlob.zlo_pathv[i]);
             }
             // Don't free the paths yet, we're transferring ownership
             // Free the pathv array and pathlen array, but not the paths themselves
-            if (temp_pzlob.gl_flags & ZLOB_FLAGS_OWNS_STRINGS != 0) {
-                allocator.free(@as([*]const [*c]u8, @ptrCast(temp_pzlob.gl_pathv))[0 .. temp_pzlob.gl_pathc + 1]);
-                allocator.free(@as([*]const usize, @ptrCast(temp_pzlob.gl_pathlen))[0..temp_pzlob.gl_pathc]);
+            if (temp_pzlob.zlo_flags & ZLOB_FLAGS_OWNS_STRINGS != 0) {
+                allocator.free(@as([*]const [*c]u8, @ptrCast(temp_pzlob.zlo_pathv))[0 .. temp_pzlob.zlo_pathc + 1]);
+                allocator.free(@as([*]const usize, @ptrCast(temp_pzlob.zlo_pathlen))[0..temp_pzlob.zlo_pathc]);
             }
         }
     }
@@ -1422,10 +1480,10 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
             const pathlen_buf = try allocator.alloc(usize, 1);
             pathlen_buf[0] = pattern.len;
 
-            pzlob.gl_pathc = 1;
-            pzlob.gl_pathv = result;
-            pzlob.gl_pathlen = pathlen_buf.ptr;
-            pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+            pzlob.zlo_pathc = 1;
+            pzlob.zlo_pathv = result;
+            pzlob.zlo_pathlen = pathlen_buf.ptr;
+            pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
             return;
         }
         return null;
@@ -1448,10 +1506,10 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
     }
     result[all_results.items.len] = null;
 
-    pzlob.gl_pathc = all_results.items.len;
-    pzlob.gl_pathv = result;
-    pzlob.gl_pathlen = pathlen_buf.ptr;
-    pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+    pzlob.zlo_pathc = all_results.items.len;
+    pzlob.zlo_pathv = result;
+    pzlob.zlo_pathlen = pathlen_buf.ptr;
+    pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     return;
 }
 
@@ -2000,11 +2058,11 @@ fn globRecursiveWithBracedPrefix(
 
 // Helper to finalize results from ArrayList to zlob_t
 fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: ZlobFlags, pzlob: *zlob_t) !?void {
-    const offs = if (flags.dooffs) pzlob.gl_offs else 0;
+    const offs = if (flags.dooffs) pzlob.zlo_offs else 0;
 
     // Handle ZLOB_APPEND - merge with existing results
-    if (flags.append and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
-        const old_count = pzlob.gl_pathc;
+    if (flags.append and pzlob.zlo_pathv != null and pzlob.zlo_pathc > 0) {
+        const old_count = pzlob.zlo_pathc;
         const new_count = results.items.len;
         const total_count = old_count + new_count;
 
@@ -2016,7 +2074,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
 
         var i: usize = 0;
         while (i < old_count) : (i += 1) {
-            result[offs + i] = pzlob.gl_pathv[offs + i];
+            result[offs + i] = pzlob.zlo_pathv[offs + i];
         }
 
         var j: usize = 0;
@@ -2028,22 +2086,22 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
         const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
         var li: usize = 0;
         while (li < old_count) : (li += 1) {
-            pathlen_buf[li] = pzlob.gl_pathlen[li];
+            pathlen_buf[li] = pzlob.zlo_pathlen[li];
         }
         var lj: usize = 0;
         while (lj < new_count) : (lj += 1) {
             pathlen_buf[old_count + lj] = mem.len(results.items[lj]);
         }
 
-        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.gl_pathv))[0 .. offs + old_count + 1];
+        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[0 .. offs + old_count + 1];
         allocator.free(old_pathv_slice);
-        const old_pathlen_slice = pzlob.gl_pathlen[0..old_count];
+        const old_pathlen_slice = pzlob.zlo_pathlen[0..old_count];
         allocator.free(old_pathlen_slice);
 
-        pzlob.gl_pathc = total_count;
-        pzlob.gl_pathv = result;
-        pzlob.gl_pathlen = pathlen_buf.ptr;
-        pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+        pzlob.zlo_pathc = total_count;
+        pzlob.zlo_pathv = result;
+        pzlob.zlo_pathlen = pathlen_buf.ptr;
+        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     } else {
         // Fresh allocation
         const pathv_buf = allocator.alloc([*c]u8, offs + results.items.len + 1) catch return error.OutOfMemory;
@@ -2062,10 +2120,10 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
         }
         result[offs + results.items.len] = null;
 
-        pzlob.gl_pathc = results.items.len;
-        pzlob.gl_pathv = result;
-        pzlob.gl_pathlen = pathlen_buf.ptr;
-        pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+        pzlob.zlo_pathc = results.items.len;
+        pzlob.zlo_pathv = result;
+        pzlob.zlo_pathlen = pathlen_buf.ptr;
+        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     }
 }
 
@@ -2986,10 +3044,10 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
             const pathlen_buf = allocator.alloc(usize, 1) catch return error.OutOfMemory;
             pathlen_buf[0] = pattern.len;
 
-            pzlob.gl_pathc = 1;
-            pzlob.gl_pathv = result;
-            pzlob.gl_pathlen = pathlen_buf.ptr;
-            pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+            pzlob.zlo_pathc = 1;
+            pzlob.zlo_pathv = result;
+            pzlob.zlo_pathlen = pathlen_buf.ptr;
+            pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
             return;
         }
         return null;
@@ -3000,11 +3058,11 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
     }
 
     // Handle ZLOB_APPEND flag - merge with existing results
-    if (flags.append and pzlob.gl_pathv != null and pzlob.gl_pathc > 0) {
-        const old_count = pzlob.gl_pathc;
+    if (flags.append and pzlob.zlo_pathv != null and pzlob.zlo_pathc > 0) {
+        const old_count = pzlob.zlo_pathc;
         const new_count = names.items.len;
         const total_count = old_count + new_count;
-        const offs = if (flags.dooffs) pzlob.gl_offs else 0;
+        const offs = if (flags.dooffs) pzlob.zlo_offs else 0;
 
         const pathv_buf = allocator.alloc([*c]u8, offs + total_count + 1) catch return error.OutOfMemory;
         const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
@@ -3016,7 +3074,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
 
         var i: usize = 0;
         while (i < old_count) : (i += 1) {
-            result[offs + i] = pzlob.gl_pathv[offs + i];
+            result[offs + i] = pzlob.zlo_pathv[offs + i];
         }
 
         var j: usize = 0;
@@ -3028,25 +3086,25 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
         var li: usize = 0;
         while (li < old_count) : (li += 1) {
-            pathlen_buf[li] = pzlob.gl_pathlen[li];
+            pathlen_buf[li] = pzlob.zlo_pathlen[li];
         }
         var lj: usize = 0;
         while (lj < new_count) : (lj += 1) {
             pathlen_buf[old_count + lj] = mem.len(names.items[lj]);
         }
 
-        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.gl_pathv))[0 .. offs + old_count + 1];
+        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[0 .. offs + old_count + 1];
         allocator.free(old_pathv_slice);
-        const old_pathlen_slice = pzlob.gl_pathlen[0..old_count];
+        const old_pathlen_slice = pzlob.zlo_pathlen[0..old_count];
         allocator.free(old_pathlen_slice);
 
-        pzlob.gl_pathc = total_count;
-        pzlob.gl_pathv = result;
-        pzlob.gl_pathlen = pathlen_buf.ptr;
-        pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+        pzlob.zlo_pathc = total_count;
+        pzlob.zlo_pathv = result;
+        pzlob.zlo_pathlen = pathlen_buf.ptr;
+        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     } else {
         // No APPEND or first call - allocate fresh result array
-        const offs = if (flags.dooffs) pzlob.gl_offs else 0;
+        const offs = if (flags.dooffs) pzlob.zlo_offs else 0;
         const pathv_buf = allocator.alloc([*c]u8, offs + names.items.len + 1) catch return error.OutOfMemory;
         const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
@@ -3064,10 +3122,10 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         }
         result[offs + names.items.len] = null;
 
-        pzlob.gl_pathc = names.items.len;
-        pzlob.gl_pathv = result;
-        pzlob.gl_pathlen = pathlen_buf.ptr;
-        pzlob.gl_flags = ZLOB_FLAGS_OWNS_STRINGS;
+        pzlob.zlo_pathc = names.items.len;
+        pzlob.zlo_pathv = result;
+        pzlob.zlo_pathlen = pathlen_buf.ptr;
+        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     }
 }
 
@@ -3305,33 +3363,33 @@ inline fn matchBracketExpressionFast(pattern: []const u8, start_pi: usize, ch: u
 /// Used by GlobResults.deinit() and C API (c_lib.zig)
 /// Exposed as public for C API compatibility
 pub fn globfreeInternal(allocator: std.mem.Allocator, pzlob: *zlob_t) void {
-    if (pzlob.gl_pathv) |pathv| {
-        // gl_offs might be uninitialized if ZLOB_DOOFFS wasn't used - treat as 0
-        const offs = pzlob.gl_offs;
+    if (pzlob.zlo_pathv) |pathv| {
+        // offs might be uninitialized if ZLOB_DOOFFS wasn't used - treat as 0
+        const offs = pzlob.zlo_offs;
 
-        const owns_strings = (pzlob.gl_flags & ZLOB_FLAGS_OWNS_STRINGS) != 0;
+        const owns_strings = (pzlob.zlo_flags & ZLOB_FLAGS_OWNS_STRINGS) != 0;
 
         if (owns_strings) {
             var i: usize = 0;
-            while (i < pzlob.gl_pathc) : (i += 1) {
+            while (i < pzlob.zlo_pathc) : (i += 1) {
                 if (pathv[offs + i]) |path| {
-                    const path_len = pzlob.gl_pathlen[i];
+                    const path_len = pzlob.zlo_pathlen[i];
                     const path_slice = @as([*]u8, @ptrCast(path))[0 .. path_len + 1];
                     allocator.free(path_slice);
                 }
             }
         }
         // Always free the pathv array including offset slots
-        const pathv_slice = @as([*][*c]u8, @ptrCast(pathv))[0 .. offs + pzlob.gl_pathc + 1];
+        const pathv_slice = @as([*][*c]u8, @ptrCast(pathv))[0 .. offs + pzlob.zlo_pathc + 1];
         allocator.free(pathv_slice);
 
         // Always free the pathlen array
-        const pathlen_slice = pzlob.gl_pathlen[0..pzlob.gl_pathc];
+        const pathlen_slice = pzlob.zlo_pathlen[0..pzlob.zlo_pathc];
         allocator.free(pathlen_slice);
     }
-    pzlob.gl_pathv = null;
-    pzlob.gl_pathc = 0;
-    pzlob.gl_flags = ZLOB_FLAGS_SHARED_STRINGS;
+    pzlob.zlo_pathv = null;
+    pzlob.zlo_pathc = 0;
+    pzlob.zlo_flags = ZLOB_FLAGS_SHARED_STRINGS;
 }
 
 /// Result of a glob operation containing matched paths
@@ -3444,11 +3502,11 @@ test "DirIterator with standard filesystem" {
 
     // Test that DirIterator works with standard filesystem (no ALTDIRFUNC)
     var pzlob = zlob_t{
-        .gl_pathc = 0,
-        .gl_pathv = null,
-        .gl_offs = 0,
-        .gl_pathlen = undefined,
-        .gl_flags = 0,
+        .zlo_pathc = 0,
+        .zlo_pathv = null,
+        .zlo_offs = 0,
+        .zlo_pathlen = undefined,
+        .zlo_flags = 0,
     };
 
     // Open current directory without ALTDIRFUNC
@@ -3510,14 +3568,14 @@ test "DirIterator with ALTDIRFUNC" {
 
     // Set up zlob_t with ALTDIRFUNC callbacks
     var pzlob = zlob_t{
-        .gl_pathc = 0,
-        .gl_pathv = null,
-        .gl_offs = 0,
-        .gl_pathlen = undefined,
-        .gl_flags = 0,
-        .gl_opendir = MockDir.opendir,
-        .gl_readdir = MockDir.readdir,
-        .gl_closedir = MockDir.closedir,
+        .zlo_pathc = 0,
+        .zlo_pathv = null,
+        .zlo_offs = 0,
+        .zlo_pathlen = undefined,
+        .zlo_flags = 0,
+        .zlo_opendir = MockDir.opendir,
+        .zlo_readdir = MockDir.readdir,
+        .zlo_closedir = MockDir.closedir,
     };
 
     // Open with ALTDIRFUNC flag

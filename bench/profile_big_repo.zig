@@ -64,7 +64,7 @@ pub fn main() !void {
             var pzlob: zlob_t = undefined;
             const result = c_lib.zlob(tc.pattern.ptr, c_lib.ZLOB_RECOMMENDED, null, &pzlob);
             if (result == 0) {
-                std.debug.print("  Matches: {d}\n", .{pzlob.gl_pathc});
+                std.debug.print("  Matches: {d}\n", .{pzlob.zlo_pathc});
                 c_lib.zlobfree(&pzlob);
             } else {
                 std.debug.print("  Matches: 0 (error code: {d})\n", .{result});
@@ -81,7 +81,7 @@ pub fn main() !void {
             var pzlob: zlob_t = undefined;
             const result = c_lib.zlob(tc.pattern.ptr, c_lib.ZLOB_RECOMMENDED, null, &pzlob);
             if (result == 0) {
-                matches_this_test = pzlob.gl_pathc;
+                matches_this_test = pzlob.zlo_pathc;
                 c_lib.zlobfree(&pzlob);
             }
         }

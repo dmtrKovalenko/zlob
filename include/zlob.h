@@ -1,5 +1,5 @@
 /**
- * zlob.h - POSIX-compatible glob pattern matching library
+ * zlob.h - High-performance glob pattern matching library
  *
  * This is a C-compatible interface to the zlob (Z Glob) library,
  * which provides high-performance file pattern matching with SIMD
@@ -9,15 +9,15 @@
  *   #include <zlob.h>
  *
  *   zlob_t pzlob;
- *   int result = glob("*.txt", 0, NULL, &pzlob);
+ *   int result = zlob("*.txt", 0, NULL, &pzlob);
  *   if (result == 0) {
- *       for (size_t i = 0; i < pzlob.gl_pathc; i++) {
- *           printf("%s (len=%zu)\n", pzlob.gl_pathv[i], pzlob.gl_pathlen[i]);
+ *       for (size_t i = 0; i < pzlob.pathc; i++) {
+ *           printf("%s (len=%zu)\n", pzlob.pathv[i], pzlob.pathlen[i]);
  *       }
- *       globfree(&pzlob);
+ *       zlobfree(&pzlob);
  *   }
  *
- * There is ann additional gl_pathlen field provides O(1) access to path
+ * There is an additional pathlen field provides O(1) access to path
  * lengths, which is useful for FFI with languages like Rust where you can
  * create string slices without calling strlen():
  */
@@ -34,7 +34,7 @@ extern "C" {
 /**
  * zlob_dirent_t - Directory entry for ALTDIRFUNC callbacks
  *
- * Used with gl_readdir when ZLOB_ALTDIRFUNC is set.
+ * Used with readdir when ZLOB_ALTDIRFUNC is set.
  */
 typedef struct {
   const char *d_name; /* Null-terminated entry name */
@@ -52,31 +52,29 @@ typedef struct {
  * zlob_t - Result structure for glob pattern matching
  *
  * This structure contains the results of a glob() call.
- * The gl_pathlen field is a zlob extension for efficient FFI - it provides
+ * The pathlen field is a zlob extension for efficient FFI - it provides
  * O(1) access to path lengths without needing strlen() calls.
  *
  * ALTDIRFUNC Support (GNU extension):
- *   When ZLOB_ALTDIRFUNC flag is set, the gl_opendir, gl_readdir, and
- * gl_closedir function pointers are used instead of the standard filesystem
+ *   When ZLOB_ALTDIRFUNC flag is set, the opendir, readdir, and
+ * closedir function pointers are used instead of the standard filesystem
  * functions. This allows globbing over virtual filesystems or custom data
  * sources.
  */
 typedef struct {
-  size_t gl_pathc; /* Count of matched paths */
-  char **gl_pathv; /* Array of matched path strings (NULL-terminated) */
-  size_t
-      gl_offs; /* Number of NULL entries to reserve at beginning of gl_pathv */
-  size_t *
-      gl_pathlen; /* Array of path lengths (zlob extension for efficient FFI) */
-  int _reserved;  /* Internal use only - do not access */
+  size_t zlo_pathc; /* Count of matched paths */
+  char **zlo_pathv; /* Array of matched path strings (NULL-terminated) */
+  size_t zlo_offs; /* Number of NULL entries to reserve at beginning of zlo_pathv */
+  size_t * zlo_pathlen; /* Array of path lengths (zlob extension for efficient FFI) */
+  int zlo_flags;   /* Internal flags */
 
   /* ALTDIRFUNC: Custom directory access functions (GNU extension)
-   * Set these before calling glob() with ZLOB_ALTDIRFUNC flag */
-  void *(*gl_opendir)(
+   * Set these before calling zlob() with ZLOB_ALTDIRFUNC flag */
+  void *(*zlo_opendir)(
       const char *path); /* Returns opaque dir handle, NULL on error */
-  zlob_dirent_t *(*gl_readdir)(
+  zlob_dirent_t *(*zlo_readdir)(
       void *dir);                 /* Returns next entry, NULL when done */
-  void (*gl_closedir)(void *dir); /* Closes directory handle */
+  void (*zlo_closedir)(void *dir); /* Closes directory handle */
 } zlob_t;
 
 /* POSIX glob flags */
@@ -86,7 +84,7 @@ typedef struct {
                               */
 #define ZLOB_NOSORT (1 << 2) /* 0x0004 - Don't sort the names */
 #define ZLOB_DOOFFS                                                            \
-  (1 << 3) /* 0x0008 - Insert PZLOB->gl_offs NULLs at beginning */
+  (1 << 3) /* 0x0008 - Insert PZLOB->offs NULLs at beginning */
 #define ZLOB_NOCHECK                                                           \
   (1 << 4) /* 0x0010 - If nothing matches, return the pattern itself */
 #define ZLOB_APPEND                                                            \
@@ -99,9 +97,9 @@ typedef struct {
 
 /* GNU extensions */
 #define ZLOB_MAGCHAR                                                           \
-  (1 << 8) /* 0x0100 - Set in gl_flags if any metachars seen (OUTPUT only) */
+  (1 << 8) /* 0x0100 - Set in flags if any metachars seen (OUTPUT only) */
 #define ZLOB_ALTDIRFUNC                                                        \
-  (1 << 9) /* 0x0200 - Use gl_opendir/gl_readdir/gl_closedir functions */
+  (1 << 9) /* 0x0200 - Use opendir/readdir/closedir functions */
 #define ZLOB_BRACE (1 << 10) /* 0x0400 - Expand "{a,b}" to "a" "b" */
 #define ZLOB_NOMAGIC                                                           \
   (1 << 11) /* 0x0800 - If no magic chars, return the pattern */
@@ -142,13 +140,13 @@ typedef struct {
 #define ZLOB_NOMATCH 3 /* No matches found */
 
 /**
- * glob - Find pathnames matching a pattern (POSIX-compliant)
+ * zlob - Find pathnames matching a pattern
  *
  * @param pattern   The glob pattern to match (e.g., "*.txt", "src/test_*.c")
  * @param flags     Bitwise OR of ZLOB_* flags
  * @param errfunc   Error callback function: int (*errfunc)(const char *epath,
  * int eerrno) Called when a directory read error occurs. If it returns non-zero
- *                  or ZLOB_ERR is set, glob() will abort and return
+ *                  or ZLOB_ERR is set, zlob() will abort and return
  * ZLOB_ABORTED. Pass NULL to ignore errors and continue matching.
  * @param pzlob     Pointer to zlob_t structure to receive results
  *
@@ -174,38 +172,38 @@ typedef struct {
  *   "~/.config"      User's .config directory (with ZLOB_TILDE)
  *
  * Memory Management:
- *   After successful glob() call, you MUST call globfree() to release memory.
- *   The strings in gl_pathv and the gl_pathv array itself are allocated by
- * glob() and must be freed by globfree().
+ *   After successful zlob() call, you MUST call zlobfree() to release memory.
+ *   The strings in pathv and the pathv array itself are allocated by
+ * zlob() and must be freed by zlobfree().
  */
-int glob(const char *restrict pattern, int flags,
+int zlob(const char *restrict pattern, int flags,
          int (*errfunc)(const char *epath, int eerrno), zlob_t *restrict pzlob);
 
 /**
- * globfree - Free memory allocated by glob()
+ * zlobfree - Free memory allocated by zlob()
  *
  * @param pzlob  Pointer to zlob_t structure to free
  *
- * This function frees all memory allocated by a previous glob() call,
- * including the path strings and the gl_pathv array.
- * After calling globfree(), the zlob_t structure is reset to initial state.
+ * This function frees all memory allocated by a previous zlob() call,
+ * including the path strings and the pathv array.
+ * After calling zlobfree(), the zlob_t structure is reset to initial state.
  *
- * It is safe to call globfree() on a zlob_t that has already been freed,
- * or on an uninitialized zlob_t with gl_pathv set to NULL.
+ * It is safe to call zlobfree() on a zlob_t that has already been freed,
+ * or on an uninitialized zlob_t with pathv set to NULL.
  */
-void globfree(zlob_t *pzlob);
+void zlobfree(zlob_t *pzlob);
 
 /**
- * glob_at - Find pathnames matching a pattern relative to a base directory
+ * zlob_at - Find pathnames matching a pattern relative to a base directory
  *
- * This function is similar to glob() but operates relative to the specified
+ * This function is similar to zlob() but operates relative to the specified
  * base_path instead of the current working directory. The matched paths in
- * pzlob->gl_pathv will be relative to base_path.
+ * pzlob->pathv will be relative to base_path.
  *
  * @param base_path Absolute path to the base directory (must start with '/')
  * @param pattern   The glob pattern to match (relative to base_path)
  * @param flags     Bitwise OR of ZLOB_* flags
- * @param errfunc   Error callback function (see glob() for details)
+ * @param errfunc   Error callback function (see zlob() for details)
  * @param pzlob     Pointer to zlob_t structure to receive results
  *
  * @return 0 on success, or one of ZLOB_NOSPACE, ZLOB_ABORTED, ZLOB_NOMATCH
@@ -214,15 +212,15 @@ void globfree(zlob_t *pzlob);
  *
  * Example:
  *   zlob_t pzlob;
- *   int result = glob_at("/home/user/project", "src/*.c", ZLOB_BRACE, NULL,
- * &pzlob); if (result == 0) { for (size_t i = 0; i < pzlob.gl_pathc; i++) {
+ *   int result = zlob_at("/home/user/project", "src/*.c", ZLOB_BRACE, NULL,
+ * &pzlob); if (result == 0) { for (size_t i = 0; i < pzlob.pathc; i++) {
  *           // Paths are relative to /home/user/project
- *           printf("%s\n", pzlob.gl_pathv[i]);
+ *           printf("%s\n", pzlob.pathv[i]);
  *       }
- *       globfree(&pzlob);
+ *       zlobfree(&pzlob);
  *   }
  */
-int glob_at(const char *base_path, const char *restrict pattern, int flags,
+int zlob_at(const char *base_path, const char *restrict pattern, int flags,
             int (*errfunc)(const char *epath, int eerrno),
             zlob_t *restrict pzlob);
 
@@ -254,7 +252,7 @@ typedef struct {
  * @return 0 on success, ZLOB_NOMATCH if no matches, ZLOB_NOSPACE on OOM
  *
  * This function filters an array of paths using a glob pattern WITHOUT copying
- * the path strings. The result pointers in pzlob->gl_pathv point directly to
+ * the path strings. The result pointers in pzlob->pathv point directly to
  * the caller's original memory.
  *
  * IMPORTANT:
@@ -277,7 +275,7 @@ int zlob_match_paths_slice(const zlob_slice_t *pattern,
  * @return 0 on success, ZLOB_NOMATCH if no matches, ZLOB_NOSPACE on OOM
  *
  * This function filters an array of paths using a glob pattern WITHOUT copying
- * the path strings. The result pointers in pzlob->gl_pathv point directly to
+ * the path strings. The result pointers in pzlob->pathv point directly to
  * the caller's original memory.
  *
  * IMPORTANT:

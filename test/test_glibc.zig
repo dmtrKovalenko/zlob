@@ -109,11 +109,11 @@ test "recursive glob - **/*.c finds all C files" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
     // Should find 8 .c files:
     // file1.c, dir1/file1.c, dir1/subdir1/file1.c, dir1/subdir1/file2.c,
     // dir2/file1.c, dir2/subdir1/file1.c, dir2/subdir1/deep/file1.c, dir2/subdir1/deep/file2.c
-    try testing.expectEqual(@as(usize, 8), pzlob.gl_pathc);
+    try testing.expectEqual(8, pzlob.zlo_pathc);
 }
 
 test "recursive glob - dir1/**/*.c finds C files in dir1" {
@@ -142,9 +142,9 @@ test "recursive glob - dir1/**/*.c finds C files in dir1" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
     // Should find 3 .c files: dir1/file1.c, dir1/subdir1/file1.c, dir1/subdir1/file2.c
-    try testing.expectEqual(@as(usize, 3), pzlob.gl_pathc);
+    try testing.expectEqual(3, pzlob.zlo_pathc);
 }
 
 test "recursive glob - **/*.h finds all header files" {
@@ -173,9 +173,9 @@ test "recursive glob - **/*.h finds all header files" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
     // Should find 2 .h files: dir1/file2.h, dir3/file1.h
-    try testing.expectEqual(@as(usize, 2), pzlob.gl_pathc);
+    try testing.expectEqual(2, pzlob.zlo_pathc);
 }
 
 test "recursive glob - dir2/**/*.c finds files in dir2 subdirectories" {
@@ -204,9 +204,9 @@ test "recursive glob - dir2/**/*.c finds files in dir2 subdirectories" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
     // Should find 3 .c files: dir2/file1.c, dir2/subdir1/file1.c, dir2/subdir1/deep/file1.c, dir2/subdir1/deep/file2.c
-    try testing.expectEqual(@as(usize, 4), pzlob.gl_pathc);
+    try testing.expectEqual(4, pzlob.zlo_pathc);
 }
 
 test "recursive glob - **/*.txt finds all text files" {
@@ -235,9 +235,9 @@ test "recursive glob - **/*.txt finds all text files" {
     const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
     // Should find 2 .txt files: file2.txt, dir1/subdir2/file1.txt
-    try testing.expectEqual(@as(usize, 2), pzlob.gl_pathc);
+    try testing.expectEqual(2, pzlob.zlo_pathc);
 }
 
 test "recursive glob - no matches returns ZLOB_NOMATCH" {
@@ -294,9 +294,9 @@ test "recursive glob - ZLOB_APPEND correctly accumulates results" {
     const pattern1 = try allocator.dupeZ(u8, "**/*.c");
     defer allocator.free(pattern1);
     const result1 = c_lib.zlob(pattern1.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
-    try testing.expectEqual(@as(c_int, 0), result1);
-    const first_count = pzlob.gl_pathc;
-    try testing.expectEqual(@as(usize, 8), first_count);
+    try testing.expectEqual(0, result1);
+    const first_count = pzlob.zlo_pathc;
+    try testing.expectEqual(8, first_count);
 
     // Second glob for .h files with ZLOB_APPEND
     const pattern2 = try allocator.dupeZ(u8, "**/*.h");
@@ -304,9 +304,9 @@ test "recursive glob - ZLOB_APPEND correctly accumulates results" {
     const result2 = c_lib.zlob(pattern2.ptr, glob.ZLOB_APPEND | glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result2);
+    try testing.expectEqual(0, result2);
     // Should have 8 .c files + 2 .h files = 10 total
-    try testing.expectEqual(@as(usize, 10), pzlob.gl_pathc);
+    try testing.expectEqual(10, pzlob.zlo_pathc);
 }
 
 test "recursive glob - empty pattern component" {
@@ -371,11 +371,11 @@ test "glibc compatible - ** treated as * without ZLOB_DOUBLESTAR_RECURSIVE" {
     const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob); // NO flags - glibc compatible
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
     // Should match only files one directory level deep (like */*.c)
     // In our test structure: dir1/file1.c, dir2/file1.c = 2 files
     // (** acts as single *, matching one path component)
-    try testing.expectEqual(@as(usize, 2), pzlob.gl_pathc);
+    try testing.expectEqual(2, pzlob.zlo_pathc);
 }
 
 // Tests for pattern analysis and optimization
@@ -458,12 +458,12 @@ test "zlob_match_paths - basic filtering" {
     const result = c_lib.zlob_match_paths("*.txt", &paths, paths.len, 0, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 2), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(2, pzlob.zlo_pathc);
 
     // Verify matches (order not guaranteed, so check for presence)
-    const path0 = std.mem.sliceTo(pzlob.gl_pathv[0], 0);
-    const path1 = std.mem.sliceTo(pzlob.gl_pathv[1], 0);
+    const path0 = std.mem.sliceTo(pzlob.zlo_pathv[0], 0);
+    const path1 = std.mem.sliceTo(pzlob.zlo_pathv[1], 0);
 
     const has_foo = std.mem.eql(u8, path0, "foo.txt") or std.mem.eql(u8, path1, "foo.txt");
     const has_baz = std.mem.eql(u8, path0, "baz.txt") or std.mem.eql(u8, path1, "baz.txt");
@@ -471,8 +471,8 @@ test "zlob_match_paths - basic filtering" {
     try testing.expect(has_baz);
 
     // Verify lengths are correct (both should be 7)
-    try testing.expectEqual(@as(usize, 7), pzlob.gl_pathlen[0]);
-    try testing.expectEqual(@as(usize, 7), pzlob.gl_pathlen[1]);
+    try testing.expectEqual(7, pzlob.zlo_pathlen[0]);
+    try testing.expectEqual(7, pzlob.zlo_pathlen[1]);
 }
 
 test "zlob_match_paths - zero-copy semantics" {
@@ -485,11 +485,11 @@ test "zlob_match_paths - zero-copy semantics" {
     const result = c_lib.zlob_match_paths("*.txt", &paths, paths.len, 0, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
 
     // Verify pointer references original memory (zero-copy!)
-    try testing.expectEqual(paths[0], @as([*:0]const u8, @ptrCast(pzlob.gl_pathv[0])));
+    try testing.expectEqual(paths[0], @as([*:0]const u8, @ptrCast(pzlob.zlo_pathv[0])));
 }
 
 test "zlob_match_paths - no matches returns ZLOB_NOMATCH" {
@@ -516,8 +516,8 @@ test "zlob_match_paths - complex pattern" {
     const result = c_lib.zlob_match_paths("*/*.c", &paths, paths.len, 0, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 2), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(2, pzlob.zlo_pathc);
 }
 
 test "zlob_match_paths_slice - basic filtering" {
@@ -546,12 +546,12 @@ test "zlob_match_paths_slice - basic filtering" {
     const result = c_lib.zlob_match_paths_slice(&pattern, &path_slices, path_slices.len, 0, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 2), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(2, pzlob.zlo_pathc);
 
     // Verify matches (order not guaranteed, so check for presence)
-    const path0 = pzlob.gl_pathv[0][0..pzlob.gl_pathlen[0]];
-    const path1 = pzlob.gl_pathv[1][0..pzlob.gl_pathlen[1]];
+    const path0 = pzlob.zlo_pathv[0][0..pzlob.zlo_pathlen[0]];
+    const path1 = pzlob.zlo_pathv[1][0..pzlob.zlo_pathlen[1]];
 
     const has_foo = std.mem.eql(u8, path0, "foo.txt") or std.mem.eql(u8, path1, "foo.txt");
     const has_baz = std.mem.eql(u8, path0, "baz.txt") or std.mem.eql(u8, path1, "baz.txt");
@@ -582,11 +582,11 @@ test "zlob_match_paths_slice - zero-copy semantics" {
     const result = c_lib.zlob_match_paths_slice(&pattern, &path_slices, path_slices.len, 0, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 1), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
 
     // Verify pointer references original memory (zero-copy!)
-    try testing.expectEqual(path_strings[0].ptr, @as([*]const u8, @ptrCast(pzlob.gl_pathv[0])));
+    try testing.expectEqual(path_strings[0].ptr, @as([*]const u8, @ptrCast(pzlob.zlo_pathv[0])));
 }
 
 test "zlob_match_paths_slice - recursive pattern" {
@@ -614,8 +614,8 @@ test "zlob_match_paths_slice - recursive pattern" {
     const result = c_lib.zlob_match_paths_slice(&pattern, &path_slices, path_slices.len, 0, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, 0), result);
-    try testing.expectEqual(@as(usize, 3), pzlob.gl_pathc);
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(3, pzlob.zlo_pathc);
 }
 
 test "globfreeZ - only frees arrays not strings" {
@@ -626,12 +626,12 @@ test "globfreeZ - only frees arrays not strings" {
 
     var pzlob: glob.zlob_t = undefined;
     const result = c_lib.zlob_match_paths("*.txt", &paths, paths.len, 0, &pzlob);
-    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(0, result);
 
     // Free should work without issues (doesn't try to free caller's memory)
     c_lib.zlobfree(&pzlob);
 
     // Verify zlob_t was reset
-    try testing.expectEqual(@as(usize, 0), pzlob.gl_pathc);
-    try testing.expectEqual(@as(?[*][*c]u8, null), pzlob.gl_pathv);
+    try testing.expectEqual(0, pzlob.zlo_pathc);
+    try testing.expectEqual(@as(?[*][*c]u8, null), pzlob.zlo_pathv);
 }

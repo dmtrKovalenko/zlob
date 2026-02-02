@@ -31,7 +31,6 @@ pub const ZLOB_APPEND = zlob_impl.ZLOB_APPEND;
 pub const ZLOB_NOESCAPE = zlob_impl.ZLOB_NOESCAPE;
 pub const ZLOB_PERIOD = zlob_impl.ZLOB_PERIOD;
 
-// GNU extensions
 pub const ZLOB_MAGCHAR = zlob_impl.ZLOB_MAGCHAR;
 pub const ZLOB_ALTDIRFUNC = zlob_impl.ZLOB_ALTDIRFUNC;
 pub const ZLOB_BRACE = zlob_impl.ZLOB_BRACE;
@@ -40,22 +39,17 @@ pub const ZLOB_TILDE = zlob_impl.ZLOB_TILDE;
 pub const ZLOB_ONLYDIR = zlob_impl.ZLOB_ONLYDIR;
 pub const ZLOB_TILDE_CHECK = zlob_impl.ZLOB_TILDE_CHECK;
 
-// zlob extensions
 pub const ZLOB_GITIGNORE = zlob_impl.ZLOB_GITIGNORE;
 pub const ZLOB_DOUBLESTAR_RECURSIVE = zlob_impl.ZLOB_DOUBLESTAR_RECURSIVE;
 pub const ZLOB_EXTGLOB = zlob_impl.ZLOB_EXTGLOB;
 pub const ZLOB_RECOMMENDED = zlob_impl.ZLOB_RECOMMENDED;
 
-// Error codes
 pub const ZLOB_NOSPACE = zlob_impl.ZLOB_NOSPACE;
 pub const ZLOB_ABORTED = zlob_impl.ZLOB_ABORTED;
 pub const ZLOB_NOMATCH = zlob_impl.ZLOB_NOMATCH;
 
-// Internal flags
 const ZLOB_FLAGS_SHARED_STRINGS = zlob_impl.ZLOB_FLAGS_SHARED_STRINGS;
 
-/// POSIX-compatible glob() function
-/// Exported as "glob" for C ABI compatibility, callable as "zlob" from Zig code
 pub fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) callconv(.c) c_int {
     const allocator = std.heap.c_allocator;
 
@@ -73,16 +67,14 @@ pub fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfun
     }
 }
 
-/// POSIX-compatible globfree() function
-/// Exported as "globfree" for C ABI compatibility, callable as "zlobfree" from Zig code
 pub fn zlobfree(pzlob: *zlob_t) callconv(.c) void {
     zlob_impl.globfreeInternal(std.heap.c_allocator, pzlob);
 }
 
-// Export with POSIX-compatible C symbol names
+// pub functions avaialble as C symbols
 comptime {
-    @export(&zlob, .{ .name = "glob" });
-    @export(&zlobfree, .{ .name = "globfree" });
+    @export(&zlob, .{ .name = "zlob" });
+    @export(&zlobfree, .{ .name = "zlobfree" });
 }
 
 /// Glob within a specific base directory.
@@ -112,9 +104,9 @@ pub fn zlob_at(
     }
 }
 
-// Export glob_at
+// Export zlob_at
 comptime {
-    @export(&zlob_at, .{ .name = "glob_at" });
+    @export(&zlob_at, .{ .name = "zlob_at" });
 }
 
 /// Extnesion to the standard C api allowing to match the pattern against the flat list of paths
@@ -167,11 +159,11 @@ pub export fn zlob_match_paths(
     }
     pathv_buf[results.match_count] = null;
 
-    pzlob.gl_pathc = results.match_count;
-    pzlob.gl_pathv = @ptrCast(pathv_buf.ptr);
-    pzlob.gl_offs = 0;
-    pzlob.gl_pathlen = pathlen_buf.ptr;
-    pzlob.gl_flags = ZLOB_FLAGS_SHARED_STRINGS;
+    pzlob.zlo_pathc = results.match_count;
+    pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
+    pzlob.zlo_offs = 0;
+    pzlob.zlo_pathlen = pathlen_buf.ptr;
+    pzlob.zlo_flags = ZLOB_FLAGS_SHARED_STRINGS;
 
     return 0;
 }
@@ -216,11 +208,11 @@ pub export fn zlob_match_paths_slice(
     }
     pathv_buf[results.match_count] = null;
 
-    pzlob.gl_pathc = results.match_count;
-    pzlob.gl_pathv = @ptrCast(pathv_buf.ptr);
-    pzlob.gl_offs = 0;
-    pzlob.gl_pathlen = pathlen_buf.ptr;
-    pzlob.gl_flags = ZLOB_FLAGS_SHARED_STRINGS;
+    pzlob.zlo_pathc = results.match_count;
+    pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
+    pzlob.zlo_offs = 0;
+    pzlob.zlo_pathlen = pathlen_buf.ptr;
+    pzlob.zlo_flags = ZLOB_FLAGS_SHARED_STRINGS;
 
     return 0;
 }
