@@ -57,7 +57,7 @@ pub const PatternContext = struct {
     simd_batched_suffix_match: ?suffix_match.SimdBatchedSuffixMatch,
     only_suffix_match: ?suffix_match.SuffixMatch,
 
-    pub fn init(pattern: []const u8) PatternContext {
+    pub inline fn init(pattern: []const u8) PatternContext {
         const has_wildcards = hasWildcardsSIMD(pattern);
 
         const starts_with_dot = pattern.len > 0 and pattern[0] == '.';

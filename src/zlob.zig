@@ -282,6 +282,31 @@ pub const dirent = std.c.dirent;
 pub const DT_UNKNOWN = std.c.DT.UNKNOWN;
 pub const DT_DIR = std.c.DT.DIR;
 
+/// SIMD-optimized strlen for dirent d_name (max 256 bytes).
+/// Uses CPU-optimal vector size to find null terminator quickly.
+inline fn direntNameSlice(d_name: *const [256]u8) []const u8 {
+    // Use CPU-optimal vector size, fallback to 16 if not available
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
+    const Vec = @Vector(vec_len, u8);
+    const zeros: Vec = @splat(0);
+
+    // Calculate number of iterations needed (256 / vec_len)
+    const iterations = 256 / vec_len;
+
+    inline for (0..iterations) |iter| {
+        const i = iter * vec_len;
+        const chunk: Vec = d_name[i..][0..vec_len].*;
+        const eq = chunk == zeros;
+        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const mask = @as(MaskInt, @bitCast(eq));
+        if (mask != 0) {
+            return d_name[0 .. i + @ctz(mask)];
+        }
+    }
+    // Full 256 bytes with no null (shouldn't happen in practice)
+    return d_name[0..256];
+}
+
 /// List of paths with their lengths tracked in parallel arrays.
 /// Maps directly to zlob_t's zlo_pathv and zlo_pathlen fields.
 pub const ResultsList = struct {
@@ -289,10 +314,24 @@ pub const ResultsList = struct {
     lengths: std.ArrayListUnmanaged(usize),
     allocator: Allocator,
 
+    /// Initialize with zero capacity
     pub fn init(allocator: Allocator) ResultsList {
         return .{
             .paths = .{},
             .lengths = .{},
+            .allocator = allocator,
+        };
+    }
+
+    /// Initialize with pre-allocated capacity to avoid reallocations
+    pub fn initWithCapacity(allocator: Allocator, capacity: usize) Allocator.Error!ResultsList {
+        var paths = std.ArrayListUnmanaged([*c]u8){};
+        var lengths = std.ArrayListUnmanaged(usize){};
+        try paths.ensureTotalCapacity(allocator, capacity);
+        try lengths.ensureTotalCapacity(allocator, capacity);
+        return .{
+            .paths = paths,
+            .lengths = lengths,
             .allocator = allocator,
         };
     }
@@ -547,58 +586,23 @@ fn canMatchPattern(
 fn simdStrCmp(a: []const u8, b: []const u8) std.math.Order {
     const min_len = @min(a.len, b.len);
 
-    // SIMD comparison for long strings (32-byte vectors)
-    if (min_len >= 32) {
-        const Vec32 = @Vector(32, u8);
-        var i: usize = 0;
-        while (i + 32 <= min_len) : (i += 32) {
-            const a_vec: Vec32 = a[i..][0..32].*;
-            const b_vec: Vec32 = b[i..][0..32].*;
-            const eq = a_vec == b_vec;
-            const mask = @as(u32, @bitCast(eq));
+    // Use CPU-optimal vector size
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
 
-            if (mask != 0xFFFFFFFF) {
+    if (min_len >= vec_len) {
+        const Vec = @Vector(vec_len, u8);
+        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const all_ones: MaskInt = @as(MaskInt, 0) -% 1; // All bits set
+
+        var i: usize = 0;
+        while (i + vec_len <= min_len) : (i += vec_len) {
+            const a_vec: Vec = a[i..][0..vec_len].*;
+            const b_vec: Vec = b[i..][0..vec_len].*;
+            const eq = a_vec == b_vec;
+            const mask = @as(MaskInt, @bitCast(eq));
+
+            if (mask != all_ones) {
                 // Found difference, find first differing byte
-                const first_diff = @ctz(~mask);
-                const a_byte = a[i + first_diff];
-                const b_byte = b[i + first_diff];
-                if (a_byte < b_byte) return .lt;
-                if (a_byte > b_byte) return .gt;
-            }
-        }
-        // Compare remainder with 16-byte vector if possible
-        if (i + 16 <= min_len) {
-            const Vec16 = @Vector(16, u8);
-            const a_vec: Vec16 = a[i..][0..16].*;
-            const b_vec: Vec16 = b[i..][0..16].*;
-            const eq = a_vec == b_vec;
-            const mask = @as(u16, @bitCast(eq));
-
-            if (mask != 0xFFFF) {
-                const first_diff = @ctz(~mask);
-                const a_byte = a[i + first_diff];
-                const b_byte = b[i + first_diff];
-                if (a_byte < b_byte) return .lt;
-                if (a_byte > b_byte) return .gt;
-            }
-            i += 16;
-        }
-        // Compare final remainder byte-by-byte
-        for (a[i..min_len], b[i..min_len]) |a_byte, b_byte| {
-            if (a_byte < b_byte) return .lt;
-            if (a_byte > b_byte) return .gt;
-        }
-    } else if (min_len >= 16) {
-        // SIMD comparison for medium strings (16-byte vectors)
-        const Vec16 = @Vector(16, u8);
-        var i: usize = 0;
-        while (i + 16 <= min_len) : (i += 16) {
-            const a_vec: Vec16 = a[i..][0..16].*;
-            const b_vec: Vec16 = b[i..][0..16].*;
-            const eq = a_vec == b_vec;
-            const mask = @as(u16, @bitCast(eq));
-
-            if (mask != 0xFFFF) {
                 const first_diff = @ctz(~mask);
                 const a_byte = a[i + first_diff];
                 const b_byte = b[i + first_diff];
@@ -612,7 +616,7 @@ fn simdStrCmp(a: []const u8, b: []const u8) std.math.Order {
             if (a_byte > b_byte) return .gt;
         }
     } else {
-        // Fallback for short strings (< 16 bytes)
+        // Fallback for short strings
         for (a[0..min_len], b[0..min_len]) |a_byte, b_byte| {
             if (a_byte < b_byte) return .lt;
             if (a_byte > b_byte) return .gt;
@@ -738,7 +742,14 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         component_count += 1;
     }
 
-    var result_paths = ResultsList.init(allocator);
+    const estimated_capacity: usize = if (info.has_recursive)
+        1024 // Recursive patterns can match many files
+    else if (info.has_dir_wildcards)
+        256 // Directory wildcards match moderate number
+    else
+        64; // Simple wildcards match fewer files
+
+    var result_paths = ResultsList.initWithCapacity(allocator, estimated_capacity) catch ResultsList.init(allocator);
     defer result_paths.deinit();
     errdefer {
         for (result_paths.paths.items, result_paths.lengths.items) |path, path_len| {
@@ -746,14 +757,6 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
             allocator.free(path_slice);
         }
     }
-
-    const estimated_capacity: usize = if (info.has_recursive)
-        1024 // Recursive patterns can match many files
-    else if (info.has_dir_wildcards)
-        256 // Directory wildcards match moderate number
-    else
-        64; // Simple wildcards match fewer files
-    result_paths.ensureTotalCapacity(estimated_capacity) catch {}; // Best effort
 
     const start_dir = if (info.literal_prefix.len > 0)
         info.literal_prefix
@@ -877,7 +880,7 @@ fn expandWildcardComponents(
 
             while (c.readdir(dir)) |entry_raw| {
                 const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-                const name = mem.sliceTo(&entry.name, 0);
+                const name = direntNameSlice(&entry.name);
 
                 if (!is_final and entry.type != DT_DIR) continue;
                 if (shouldSkipFile(name, &component_ctx, flags)) continue;
@@ -1312,7 +1315,8 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
     }
 
     // Collect all results from all expanded patterns
-    var all_results = ResultsList.init(allocator);
+    // Estimate capacity based on number of expanded patterns
+    var all_results = ResultsList.initWithCapacity(allocator, expanded.len * 64) catch ResultsList.init(allocator);
     defer all_results.deinit();
 
     // Glob each expanded pattern independently (NO ZLOB_APPEND)
@@ -1364,14 +1368,9 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
 
     const count = all_results.len();
 
-    // Build result arrays - use pre-computed lengths, no strlen() calls!
-    const pathv_buf = try allocator.alloc([*c]u8, count + 1);
-    const pathlen_buf = try allocator.alloc(usize, count);
-
-    // Single memcpy operations instead of element-by-element loops
-    @memcpy(pathv_buf[0..count], all_results.paths.items);
-    @memcpy(pathlen_buf, all_results.lengths.items);
-    pathv_buf[count] = null;
+    // Transfer ownership directly from ResultsList - avoids allocation and copy
+    const pathv_buf = try all_results.toOwnedPathv();
+    const pathlen_buf = try all_results.toOwnedLengths();
 
     const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
 
@@ -1562,10 +1561,9 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     // OPTIMIZATION: Use ArrayList to accumulate ALL results, avoiding O(n²) append behavior
     // Instead of using ZLOB_APPEND which reallocates pathv for every directory,
     // we collect all results in a list and convert to pathv once at the end
-    var all_results = ResultsList.init(allocator);
+    // Pre-allocate capacity - recursive globs can match many thousands of files
+    var all_results = ResultsList.initWithCapacity(allocator, 8192) catch ResultsList.init(allocator);
     defer all_results.deinit();
-
-    all_results.ensureTotalCapacity(1024) catch {}; // Best effort
 
     // Handle pre-doublestar components (braces BEFORE **)
     // e.g., "{src,lib}/**/*.rs" - need to find matching dirs first, then recurse into each
@@ -1615,9 +1613,8 @@ fn globWithBracedComponents(
 ) !?void {
     _ = gitignore_filter; // TODO: Apply gitignore filtering
 
-    var all_results = ResultsList.init(allocator);
+    var all_results = ResultsList.initWithCapacity(allocator, 2048) catch ResultsList.init(allocator);
     defer all_results.deinit();
-    all_results.ensureTotalCapacity(256) catch {};
 
     // Find the literal prefix - components without wildcards or braces
     var literal_prefix_end: usize = 0;
@@ -2109,26 +2106,23 @@ inline fn globRecursiveWithZigWalk(
                     fnmatchWithContext(&pattern_ctx, entry.basename);
 
                 if (matches) {
-                    const full_path_len = start_dir.len + 1 + entry.path.len;
-                    const path_buf_slice = allocator.allocSentinel(u8, full_path_len, 0) catch return error.OutOfMemory;
+                    const needs_mark = flags.mark and is_dir;
+                    const base_path_len = start_dir.len + 1 + entry.path.len;
+                    const alloc_len = if (needs_mark) base_path_len + 1 else base_path_len;
+
+                    const path_buf_slice = allocator.allocSentinel(u8, alloc_len, 0) catch return error.OutOfMemory;
 
                     @memcpy(path_buf_slice[0..start_dir.len], start_dir);
                     path_buf_slice[start_dir.len] = '/';
-
                     @memcpy(path_buf_slice[start_dir.len + 1 ..][0..entry.path.len], entry.path);
 
-                    var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-                    var final_path_len = full_path_len;
+                    const final_path_len = if (needs_mark) blk: {
+                        path_buf_slice[base_path_len] = '/';
+                        path_buf_slice[base_path_len + 1] = 0;
+                        break :blk base_path_len + 1;
+                    } else base_path_len;
 
-                    if (maybeAppendSlash(allocator, path, full_path_len, is_dir, flags) catch {
-                        allocator.free(path_buf_slice);
-                        return error.OutOfMemory;
-                    }) |new_path| {
-                        path = new_path;
-                        final_path_len += 1; // Account for added '/'
-                    }
-
-                    results.append(path, final_path_len) catch return error.OutOfMemory;
+                    results.append(@ptrCast(path_buf_slice.ptr), final_path_len) catch return error.OutOfMemory;
                 }
             }
         }
@@ -2219,24 +2213,23 @@ fn walkWithGitignore(
                 fnmatchWithContext(pattern_ctx, name);
 
             if (matches) {
-                var final_path_len = start_dir.len + 1 + entry_rel_path.len;
-                const path_buf_slice = allocator.allocSentinel(u8, final_path_len, 0) catch return error.OutOfMemory;
+                const needs_mark = flags.mark and is_dir;
+                const base_path_len = start_dir.len + 1 + entry_rel_path.len;
+                const alloc_len = if (needs_mark) base_path_len + 1 else base_path_len;
+
+                const path_buf_slice = allocator.allocSentinel(u8, alloc_len, 0) catch return error.OutOfMemory;
 
                 @memcpy(path_buf_slice[0..start_dir.len], start_dir);
                 path_buf_slice[start_dir.len] = '/';
                 @memcpy(path_buf_slice[start_dir.len + 1 ..][0..entry_rel_path.len], entry_rel_path);
 
-                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
+                const final_path_len = if (needs_mark) blk: {
+                    path_buf_slice[base_path_len] = '/';
+                    path_buf_slice[base_path_len + 1] = 0;
+                    break :blk base_path_len + 1;
+                } else base_path_len;
 
-                if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
-                    allocator.free(path_buf_slice);
-                    return error.OutOfMemory;
-                }) |new_path| {
-                    path = new_path;
-                    final_path_len += 1; // Account for added '/'
-                }
-
-                results.append(path, final_path_len) catch return error.OutOfMemory;
+                results.append(@ptrCast(path_buf_slice.ptr), final_path_len) catch return error.OutOfMemory;
             }
         }
     }
@@ -2355,7 +2348,7 @@ fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const 
     // Recursively search subdirectories
     while (c.readdir(dir)) |entry_raw| {
         const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-        const name = mem.sliceTo(&entry.name, 0);
+        const name = direntNameSlice(&entry.name);
 
         if (name.len == 0 or name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) {
             continue;
@@ -2493,34 +2486,27 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
             if (matches) {
                 if (directories_only and entry.kind != .directory) continue;
 
-                const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
-                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-                var final_path_len = path_buf_slice.len;
-
                 const is_dir = entry.kind == .directory;
 
+                // Use optimized path builder that pre-allocates for trailing slash
+                const path_result = buildFullPathWithMark(allocator, dirname, name, use_dirname, is_dir, flags) catch return error.OutOfMemory;
+
                 if (directories_only and !is_dir) {
-                    allocator.free(path_buf_slice);
+                    allocator.free(path_result.buf);
                     continue;
                 }
 
                 if (gitignore_filter) |gi| {
-                    const rel_path = if (use_dirname) path_buf_slice[0..final_path_len] else name;
+                    // Use base path length (without trailing slash) for gitignore check
+                    const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
+                    const rel_path = if (use_dirname) path_result.buf[0..base_len] else name;
                     if (gi.isIgnored(rel_path, is_dir)) {
-                        allocator.free(path_buf_slice);
+                        allocator.free(path_result.buf);
                         continue;
                     }
                 }
 
-                if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
-                    allocator.free(path_buf_slice);
-                    return error.OutOfMemory;
-                }) |new_path| {
-                    path = new_path;
-                    final_path_len += 1; // Account for added '/'
-                }
-
-                results.append(path, final_path_len) catch return error.OutOfMemory;
+                results.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
             }
         }
         return;
@@ -2550,7 +2536,7 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
 
     while (c.readdir(dir)) |entry_raw| {
         const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-        const name = mem.sliceTo(&entry.name, 0);
+        const name = direntNameSlice(&entry.name);
 
         if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
 
@@ -2579,13 +2565,37 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
                 if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
             }
 
-            const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
-            var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-            var final_path_len = path_buf_slice.len;
-
+            // Determine is_dir early if we can (avoid stat when possible)
             var is_dir = entry.type == DT_DIR;
-            if (entry.type == DT_UNKNOWN) {
+            const needs_stat = entry.type == DT_UNKNOWN;
+
+            // If we know is_dir already, use optimized path builder
+            // Otherwise, fall back to old method since we need path for stat
+            if (!needs_stat) {
+                const path_result = buildFullPathWithMark(allocator, dirname, name, use_dirname, is_dir, flags) catch return error.OutOfMemory;
+
+                if (directories_only and !is_dir) {
+                    allocator.free(path_result.buf);
+                    continue;
+                }
+
+                if (gitignore_filter) |gi| {
+                    const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
+                    const rel_path = if (use_dirname) path_result.buf[0..base_len] else name;
+                    if (gi.isIgnored(rel_path, is_dir)) {
+                        allocator.free(path_result.buf);
+                        continue;
+                    }
+                }
+
+                results.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
+            } else {
+                // DT_UNKNOWN: need to stat to determine if directory
                 @branchHint(.unlikely);
+                const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
+                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
+                var final_path_len = path_buf_slice.len;
+
                 var stat_buf: std.c.Stat = undefined;
                 if (std.c.stat(path, &stat_buf) == 0) {
                     is_dir = std.c.S.ISDIR(stat_buf.mode);
@@ -2593,36 +2603,31 @@ fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_
                     allocator.free(path_buf_slice);
                     continue;
                 }
-            }
 
-            if (directories_only and !is_dir) {
-                allocator.free(path_buf_slice);
-                continue;
-            }
-
-            // Gitignore filtering - skip ignored files
-            if (gitignore_filter) |gi| {
-                // Build relative path for gitignore check
-                const rel_path = if (use_dirname)
-                    path_buf_slice[0..final_path_len]
-                else
-                    name;
-                if (gi.isIgnored(rel_path, is_dir)) {
+                if (directories_only and !is_dir) {
                     allocator.free(path_buf_slice);
                     continue;
                 }
-            }
 
-            if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
-                @branchHint(.unlikely);
-                allocator.free(path_buf_slice);
-                return error.OutOfMemory;
-            }) |new_path| {
-                path = new_path;
-                final_path_len += 1; // Account for added '/'
-            }
+                if (gitignore_filter) |gi| {
+                    const rel_path = if (use_dirname) path_buf_slice[0..final_path_len] else name;
+                    if (gi.isIgnored(rel_path, is_dir)) {
+                        allocator.free(path_buf_slice);
+                        continue;
+                    }
+                }
 
-            results.append(path, final_path_len) catch return error.OutOfMemory;
+                if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
+                    @branchHint(.unlikely);
+                    allocator.free(path_buf_slice);
+                    return error.OutOfMemory;
+                }) |new_path| {
+                    path = new_path;
+                    final_path_len += 1;
+                }
+
+                results.append(path, final_path_len) catch return error.OutOfMemory;
+            }
         }
     }
 }
@@ -2649,7 +2654,57 @@ pub inline fn buildFullPath(allocator: std.mem.Allocator, dirname: []const u8, n
     return path_buf_slice;
 }
 
-// Helper to check if filename should be skipped (returns true to skip)
+/// Result of buildFullPathWithMark - contains buffer and final length
+pub const PathBuildResult = struct {
+    ptr: [*c]u8,
+    len: usize,
+    buf: []u8, // For cleanup on error
+};
+
+/// Optimized path builder that pre-allocates space for trailing slash if ZLOB_MARK is set.
+/// This avoids a realloc when the entry is a directory.
+/// Returns the path pointer and final length (including trailing slash if added).
+pub inline fn buildFullPathWithMark(
+    allocator: std.mem.Allocator,
+    dirname: []const u8,
+    name: []const u8,
+    use_dirname: bool,
+    is_dir: bool,
+    flags: ZlobFlags,
+) !PathBuildResult {
+    const base_len = if (use_dirname)
+        dirname.len + 1 + name.len
+    else
+        name.len;
+
+    // Pre-allocate extra byte for trailing slash if MARK flag is set and it's a directory
+    const needs_mark = flags.mark and is_dir;
+    const alloc_len = if (needs_mark) base_len + 1 else base_len;
+
+    const path_buf_slice = try allocator.allocSentinel(u8, alloc_len, 0);
+
+    if (use_dirname) {
+        @memcpy(path_buf_slice[0..dirname.len], dirname);
+        path_buf_slice[dirname.len] = '/';
+        @memcpy(path_buf_slice[dirname.len + 1 ..][0..name.len], name);
+    } else {
+        @memcpy(path_buf_slice[0..name.len], name);
+    }
+
+    // Add trailing slash if needed (no realloc required - space already allocated)
+    const final_len = if (needs_mark) blk: {
+        path_buf_slice[base_len] = '/';
+        path_buf_slice[base_len + 1] = 0; // Update sentinel
+        break :blk base_len + 1;
+    } else base_len;
+
+    return .{
+        .ptr = @ptrCast(path_buf_slice.ptr),
+        .len = final_len,
+        .buf = path_buf_slice,
+    };
+}
+
 pub inline fn shouldSkipFile(name: []const u8, pattern_ctx: *const PatternContext, flags: ZlobFlags) bool {
     if (name.len == 0) return true;
 
@@ -2730,7 +2785,7 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
         };
         defer dir.close();
 
-        var names = ResultsList.init(allocator);
+        var names = ResultsList.initWithCapacity(allocator, 256) catch ResultsList.init(allocator);
         defer names.deinit();
 
         var iter = dir.iterate();
@@ -2772,34 +2827,26 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
             if (matches) {
                 if (directories_only and entry.kind != .directory) continue;
 
-                const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
-                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-                var final_path_len = path_buf_slice.len;
-
                 const is_dir = entry.kind == .directory;
 
+                // Use optimized path builder that pre-allocates for trailing slash
+                const path_result = buildFullPathWithMark(allocator, dirname, name, use_dirname, is_dir, flags) catch return error.OutOfMemory;
+
                 if (directories_only and !is_dir) {
-                    allocator.free(path_buf_slice);
+                    allocator.free(path_result.buf);
                     continue;
                 }
 
                 if (gitignore_filter) |gi| {
-                    const rel_path = if (use_dirname) path_buf_slice[0..final_path_len] else name;
+                    const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
+                    const rel_path = if (use_dirname) path_result.buf[0..base_len] else name;
                     if (gi.isIgnored(rel_path, is_dir)) {
-                        allocator.free(path_buf_slice);
+                        allocator.free(path_result.buf);
                         continue;
                     }
                 }
 
-                if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
-                    allocator.free(path_buf_slice);
-                    return error.OutOfMemory;
-                }) |new_path| {
-                    path = new_path;
-                    final_path_len += 1; // Account for added '/'
-                }
-
-                names.append(path, final_path_len) catch return error.OutOfMemory;
+                names.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
             }
         }
 
@@ -2819,20 +2866,9 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
 
                 if (dot_matches) {
                     // no gitignore check for . and .. (they're special)
-                    const path_buf_slice = buildFullPath(allocator, dirname, dot_name, use_dirname) catch return error.OutOfMemory;
-                    var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-                    var final_path_len = path_buf_slice.len;
-
-                    // . and .. are always directories, add trailing slash if MARK flag
-                    if (maybeAppendSlash(allocator, path, final_path_len, true, flags) catch {
-                        allocator.free(path_buf_slice);
-                        return error.OutOfMemory;
-                    }) |new_path| {
-                        path = new_path;
-                        final_path_len += 1; // Account for added '/'
-                    }
-
-                    names.append(path, final_path_len) catch return error.OutOfMemory;
+                    // . and .. are always directories
+                    const path_result = buildFullPathWithMark(allocator, dirname, dot_name, use_dirname, true, flags) catch return error.OutOfMemory;
+                    names.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
                 }
             }
         }
@@ -2863,12 +2899,12 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
     };
     defer _ = c.closedir(dir);
 
-    var names = ResultsList.init(allocator);
+    var names = ResultsList.initWithCapacity(allocator, 256) catch ResultsList.init(allocator);
     defer names.deinit();
 
     while (c.readdir(dir)) |entry_raw| {
         const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-        const name = mem.sliceTo(&entry.name, 0);
+        const name = direntNameSlice(&entry.name);
         if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
 
         // Match using brace alternatives if available, otherwise use single pattern
@@ -2910,12 +2946,35 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
                 if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
             }
 
-            const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
-            var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-            var final_path_len = path_buf_slice.len;
-
             var is_dir = entry.type == DT_DIR;
-            if (entry.type == DT_UNKNOWN) {
+            const needs_stat = entry.type == DT_UNKNOWN;
+
+            // If we know is_dir already, use optimized path builder
+            if (!needs_stat) {
+                const path_result = buildFullPathWithMark(allocator, dirname, name, use_dirname, is_dir, flags) catch return error.OutOfMemory;
+
+                if (directories_only and !is_dir) {
+                    allocator.free(path_result.buf);
+                    continue;
+                }
+
+                if (gitignore_filter) |gi| {
+                    const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
+                    const rel_path = if (use_dirname) path_result.buf[0..base_len] else name;
+                    if (gi.isIgnored(rel_path, is_dir)) {
+                        allocator.free(path_result.buf);
+                        continue;
+                    }
+                }
+
+                names.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
+            } else {
+                // DT_UNKNOWN: need to stat to determine if directory
+                @branchHint(.unlikely);
+                const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
+                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
+                var final_path_len = path_buf_slice.len;
+
                 var stat_buf: std.c.Stat = undefined;
                 if (std.c.stat(path, &stat_buf) == 0) {
                     is_dir = std.c.S.ISDIR(stat_buf.mode);
@@ -2923,33 +2982,30 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
                     allocator.free(path_buf_slice);
                     continue;
                 }
-            }
 
-            if (directories_only and !is_dir) {
-                allocator.free(path_buf_slice);
-                continue;
-            }
-
-            if (gitignore_filter) |gi| {
-                const rel_path = if (use_dirname)
-                    path_buf_slice[0..final_path_len]
-                else
-                    name;
-                if (gi.isIgnored(rel_path, is_dir)) {
+                if (directories_only and !is_dir) {
                     allocator.free(path_buf_slice);
                     continue;
                 }
-            }
 
-            if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
-                allocator.free(path_buf_slice);
-                return error.OutOfMemory;
-            }) |new_path| {
-                path = new_path;
-                final_path_len += 1; // Account for added '/'
-            }
+                if (gitignore_filter) |gi| {
+                    const rel_path = if (use_dirname) path_buf_slice[0..final_path_len] else name;
+                    if (gi.isIgnored(rel_path, is_dir)) {
+                        allocator.free(path_buf_slice);
+                        continue;
+                    }
+                }
 
-            names.append(path, final_path_len) catch return error.OutOfMemory;
+                if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
+                    allocator.free(path_buf_slice);
+                    return error.OutOfMemory;
+                }) |new_path| {
+                    path = new_path;
+                    final_path_len += 1;
+                }
+
+                names.append(path, final_path_len) catch return error.OutOfMemory;
+            }
         }
     }
 
