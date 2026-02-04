@@ -33,11 +33,21 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
+    // Walker module (platform-optimized directory walker)
+    const walker_mod = b.addModule("walker", .{
+        .root_source_file = b.path("src/walker.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+
     // zlob core module (for internal use - the actual implementation in zlob.zig)
     const zlob_core_mod = b.addModule("zlob_core", .{
         .root_source_file = b.path("src/zlob.zig"),
         .target = target,
         .link_libc = true,
+        .imports = &.{
+            .{ .name = "walker", .module = walker_mod },
+        },
     });
     // Add include path for C header imports (flags.zig uses @cImport)
     zlob_core_mod.addIncludePath(b.path("include"));
@@ -382,6 +392,63 @@ pub fn build(b: *std.Build) void {
     bench_brace_cmd.step.dependOn(b.getInstallStep());
     const bench_brace_step = b.step("bench-brace", "Benchmark brace pattern optimizations");
     bench_brace_step.dependOn(&bench_brace_cmd.step);
+
+    // Compare walker backends
+    const compare_walker = b.addExecutable(.{
+        .name = "compare_walker",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/compare_walker.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "walker", .module = walker_mod },
+            },
+        }),
+    });
+    compare_walker.linkLibC();
+    b.installArtifact(compare_walker);
+
+    const compare_walker_cmd = b.addRunArtifact(compare_walker);
+    compare_walker_cmd.step.dependOn(b.getInstallStep());
+    const compare_walker_step = b.step("compare-walker", "Compare walker backends");
+    compare_walker_step.dependOn(&compare_walker_cmd.step);
+
+    // Test recursive benchmark
+    const test_recursive = b.addExecutable(.{
+        .name = "test_recursive",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/test_recursive.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zlob", .module = mod },
+                .{ .name = "c_lib", .module = c_lib_mod },
+            },
+        }),
+    });
+    test_recursive.linkLibC();
+    b.installArtifact(test_recursive);
+
+    const test_recursive_cmd = b.addRunArtifact(test_recursive);
+    test_recursive_cmd.step.dependOn(b.getInstallStep());
+    const test_recursive_step = b.step("test-recursive", "Test recursive glob");
+    test_recursive_step.dependOn(&test_recursive_cmd.step);
+
+    // Perf recursive benchmark
+    const perf_recursive = b.addExecutable(.{
+        .name = "perf_recursive",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/perf_recursive.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zlob", .module = mod },
+                .{ .name = "c_lib", .module = c_lib_mod },
+            },
+        }),
+    });
+    perf_recursive.linkLibC();
+    b.installArtifact(perf_recursive);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

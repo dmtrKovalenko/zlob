@@ -1,9 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const suffix_match = @import("suffix_match.zig");
 const brace_optimizer = @import("brace_optimizer.zig");
 const pattern_context_mod = @import("pattern_context.zig");
 const flags_mod = @import("flags.zig");
 const extglob = @import("extglob.zig");
+const walker_mod = @import("walker");
 const c = std.c;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
@@ -2046,13 +2048,76 @@ inline fn globRecursiveWithZigWalk(
         // Otherwise, silently skip this directory
         return;
     };
-    defer dir.close();
 
     // Note: std.fs.Dir.walk() doesn't support pruning, so we use iterate() for gitignore support
     // If gitignore is enabled, we need manual recursion to support directory pruning
     if (rec_pattern.gitignore_filter) |gi| {
+        defer dir.close();
         try walkWithGitignore(allocator, dir, start_dir, "", rec_pattern, &pattern_ctx, flags, results, info, gi);
     } else {
+        // Use platform-optimized walker (direct getdents64 on Linux, std.fs elsewhere)
+        // Comptime selection ensures zero runtime dispatch overhead
+        const use_optimized_walker = comptime (builtin.os.tag == .linux);
+
+        if (use_optimized_walker) {
+            // Close dir since the optimized walker opens it internally - DO NOT use defer here
+            // since the walker will manage its own fd
+            dir.close();
+            var walker = walker_mod.DefaultWalker.init(allocator, start_dir, .{}) catch return error.OutOfMemory;
+            defer walker.deinit();
+
+            while (try walker.next()) |entry| {
+                const is_dir = entry.kind == .directory;
+                if (info.directories_only and !is_dir) continue;
+
+                if (entry.kind == .file or is_dir) {
+                    if (!flags.period) {
+                        if (mem.indexOf(u8, entry.path, "/.") != null) continue;
+                        if (entry.path.len > 0 and entry.path[0] == '.') {
+                            if (!pattern_ctx.starts_with_dot) continue;
+                        }
+                    }
+                    if (shouldSkipFile(entry.basename, &pattern_ctx, flags)) continue;
+
+                    const enable_extglob = flags.extglob;
+                    const matches = if (rec_pattern.file_pattern_contexts) |contexts| blk: {
+                        if (enable_extglob and rec_pattern.file_alternatives != null) {
+                            break :blk matchWithAlternativesPrecomputedExtglob(entry.basename, rec_pattern.file_alternatives.?, contexts, true);
+                        }
+                        break :blk matchWithAlternativesPrecomputed(entry.basename, contexts);
+                    } else if (rec_pattern.file_alternatives) |alts|
+                        matchWithAlternativesExtglob(entry.basename, alts, enable_extglob)
+                    else if (enable_extglob and extglob.containsExtglob(rec_pattern.file_pattern)) blk: {
+                        initExtglob();
+                        break :blk extglob.fnmatchExtglob(rec_pattern.file_pattern, entry.basename);
+                    } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+                        batched_suffix_match.matchSuffix(entry.basename)
+                    else
+                        fnmatchWithContext(&pattern_ctx, entry.basename);
+
+                    if (matches) {
+                        const needs_mark = flags.mark and is_dir;
+                        const base_path_len = start_dir.len + 1 + entry.path.len;
+                        const alloc_len = if (needs_mark) base_path_len + 1 else base_path_len;
+                        const path_buf_slice = allocator.allocSentinel(u8, alloc_len, 0) catch return error.OutOfMemory;
+                        @memcpy(path_buf_slice[0..start_dir.len], start_dir);
+                        path_buf_slice[start_dir.len] = '/';
+                        @memcpy(path_buf_slice[start_dir.len + 1 ..][0..entry.path.len], entry.path);
+                        const final_path_len = if (needs_mark) blk: {
+                            path_buf_slice[base_path_len] = '/';
+                            path_buf_slice[base_path_len + 1] = 0;
+                            break :blk base_path_len + 1;
+                        } else base_path_len;
+                        results.append(@ptrCast(path_buf_slice.ptr), final_path_len) catch return error.OutOfMemory;
+                    }
+                }
+            }
+            return; // Early return - walker manages its own cleanup via defer walker.deinit()
+        }
+
+        // Fallback path: use std.fs.Dir.walk and close dir when done
+        defer dir.close();
+
         var walker = dir.walk(allocator) catch return error.OutOfMemory;
         defer walker.deinit();
 
