@@ -9,6 +9,10 @@
 const std = @import("std");
 const glob = @import("zlob");
 
+// Re-export modules through zlob_core to avoid module conflicts
+pub const fnmatch = glob.fnmatch;
+pub const pattern_context = glob.pattern_context;
+
 pub const GlobResults = glob.GlobResults;
 pub const GlobError = glob.GlobError;
 pub const zlob_t = glob.zlob_t;

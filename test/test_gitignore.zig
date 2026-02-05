@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
 const zlobcore = @import("zlob_core");
+const fnmatch = zlob.fnmatch;
 const GitIgnore = zlobcore.GitIgnore;
 
 // Test gitignore pattern parsing
@@ -214,15 +215,15 @@ test "gitignore - common patterns" {
 
 // Test zlob matching helpers
 test "zlob fnmatchFull - basic patterns" {
-    try testing.expect(zlobcore.fnmatchFull("*.txt", "file.txt"));
-    try testing.expect(!zlobcore.fnmatchFull("*.txt", "file.log"));
-    try testing.expect(zlobcore.fnmatchFull("test?", "test1"));
-    try testing.expect(!zlobcore.fnmatchFull("test?", "test12"));
-    try testing.expect(zlobcore.fnmatchFull("[abc]", "a"));
-    try testing.expect(zlobcore.fnmatchFull("[abc]", "b"));
-    try testing.expect(!zlobcore.fnmatchFull("[abc]", "d"));
-    try testing.expect(zlobcore.fnmatchFull("[a-z]", "m"));
-    try testing.expect(!zlobcore.fnmatchFull("[a-z]", "5"));
+    try testing.expect(fnmatch.match("*.txt", "file.txt", .{}));
+    try testing.expect(!fnmatch.match("*.txt", "file.log", .{}));
+    try testing.expect(fnmatch.match("test?", "test1", .{}));
+    try testing.expect(!fnmatch.match("test?", "test12", .{}));
+    try testing.expect(fnmatch.match("[abc]", "a", .{}));
+    try testing.expect(fnmatch.match("[abc]", "b", .{}));
+    try testing.expect(!fnmatch.match("[abc]", "d", .{}));
+    try testing.expect(fnmatch.match("[a-z]", "m", .{}));
+    try testing.expect(!fnmatch.match("[a-z]", "5", .{}));
 }
 
 // Note: GitIgnore.matchGlob is internal (not pub), so we test ** patterns

@@ -241,9 +241,11 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zlob_core", .module = zlob_core_mod },
                 .{ .name = "c_lib", .module = c_lib_mod },
                 .{ .name = "test_utils", .module = test_utils_mod },
+                .{ .name = "walker", .module = walker_mod },
             },
         });
         // Add include path for C header imports (flags.zig uses @cImport)
+        test_mod.addIncludePath(b.path("include"));
         test_mod.addIncludePath(b.path("include"));
 
         const test_exe = b.addTest(.{

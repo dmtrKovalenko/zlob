@@ -2,10 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const suffix_match = @import("suffix_match.zig");
 const brace_optimizer = @import("brace_optimizer.zig");
-const pattern_context_mod = @import("pattern_context.zig");
+const pattern_context_internal = @import("pattern_context.zig");
 const flags_mod = @import("flags.zig");
 const extglob = @import("extglob.zig");
 const walker_mod = @import("walker");
+const fnmatch_internal = @import("fnmatch.zig");
 const c = std.c;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
@@ -14,11 +15,15 @@ const c_zlob = @cImport({
     @cInclude("zlob.h");
 });
 
-pub const PatternContext = pattern_context_mod.PatternContext;
-pub const PatternTemplate = pattern_context_mod.PatternTemplate;
-pub const hasWildcardsSIMD = pattern_context_mod.hasWildcardsSIMD;
-pub const indexOfCharSIMD = pattern_context_mod.indexOfCharSIMD;
-pub const lastIndexOfCharSIMD = pattern_context_mod.lastIndexOfCharSIMD;
+// Re-export modules for public API
+pub const fnmatch = fnmatch_internal;
+pub const pattern_context = pattern_context_internal;
+
+pub const PatternContext = pattern_context_internal.PatternContext;
+pub const PatternTemplate = pattern_context_internal.PatternTemplate;
+pub const hasWildcardsSIMD = pattern_context_internal.hasWildcardsSIMD;
+pub const indexOfCharSIMD = pattern_context_internal.indexOfCharSIMD;
+pub const lastIndexOfCharSIMD = pattern_context_internal.lastIndexOfCharSIMD;
 pub const containsExtglob = extglob.containsExtglob;
 pub const gitignore = @import("gitignore.zig");
 pub const GitIgnore = gitignore.GitIgnore;
@@ -27,7 +32,6 @@ const pwd = @cImport({
     @cInclude("pwd.h");
 });
 
-/// Directory entry returned by readdir callback
 pub const zlob_dirent_t = extern struct {
     d_name: [*:0]const u8, // Null-terminated entry name
     d_type: u8, // Entry type: DT_DIR, DT_REG, DT_UNKNOWN, etc.
@@ -105,100 +109,28 @@ pub const zlob_t = extern struct {
             @compileError("zlo_closedir offset mismatch");
         }
     }
-};
 
-pub const DirIterator = struct {
-    // For std.fs mode
-    std_dir: ?std.fs.Dir = null,
-    std_iter: ?std.fs.Dir.Iterator = null,
-
-    // For ALTDIRFUNC mode
-    custom_handle: ?*anyopaque = null,
-    readdir_fn: readdir_t = null,
-    closedir_fn: closedir_t = null,
-
-    // Shared state
-    is_altdirfunc: bool = false,
-
-    pub const Entry = struct {
-        name: []const u8,
-        kind: std.fs.Dir.Entry.Kind,
-    };
-
-    pub fn open(path: []const u8, flags: c_int, pzlob: *const zlob_t) !DirIterator {
-        return openAt(path, flags, pzlob, null);
-    }
-
-    /// Open a directory iterator, optionally relative to a base directory.
-    /// If base_dir is null, uses cwd(). ALTDIRFUNC takes precedence if set.
-    pub fn openAt(path: []const u8, flags: c_int, pzlob: *const zlob_t, base_dir: ?std.fs.Dir) !DirIterator {
+    /// Convert zlob_t's ALTDIRFUNC callbacks to a walker FsProvider.
+    /// This enables seamless integration with the walker module.
+    pub fn toFsProvider(self: *const zlob_t, flags: c_int) walker_mod.FsProvider {
         const use_altdirfunc = (flags & ZLOB_ALTDIRFUNC) != 0 and
-            pzlob.zlo_opendir != null and
-            pzlob.zlo_readdir != null and
-            pzlob.zlo_closedir != null;
+            self.zlo_opendir != null and
+            self.zlo_readdir != null and
+            self.zlo_closedir != null;
 
         if (use_altdirfunc) {
-            // ALTDIRFUNC takes precedence over base_dir
-            var path_buf: [4096:0]u8 = undefined;
-            if (path.len >= 4096) return error.NameTooLong;
-            @memcpy(path_buf[0..path.len], path);
-            path_buf[path.len] = 0;
-
-            const handle = pzlob.zlo_opendir.?(&path_buf);
-            if (handle == null) return error.FileNotFound;
-
-            return DirIterator{
-                .is_altdirfunc = true,
-                .custom_handle = handle,
-                .readdir_fn = pzlob.zlo_readdir,
-                .closedir_fn = pzlob.zlo_closedir,
-            };
-        } else {
-            // Use base_dir if provided, otherwise use cwd
-            const root = base_dir orelse std.fs.cwd();
-            var dir = root.openDir(path, .{ .iterate = true }) catch |err| {
-                return err;
-            };
-            return DirIterator{
-                .is_altdirfunc = false,
-                .std_dir = dir,
-                .std_iter = dir.iterate(),
+            return .{
+                .opendir = @ptrCast(self.zlo_opendir),
+                .readdir = @ptrCast(self.zlo_readdir),
+                .closedir = @ptrCast(self.zlo_closedir),
             };
         }
-    }
-
-    pub fn next(self: *DirIterator) ?Entry {
-        if (self.is_altdirfunc) {
-            const dir_entry = self.readdir_fn.?(self.custom_handle) orelse return null;
-            const name = mem.sliceTo(dir_entry.d_name, 0);
-            const kind: std.fs.Dir.Entry.Kind = switch (dir_entry.d_type) {
-                4 => .directory, // DT_DIR
-                8 => .file, // DT_REG
-                10 => .sym_link, // DT_LNK
-                else => .unknown,
-            };
-            return Entry{ .name = name, .kind = kind };
-        } else {
-            const entry = self.std_iter.?.next() catch return null;
-            if (entry) |e| {
-                return Entry{ .name = e.name, .kind = e.kind };
-            }
-            return null;
-        }
-    }
-
-    pub fn close(self: *DirIterator) void {
-        if (self.is_altdirfunc) {
-            if (self.closedir_fn) |closedir| {
-                closedir(self.custom_handle);
-            }
-        } else {
-            if (self.std_dir) |*dir| {
-                dir.close();
-            }
-        }
+        return walker_mod.FsProvider.real_fs;
     }
 };
+
+// Note: DirIterator has been unified into walker.zig
+// Use walker_mod.DirIterator.openWithProvider() with zlob_t.toFsProvider() for ALTDIRFUNC support
 
 fn globLiteralPath(allocator: Allocator, path: []const u8, flags: ZlobFlags, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !bool {
     const root = base_dir orelse std.fs.cwd();
@@ -278,36 +210,11 @@ pub const zlob_errfunc_t = ?*const fn (epath: [*:0]const u8, eerrno: c_int) call
 // Re-export path_matcher for consumers that need in-memory path matching
 pub const path_matcher = @import("path_matcher.zig");
 
-// Use Zig's cross-platform dirent structure
+// Use Zig's cross-platform dirent structure (kept for API compatibility)
 pub const dirent = std.c.dirent;
 
 pub const DT_UNKNOWN = std.c.DT.UNKNOWN;
 pub const DT_DIR = std.c.DT.DIR;
-
-/// SIMD-optimized strlen for dirent d_name (max 256 bytes).
-/// Uses CPU-optimal vector size to find null terminator quickly.
-inline fn direntNameSlice(d_name: *const [256]u8) []const u8 {
-    // Use CPU-optimal vector size, fallback to 16 if not available
-    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
-    const Vec = @Vector(vec_len, u8);
-    const zeros: Vec = @splat(0);
-
-    // Calculate number of iterations needed (256 / vec_len)
-    const iterations = 256 / vec_len;
-
-    inline for (0..iterations) |iter| {
-        const i = iter * vec_len;
-        const chunk: Vec = d_name[i..][0..vec_len].*;
-        const eq = chunk == zeros;
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
-        const mask = @as(MaskInt, @bitCast(eq));
-        if (mask != 0) {
-            return d_name[0 .. i + @ctz(mask)];
-        }
-    }
-    // Full 256 bytes with no null (shouldn't happen in practice)
-    return d_name[0..256];
-}
 
 /// List of paths with their lengths tracked in parallel arrays.
 /// Maps directly to zlob_t's zlo_pathv and zlo_pathlen fields.
@@ -469,7 +376,7 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
     if (info.wildcard_suffix.len > 0) {
         if (mem.lastIndexOf(u8, info.wildcard_suffix, "/")) |pos| {
             const dir_part = info.wildcard_suffix[0..pos];
-            info.has_dir_wildcards = pattern_context_mod.hasWildcardsOrExtglob(dir_part, flags.extglob);
+            info.has_dir_wildcards = pattern_context_internal.hasWildcardsOrExtglob(dir_part, flags.extglob);
         }
     }
 
@@ -719,7 +626,7 @@ fn buildPathInBuffer(buf: []u8, dir: []const u8, name: []const u8) []const u8 {
     return buf[0..len];
 }
 
-fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
+fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.FsProvider) !?void {
     // Note: gitignore filtering is not fully implemented in this path
     // The main recursive and filtered paths handle gitignore
     _ = gitignore_filter;
@@ -765,7 +672,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     else
         ".";
 
-    try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc, base_dir);
+    try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc, base_dir, fs_provider);
 
     if (result_paths.len() == 0) {
         if (flags.nocheck) {
@@ -805,13 +712,17 @@ fn expandWildcardComponents(
     flags: ZlobFlags,
     errfunc: zlob_errfunc_t,
     base_dir: ?std.fs.Dir,
+    fs_provider: walker_mod.FsProvider,
 ) !void {
     if (component_idx > 65536) {
         @branchHint(.unlikely);
+
         return error.Aborted;
     }
 
     if (component_idx >= components.len) {
+        @branchHint(.unlikely);
+
         const path_copy = try allocator.allocSentinel(u8, current_dir.len, 0);
         @memcpy(path_copy[0..current_dir.len], current_dir);
         const path: [*c]u8 = @ptrCast(path_copy.ptr);
@@ -828,82 +739,47 @@ fn expandWildcardComponents(
     const needs_wildcard_matching = component_ctx.has_wildcards or has_extglob_pattern;
 
     if (needs_wildcard_matching) {
-        // Wildcard or extglob component - match against directory entries
-        // If base_dir is provided, use Zig's fs; otherwise use C's opendir
-        if (base_dir) |bd| {
-            var dir = bd.openDir(current_dir, .{ .iterate = true }) catch {
-                if (flags.err) return error.Aborted;
-                return;
-            };
-            defer dir.close();
+        const hidden_config = walker_mod.HiddenConfig.fromPatternAndFlags(
+            component_ctx.starts_with_dot,
+            component_ctx.is_dot_or_dotdot,
+            flags.period,
+        );
 
-            var iter = dir.iterate();
-            while (iter.next() catch null) |entry| {
-                const name = entry.name;
-                if (!is_final and entry.kind != .directory) continue;
-                if (shouldSkipFile(name, &component_ctx, flags)) continue;
-
-                const matches = if (has_extglob_pattern) blk: {
-                    initExtglob();
-                    break :blk extglob.fnmatchExtglob(component, name);
-                } else if (is_final and component_ctx.simd_batched_suffix_match != null)
-                    component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
-                else
-                    fnmatchWithContext(&component_ctx, name);
-
-                if (matches) {
-                    if (is_final and directories_only and entry.kind != .directory) continue;
-
-                    var new_path_buf: [4096]u8 = undefined;
-                    const new_path = buildPathInBuffer(&new_path_buf, current_dir, name);
-                    if (new_path.len >= 4096) continue;
-
-                    try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir);
+        var iter = walker_mod.DirIterator.openWithProvider(current_dir, base_dir, hidden_config, fs_provider) catch |err| {
+            if (errfunc) |ef| {
+                var path_z: [4096:0]u8 = undefined;
+                const len = @min(current_dir.len, 4095);
+                @memcpy(path_z[0..len], current_dir[0..len]);
+                path_z[len] = 0;
+                if (ef(&path_z, walker_mod.errToErrno(err)) != 0) {
+                    return error.Aborted;
                 }
             }
-        } else {
-            // C-based path
-            var dirname_z: [4096:0]u8 = undefined;
-            if (current_dir.len >= 4096) return error.OutOfMemory;
-            @memcpy(dirname_z[0..current_dir.len], current_dir);
-            dirname_z[current_dir.len] = 0;
+            if (flags.err) return error.Aborted;
+            return;
+        };
+        defer iter.close();
 
-            const dir = c.opendir(&dirname_z) orelse {
-                if (errfunc) |efunc| {
-                    const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
-                    if (efunc(&dirname_z, eerrno) != 0) {
-                        return error.Aborted;
-                    }
-                }
-                if (flags.err) return error.Aborted;
-                return;
-            };
-            defer _ = c.closedir(dir);
+        while (iter.next()) |entry| {
+            const name = entry.name;
+            if (!is_final and entry.kind != .directory) continue;
 
-            while (c.readdir(dir)) |entry_raw| {
-                const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-                const name = direntNameSlice(&entry.name);
+            const matches = if (has_extglob_pattern) blk: {
+                initExtglob();
+                break :blk extglob.fnmatchExtglob(component, name);
+            } else if (is_final and component_ctx.simd_batched_suffix_match != null)
+                component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
+            else
+                fnmatchWithContext(&component_ctx, name);
 
-                if (!is_final and entry.type != DT_DIR) continue;
-                if (shouldSkipFile(name, &component_ctx, flags)) continue;
+            if (matches) {
+                if (is_final and directories_only and entry.kind != .directory) continue;
 
-                const matches = if (has_extglob_pattern) blk: {
-                    initExtglob();
-                    break :blk extglob.fnmatchExtglob(component, name);
-                } else if (is_final and component_ctx.simd_batched_suffix_match != null)
-                    component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
-                else
-                    fnmatchWithContext(&component_ctx, name);
+                var new_path_buf: [4096]u8 = undefined;
+                const new_path = buildPathInBuffer(&new_path_buf, current_dir, name);
+                if (new_path.len >= 4096) continue;
 
-                if (matches) {
-                    if (is_final and directories_only and entry.type != DT_DIR) continue;
-
-                    var new_path_buf: [4096]u8 = undefined;
-                    const new_path = buildPathInBuffer(&new_path_buf, current_dir, name);
-                    if (new_path.len >= 4096) continue;
-
-                    try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, null);
-                }
+                try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir, fs_provider);
             }
         }
     } else {
@@ -913,27 +789,15 @@ fn expandWildcardComponents(
 
         if (new_path.len >= 4096) return;
 
-        if (base_dir) |bd| {
-            const stat = bd.statFile(new_path) catch return;
-            if (!is_final and stat.kind != .directory) return;
-            if (is_final and directories_only and stat.kind != .directory) return;
-            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir);
-        } else {
-            var path_z: [4096:0]u8 = undefined;
-            @memcpy(path_z[0..new_path.len], new_path);
-            path_z[new_path.len] = 0;
-
-            var stat_buf: std.c.Stat = undefined;
-            if (std.c.stat(&path_z, &stat_buf) == 0) {
-                if (!is_final and !std.c.S.ISDIR(stat_buf.mode)) return;
-                if (is_final and directories_only and !std.c.S.ISDIR(stat_buf.mode)) return;
-                try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, null);
-            }
-        }
+        const root = base_dir orelse std.fs.cwd();
+        const stat = root.statFile(new_path) catch return;
+        if (!is_final and stat.kind != .directory) return;
+        if (is_final and directories_only and stat.kind != .directory) return;
+        try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir, fs_provider);
     }
 }
 
-fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
+fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.FsProvider) !?void {
     var effective_pattern = pattern;
     var flags = flags_in;
 
@@ -1014,14 +878,14 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
             }
 
             if (has_dir_alternatives or (has_file_alternatives and has_dir_wildcards)) {
-                return globWithBracedComponents(allocator, parsed, &info, flags, errfunc, pzlob, info.directories_only, gitignore_filter, base_dir);
+                return globWithBracedComponents(allocator, parsed, &info, flags, errfunc, pzlob, info.directories_only, gitignore_filter, base_dir, fs_provider);
             }
         }
     }
 
     // Fast path: simple pattern with literal prefix (e.g., "src/foo/*.txt")
     if (info.simple_extension != null and info.literal_prefix.len > 0) {
-        return globInDirFiltered(allocator, info.wildcard_suffix, info.literal_prefix, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir);
+        return globInDirFiltered(allocator, info.wildcard_suffix, info.literal_prefix, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
     }
 
     // Only use recursive glob handling if ZLOB_DOUBLESTAR_RECURSIVE is set
@@ -1059,7 +923,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
                 }
             }
 
-            return globRecursive(allocator, pattern_from_doublestar, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, base_dir);
+            return globRecursive(allocator, pattern_from_doublestar, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, base_dir, fs_provider);
         }
     }
 
@@ -1092,7 +956,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
 
     // But skip if pattern has ** (needs special recursive handling)
     if (has_wildcard_in_dir and !info.has_recursive) {
-        return globWithWildcardDirsOptimized(allocator, effective_pattern, &info, flags, errfunc, pzlob, info.directories_only, gitignore_filter, base_dir);
+        return globWithWildcardDirsOptimized(allocator, effective_pattern, &info, flags, errfunc, pzlob, info.directories_only, gitignore_filter, base_dir, fs_provider);
     }
 
     var dir_end: usize = 0;
@@ -1119,11 +983,11 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     // Only check for ** in filename if doublestar_recursive is enabled
     if (flags.doublestar_recursive) {
         if (mem.indexOf(u8, filename_pattern, "**")) |_| {
-            return globRecursive(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, base_dir);
+            return globRecursive(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, base_dir, fs_provider);
         }
     }
 
-    return globInDirFiltered(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir);
+    return globInDirFiltered(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
 }
 
 /// Helper to return pattern as result (for ZLOB_NOCHECK)
@@ -1240,6 +1104,9 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
         }
     }
 
+    // Create FsProvider once for the entire glob operation
+    const fs_provider = pzlob.toFsProvider(flags);
+
     var pattern_slice = mem.sliceTo(pattern, 0);
     const original_pattern_ptr = pattern_slice.ptr;
 
@@ -1274,7 +1141,7 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
     if (gf.brace and brace_optimizer.containsBraces(pattern_slice)) {
         var opt = brace_optimizer.analyzeBracedPattern(allocator, pattern_slice) catch {
             // On error, fall back to standard brace expansion
-            return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir);
+            return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
         };
         defer opt.deinit();
 
@@ -1291,22 +1158,23 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
                     pzlob,
                     gitignore_ptr,
                     base_dir,
+                    fs_provider,
                 );
             },
             .fallback => {
-                return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir);
+                return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
             },
             .no_braces => {
-                return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir);
+                return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
             },
         }
     }
 
-    return try globSingle(allocator, pattern_slice, null, gf, errfunc, pzlob, gitignore_ptr, base_dir);
+    return try globSingle(allocator, pattern_slice, null, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
 }
 
 // Expand brace patterns and glob each independently (no ZLOB_APPEND manipulation)
-fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
+fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.FsProvider) !?void {
     // Use brace_optimizer.expandBraces for consistent nested brace handling
     const expanded = try brace_optimizer.expandBraces(allocator, pattern);
     defer {
@@ -1329,7 +1197,7 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
         temp_pzlob.zlo_pathv = null;
         temp_pzlob.zlo_offs = 0;
 
-        _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true }), errfunc, &temp_pzlob, gitignore_filter, base_dir);
+        _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true }), errfunc, &temp_pzlob, gitignore_filter, base_dir, fs_provider);
 
         // Collect results from temp_pzlob
         if (temp_pzlob.zlo_pathc > 0) {
@@ -1413,11 +1281,11 @@ inline fn matchWithAlternativesPrecomputed(name: []const u8, contexts: []const P
     return false;
 }
 
-fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !?void {
+fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.FsProvider) !?void {
     const info = analyzePattern(pattern, flags);
 
     // Split pattern at **
-    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInDirFiltered(allocator, pattern, dirname, flags, errfunc, pzlob, directories_only, gitignore_filter, brace_parsed, base_dir);
+    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInDirFiltered(allocator, pattern, dirname, flags, errfunc, pzlob, directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
 
     var after_double_star = pattern[double_star_pos + 2 ..];
 
@@ -1582,13 +1450,11 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
             &info,
             errfunc,
             base_dir,
+            fs_provider,
         );
-    } else if (post_ds_count == 0) {
-        // No dir components at all - use Zig walker which produces slices directly
-        try globRecursiveWithZigWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc, base_dir);
     } else {
-        // Has post-doublestar dir components - use C-based recursive helper
-        try globRecursiveHelperCollect(allocator, &rec_pattern, start_dir, flags, &all_results, 0, &info, errfunc, base_dir);
+        // Use unified walker for both simple (**/*.txt) and complex (**/foo/*.txt) patterns
+        try globRecursiveWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc, base_dir, fs_provider);
     }
 
     if (all_results.len() == 0) {
@@ -1612,6 +1478,7 @@ fn globWithBracedComponents(
     directories_only: bool,
     gitignore_filter: ?*GitIgnore,
     base_dir: ?std.fs.Dir,
+    fs_provider: walker_mod.FsProvider,
 ) !?void {
     _ = gitignore_filter; // TODO: Apply gitignore filtering
 
@@ -1682,10 +1549,10 @@ fn globWithBracedComponents(
 
     // Convert remaining BracedComponents to ComponentMatcher format
     const remaining_components = parsed.components[start_component_idx..];
-    var matchers: [32]ComponentMatcher = undefined;
+    var matchers: [32]BracedComponentMatcher = undefined;
     const matcher_count = @min(remaining_components.len, 32);
     for (remaining_components[0..matcher_count], 0..) |comp, i| {
-        matchers[i] = ComponentMatcher.fromBracedComponent(&comp);
+        matchers[i] = BracedComponentMatcher.fromBracedComponent(&comp);
     }
 
     try walkBracedComponents(
@@ -1698,6 +1565,7 @@ fn globWithBracedComponents(
         directories_only,
         errfunc,
         base_dir,
+        fs_provider,
         struct {
             fn onComplete(alloc: std.mem.Allocator, path: []const u8, results: *ResultsList, _: bool) !void {
                 const path_copy = try alloc.allocSentinel(u8, path.len, 0);
@@ -1715,13 +1583,12 @@ fn globWithBracedComponents(
     return finalizeResults(allocator, &all_results, flags, pzlob);
 }
 
-/// Unified component matcher - can match against text or alternatives
-const ComponentMatcher = struct {
+const BracedComponentMatcher = struct {
     text: []const u8,
     alternatives: ?[]const []const u8,
     is_last: bool,
 
-    fn fromBracedComponent(comp: *const brace_optimizer.BracedComponent) ComponentMatcher {
+    fn fromBracedComponent(comp: *const brace_optimizer.BracedComponent) BracedComponentMatcher {
         return .{
             .text = comp.text,
             .alternatives = comp.alternatives,
@@ -1729,17 +1596,17 @@ const ComponentMatcher = struct {
         };
     }
 
-    fn fromTextAndAlts(text: []const u8, alts: ?[]const []const u8, is_last: bool) ComponentMatcher {
+    fn fromTextAndAlts(text: []const u8, alts: ?[]const []const u8, is_last: bool) BracedComponentMatcher {
         return .{ .text = text, .alternatives = alts, .is_last = is_last };
     }
 
     /// Check if name matches this component
-    fn matches(self: *const ComponentMatcher, name: []const u8) bool {
+    fn matches(self: *const BracedComponentMatcher, name: []const u8) bool {
         return self.matchesWithFlags(name, false);
     }
 
     /// Check if name matches this component with extglob support
-    fn matchesWithFlags(self: *const ComponentMatcher, name: []const u8, enable_extglob: bool) bool {
+    fn matchesWithFlags(self: *const BracedComponentMatcher, name: []const u8, enable_extglob: bool) bool {
         if (self.alternatives) |alts| {
             return matchWithAlternativesExtglob(name, alts, enable_extglob);
         }
@@ -1753,7 +1620,7 @@ const ComponentMatcher = struct {
     }
 
     /// Check if any pattern/alternative starts with dot
-    fn startsWithDot(self: *const ComponentMatcher) bool {
+    fn startsWithDot(self: *const BracedComponentMatcher) bool {
         if (self.text.len > 0 and self.text[0] == '.') return true;
         if (self.alternatives) |alts| {
             for (alts) |alt| {
@@ -1764,28 +1631,12 @@ const ComponentMatcher = struct {
     }
 };
 
-/// Check if entry should be skipped (. and .., hidden files)
-/// When is_hidden_ok is true (pattern starts with '.'), we allow . and .. through
-/// to be tested against the pattern - this is POSIX compliant behavior
-inline fn shouldSkipEntry(name: []const u8, is_hidden_ok: bool) bool {
-    if (name.len == 0) return true;
-    if (name[0] == '.') {
-        // When pattern starts with '.', allow . and .. through to be matched
-        // This is POSIX compliant: if pattern explicitly matches leading period,
-        // then . and .. should be eligible for matching
-        if (name.len == 1 or (name.len == 2 and name[1] == '.')) {
-            // Only allow . and .. if pattern starts with '.' (is_hidden_ok)
-            return !is_hidden_ok;
-        }
-        // Skip other hidden files unless allowed
-        if (!is_hidden_ok) return true;
-    }
-    return false;
-}
+// Note: shouldSkipEntry has been removed - filtering is now done at the walker/iterator level
+// via HiddenConfig. This avoids code duplication and ensures POSIX compliance.
 
 fn walkBracedComponents(
     allocator: std.mem.Allocator,
-    matchers: []const ComponentMatcher,
+    matchers: []const BracedComponentMatcher,
     component_idx: usize,
     current_dir: []const u8,
     flags: ZlobFlags,
@@ -1793,6 +1644,7 @@ fn walkBracedComponents(
     directories_only: bool,
     errfunc: zlob_errfunc_t,
     base_dir: ?std.fs.Dir,
+    fs_provider: walker_mod.FsProvider,
     comptime onComplete: fn (std.mem.Allocator, []const u8, *ResultsList, bool) error{ OutOfMemory, Aborted }!void,
 ) error{ OutOfMemory, Aborted }!void {
     if (component_idx >= matchers.len) {
@@ -1802,27 +1654,33 @@ fn walkBracedComponents(
 
     const matcher = &matchers[component_idx];
     const is_final = component_idx == matchers.len - 1;
-    const is_hidden_ok = flags.period or matcher.startsWithDot();
 
-    // Open directory
-    const root = base_dir orelse std.fs.cwd();
-    var dir = root.openDir(current_dir, .{ .iterate = true }) catch |err| {
-        if (errfunc) |efunc| {
-            var path_buf: [4096:0]u8 = undefined;
-            if (current_dir.len < 4096) {
-                @memcpy(path_buf[0..current_dir.len], current_dir);
-                path_buf[current_dir.len] = 0;
-                _ = efunc(&path_buf, errToErrno(err));
+    // Compute hidden config from matcher and flags
+    const hidden_config = walker_mod.HiddenConfig{
+        // Include "." and ".." if pattern starts with '.'
+        .include_dot_entries = matcher.startsWithDot(),
+        // Include hidden files if PERIOD flag is set OR pattern starts with '.'
+        .include_hidden = flags.period or matcher.startsWithDot(),
+    };
+
+    // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
+    var iter = walker_mod.DirIterator.openWithProvider(current_dir, base_dir, hidden_config, fs_provider) catch |err| {
+        if (errfunc) |ef| {
+            var path_z: [4096:0]u8 = undefined;
+            const len = @min(current_dir.len, 4095);
+            @memcpy(path_z[0..len], current_dir[0..len]);
+            path_z[len] = 0;
+            if (ef(&path_z, walker_mod.errToErrno(err)) != 0) {
+                return error.Aborted;
             }
         }
         if (flags.err) return error.Aborted;
         return;
     };
-    defer dir.close();
+    defer iter.close();
 
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (shouldSkipEntry(entry.name, is_hidden_ok)) continue;
+    while (iter.next()) |entry| {
+        // Note: Hidden file filtering is now done at iterator level
         if (!is_final and entry.kind != .directory) continue;
 
         if (matcher.matchesWithFlags(entry.name, flags.extglob)) {
@@ -1842,20 +1700,11 @@ fn walkBracedComponents(
                 directories_only,
                 errfunc,
                 base_dir,
+                fs_provider,
                 onComplete,
             );
         }
     }
-}
-
-/// Convert error to errno for error callback
-inline fn errToErrno(err: anyerror) c_int {
-    return switch (err) {
-        error.AccessDenied => @intFromEnum(std.posix.E.ACCES),
-        error.FileNotFound => @intFromEnum(std.posix.E.NOENT),
-        error.NotDir => @intFromEnum(std.posix.E.NOTDIR),
-        else => @intFromEnum(std.posix.E.IO),
-    };
 }
 
 fn globRecursiveWithBracedPrefix(
@@ -1870,42 +1719,47 @@ fn globRecursiveWithBracedPrefix(
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
     base_dir: ?std.fs.Dir,
+    fs_provider: walker_mod.FsProvider,
 ) !void {
     // If we've matched all pre-doublestar components, start the recursive walk
     if (component_idx >= pre_ds_components.len) {
-        if (rec_pattern.dir_components.len == 0) {
-            try globRecursiveWithZigWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc, base_dir);
-        } else {
-            try globRecursiveHelperCollect(allocator, rec_pattern, current_dir, flags, results, 0, info, errfunc, base_dir);
-        }
+        // Use unified walker for both simple and complex patterns
+        try globRecursiveWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc, base_dir, fs_provider);
         return;
     }
 
-    const matcher = ComponentMatcher.fromTextAndAlts(
+    const matcher = BracedComponentMatcher.fromTextAndAlts(
         pre_ds_components[component_idx],
         pre_ds_alternatives[component_idx],
         false, // not last - always matching directories
     );
-    const is_hidden_ok = flags.period or matcher.startsWithDot();
 
-    const root = base_dir orelse std.fs.cwd();
-    var dir = root.openDir(current_dir, .{ .iterate = true }) catch |err| {
-        if (errfunc) |efunc| {
-            var path_buf: [4096:0]u8 = undefined;
-            if (current_dir.len < 4096) {
-                @memcpy(path_buf[0..current_dir.len], current_dir);
-                path_buf[current_dir.len] = 0;
-                _ = efunc(&path_buf, errToErrno(err));
+    // Compute hidden config from matcher and flags
+    const hidden_config = walker_mod.HiddenConfig{
+        // Include "." and ".." if pattern starts with '.'
+        .include_dot_entries = matcher.startsWithDot(),
+        // Include hidden files if PERIOD flag is set OR pattern starts with '.'
+        .include_hidden = flags.period or matcher.startsWithDot(),
+    };
+
+    // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
+    var iter = walker_mod.DirIterator.openWithProvider(current_dir, base_dir, hidden_config, fs_provider) catch |err| {
+        if (errfunc) |ef| {
+            var path_z: [4096:0]u8 = undefined;
+            const len = @min(current_dir.len, 4095);
+            @memcpy(path_z[0..len], current_dir[0..len]);
+            path_z[len] = 0;
+            if (ef(&path_z, walker_mod.errToErrno(err)) != 0) {
+                return error.Aborted;
             }
         }
         if (flags.err) return error.Aborted;
         return;
     };
-    defer dir.close();
+    defer iter.close();
 
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (shouldSkipEntry(entry.name, is_hidden_ok)) continue;
+    while (iter.next()) |entry| {
+        // Note: Hidden file filtering is now done at iterator level
         if (entry.kind != .directory) continue;
 
         if (matcher.matchesWithFlags(entry.name, flags.extglob)) {
@@ -1925,6 +1779,7 @@ fn globRecursiveWithBracedPrefix(
                 info,
                 errfunc,
                 base_dir,
+                fs_provider,
             );
         }
     }
@@ -2004,9 +1859,12 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
     }
 }
 
-// Use Zig's std.fs.Dir.walk() for recursive directory traversal
-// This produces string slices directly, avoiding mem.sliceTo overhead on every entry
-inline fn globRecursiveWithZigWalk(
+// Use unified walker for recursive directory traversal with optional gitignore filtering
+// The walker now handles directory pruning via dir_filter, so we don't need separate
+// walkWithGitignore function anymore.
+// This function handles both simple (**/*.txt) and complex (**/foo/*.txt) patterns.
+// Uses comptime parameter to eliminate runtime branch for dir_components check.
+inline fn globRecursiveWalk(
     allocator: std.mem.Allocator,
     rec_pattern: *const RecursivePattern,
     start_dir: []const u8,
@@ -2015,711 +1873,227 @@ inline fn globRecursiveWithZigWalk(
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
     base_dir: ?std.fs.Dir,
+    fs_provider: walker_mod.FsProvider,
 ) !void {
-    // Pattern context for file matching
-    const pattern_ctx = PatternContext.init(rec_pattern.file_pattern);
-
-    // Open the starting directory using Zig's std.fs
-    const root = base_dir orelse std.fs.cwd();
-    var dir = root.openDir(start_dir, .{ .iterate = true }) catch |err| {
-        // If we can't open the directory, call errfunc if provided
-        if (errfunc) |efunc| {
-            // Convert start_dir to null-terminated string for errfunc
-            var path_buf: [4096:0]u8 = undefined;
-            if (start_dir.len >= 4096) return error.Aborted;
-            @memcpy(path_buf[0..start_dir.len], start_dir);
-            path_buf[start_dir.len] = 0;
-
-            const eerrno: c_int = switch (err) {
-                error.AccessDenied => @intFromEnum(std.posix.E.ACCES),
-                error.FileNotFound => @intFromEnum(std.posix.E.NOENT),
-                error.NotDir => @intFromEnum(std.posix.E.NOTDIR),
-                else => @intFromEnum(std.posix.E.IO),
-            };
-
-            if (efunc(&path_buf, eerrno) != 0) {
-                return error.Aborted;
-            }
-        }
-        // If ZLOB_ERR is set, abort on error
-        if (flags.err) {
-            return error.Aborted;
-        }
-        // Otherwise, silently skip this directory
-        return;
-    };
-
-    // Note: std.fs.Dir.walk() doesn't support pruning, so we use iterate() for gitignore support
-    // If gitignore is enabled, we need manual recursion to support directory pruning
-    if (rec_pattern.gitignore_filter) |gi| {
-        defer dir.close();
-        try walkWithGitignore(allocator, dir, start_dir, "", rec_pattern, &pattern_ctx, flags, results, info, gi);
+    // Dispatch to the appropriate comptime-specialized version
+    if (rec_pattern.dir_components.len > 0) {
+        return globRecursiveWalkImpl(true, allocator, rec_pattern, start_dir, flags, results, info, errfunc, base_dir, fs_provider);
     } else {
-        // Use platform-optimized walker (direct getdents64 on Linux, std.fs elsewhere)
-        // Comptime selection ensures zero runtime dispatch overhead
-        const use_optimized_walker = comptime (builtin.os.tag == .linux);
-
-        if (use_optimized_walker) {
-            // Close dir since the optimized walker opens it internally - DO NOT use defer here
-            // since the walker will manage its own fd
-            dir.close();
-            var walker = walker_mod.DefaultWalker.init(allocator, start_dir, .{}) catch return error.OutOfMemory;
-            defer walker.deinit();
-
-            while (try walker.next()) |entry| {
-                const is_dir = entry.kind == .directory;
-                if (info.directories_only and !is_dir) continue;
-
-                if (entry.kind == .file or is_dir) {
-                    if (!flags.period) {
-                        if (mem.indexOf(u8, entry.path, "/.") != null) continue;
-                        if (entry.path.len > 0 and entry.path[0] == '.') {
-                            if (!pattern_ctx.starts_with_dot) continue;
-                        }
-                    }
-                    if (shouldSkipFile(entry.basename, &pattern_ctx, flags)) continue;
-
-                    const enable_extglob = flags.extglob;
-                    const matches = if (rec_pattern.file_pattern_contexts) |contexts| blk: {
-                        if (enable_extglob and rec_pattern.file_alternatives != null) {
-                            break :blk matchWithAlternativesPrecomputedExtglob(entry.basename, rec_pattern.file_alternatives.?, contexts, true);
-                        }
-                        break :blk matchWithAlternativesPrecomputed(entry.basename, contexts);
-                    } else if (rec_pattern.file_alternatives) |alts|
-                        matchWithAlternativesExtglob(entry.basename, alts, enable_extglob)
-                    else if (enable_extglob and extglob.containsExtglob(rec_pattern.file_pattern)) blk: {
-                        initExtglob();
-                        break :blk extglob.fnmatchExtglob(rec_pattern.file_pattern, entry.basename);
-                    } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
-                        batched_suffix_match.matchSuffix(entry.basename)
-                    else
-                        fnmatchWithContext(&pattern_ctx, entry.basename);
-
-                    if (matches) {
-                        const needs_mark = flags.mark and is_dir;
-                        const base_path_len = start_dir.len + 1 + entry.path.len;
-                        const alloc_len = if (needs_mark) base_path_len + 1 else base_path_len;
-                        const path_buf_slice = allocator.allocSentinel(u8, alloc_len, 0) catch return error.OutOfMemory;
-                        @memcpy(path_buf_slice[0..start_dir.len], start_dir);
-                        path_buf_slice[start_dir.len] = '/';
-                        @memcpy(path_buf_slice[start_dir.len + 1 ..][0..entry.path.len], entry.path);
-                        const final_path_len = if (needs_mark) blk: {
-                            path_buf_slice[base_path_len] = '/';
-                            path_buf_slice[base_path_len + 1] = 0;
-                            break :blk base_path_len + 1;
-                        } else base_path_len;
-                        results.append(@ptrCast(path_buf_slice.ptr), final_path_len) catch return error.OutOfMemory;
-                    }
-                }
-            }
-            return; // Early return - walker manages its own cleanup via defer walker.deinit()
-        }
-
-        // Fallback path: use std.fs.Dir.walk and close dir when done
-        defer dir.close();
-
-        var walker = dir.walk(allocator) catch return error.OutOfMemory;
-        defer walker.deinit();
-
-        // Walk all entries recursively
-        while (walker.next() catch null) |entry| {
-            // entry.path is already a []const u8 - NO mem.sliceTo needed!
-            // entry.basename is the filename without directory path
-
-            const is_dir = entry.kind == .directory;
-
-            if (info.directories_only and !is_dir) continue;
-
-            if (entry.kind == .file or is_dir) {
-                // ZLOB_PERIOD: Check if path contains hidden components
-                // If ZLOB_PERIOD is NOT set, skip files whose path contains hidden directories
-                if (!flags.period) {
-                    // entry.path can be like ".hidden_dir/file.txt" or "dir/.hidden/file.txt"
-                    if (mem.indexOf(u8, entry.path, "/.") != null) {
-                        continue; // Path contains /. (hidden directory)
-                    }
-                    // Also check if path itself starts with '.' (hidden directory at root)
-                    if (entry.path.len > 0 and entry.path[0] == '.') {
-                        // But allow patterns that explicitly match hidden dirs
-                        if (!pattern_ctx.starts_with_dot) {
-                            continue;
-                        }
-                    }
-                }
-
-                // ZLOB_PERIOD: Skip hidden files unless explicitly allowed
-                // Note: shouldSkipFile handles ZLOB_PERIOD logic for basename
-                if (shouldSkipFile(entry.basename, &pattern_ctx, flags)) continue;
-
-                // Match against file pattern (with alternatives if present)
-                // KEY OPTIMIZATION: Use pre-computed pattern contexts to avoid redundant PatternContext.init() calls
-                const enable_extglob = flags.extglob;
-                const matches = if (rec_pattern.file_pattern_contexts) |contexts| blk: {
-                    // When extglob is enabled and we have alternatives, check each one
-                    if (enable_extglob and rec_pattern.file_alternatives != null) {
-                        break :blk matchWithAlternativesPrecomputedExtglob(entry.basename, rec_pattern.file_alternatives.?, contexts, true);
-                    }
-                    break :blk matchWithAlternativesPrecomputed(entry.basename, contexts);
-                } else if (rec_pattern.file_alternatives) |alts|
-                    matchWithAlternativesExtglob(entry.basename, alts, enable_extglob)
-                else if (enable_extglob and extglob.containsExtglob(rec_pattern.file_pattern)) blk: {
-                    initExtglob();
-                    break :blk extglob.fnmatchExtglob(rec_pattern.file_pattern, entry.basename);
-                } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
-                    batched_suffix_match.matchSuffix(entry.basename)
-                else
-                    fnmatchWithContext(&pattern_ctx, entry.basename);
-
-                if (matches) {
-                    const needs_mark = flags.mark and is_dir;
-                    const base_path_len = start_dir.len + 1 + entry.path.len;
-                    const alloc_len = if (needs_mark) base_path_len + 1 else base_path_len;
-
-                    const path_buf_slice = allocator.allocSentinel(u8, alloc_len, 0) catch return error.OutOfMemory;
-
-                    @memcpy(path_buf_slice[0..start_dir.len], start_dir);
-                    path_buf_slice[start_dir.len] = '/';
-                    @memcpy(path_buf_slice[start_dir.len + 1 ..][0..entry.path.len], entry.path);
-
-                    const final_path_len = if (needs_mark) blk: {
-                        path_buf_slice[base_path_len] = '/';
-                        path_buf_slice[base_path_len + 1] = 0;
-                        break :blk base_path_len + 1;
-                    } else base_path_len;
-
-                    results.append(@ptrCast(path_buf_slice.ptr), final_path_len) catch return error.OutOfMemory;
-                }
-            }
-        }
+        return globRecursiveWalkImpl(false, allocator, rec_pattern, start_dir, flags, results, info, errfunc, base_dir, fs_provider);
     }
 }
 
-/// Manual recursive walk with gitignore support for directory pruning
-fn walkWithGitignore(
+/// Implementation with comptime-known has_dir_components to eliminate runtime branching
+inline fn globRecursiveWalkImpl(
+    comptime has_dir_components: bool,
     allocator: std.mem.Allocator,
-    dir: std.fs.Dir,
-    start_dir: []const u8,
-    rel_path: []const u8,
     rec_pattern: *const RecursivePattern,
-    pattern_ctx: *const PatternContext,
+    start_dir: []const u8,
     flags: ZlobFlags,
     results: *ResultsList,
     info: *const PatternInfo,
-    gi: *GitIgnore,
+    errfunc: zlob_errfunc_t,
+    base_dir: ?std.fs.Dir,
+    fs_provider: walker_mod.FsProvider,
 ) !void {
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        const name = entry.name;
+    // Pattern context for file matching
+    const pattern_ctx = PatternContext.init(rec_pattern.file_pattern);
+    const enable_extglob = flags.extglob;
 
-        // Skip . and ..
-        if (name.len == 0) continue;
-        if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
+    // Precompute dir component contexts for faster matching (only if needed)
+    var dir_component_contexts: [32]PatternContext = undefined;
+    if (has_dir_components) {
+        for (rec_pattern.dir_components, 0..) |comp, i| {
+            dir_component_contexts[i] = PatternContext.init(comp);
+        }
+    }
+    const dir_contexts = dir_component_contexts[0..rec_pattern.dir_components.len];
 
-        // Build relative path for gitignore checking
-        var entry_rel_path_buf: [4096]u8 = undefined;
-        const entry_rel_path = if (rel_path.len > 0) blk: {
-            const len = rel_path.len + 1 + name.len;
-            if (len >= 4096) continue;
-            @memcpy(entry_rel_path_buf[0..rel_path.len], rel_path);
-            entry_rel_path_buf[rel_path.len] = '/';
-            @memcpy(entry_rel_path_buf[rel_path.len + 1 ..][0..name.len], name);
-            break :blk entry_rel_path_buf[0..len];
-        } else blk: {
-            @memcpy(entry_rel_path_buf[0..name.len], name);
-            break :blk entry_rel_path_buf[0..name.len];
+    // Check if any dir_component explicitly matches hidden dirs (starts with '.')
+    // or if the file pattern starts with '.' (e.g., **/.hidden*)
+    // If so, we can't skip hidden directories at the walker level
+    var pattern_wants_hidden = pattern_ctx.starts_with_dot;
+    if (has_dir_components and !pattern_wants_hidden) {
+        for (rec_pattern.dir_components) |comp| {
+            if (comp.len > 0 and comp[0] == '.') {
+                pattern_wants_hidden = true;
+                break;
+            }
+        }
+    }
+
+    // Compute hidden config based on pattern and flags
+    // For recursive walks, we use include_hidden if pattern or dir components want hidden files
+    const hidden_config = walker_mod.HiddenConfig{
+        // Never include "." and ".." in recursive walks - they don't make sense for **
+        .include_dot_entries = false,
+        // Include hidden files if PERIOD flag is set OR pattern explicitly wants hidden
+        .include_hidden = flags.period or pattern_wants_hidden,
+    };
+
+    // Build walker config
+    var walker_config = walker_mod.WalkerConfig{
+        .base_dir = base_dir,
+        .err_callback = errfunc,
+        .abort_on_error = flags.err,
+        .hidden = hidden_config,
+        .fs_provider = fs_provider,
+    };
+
+    // Set up gitignore-based directory filter if present
+    if (rec_pattern.gitignore_filter) |gi| {
+        walker_config.dir_filter = .{
+            .filterDirFn = struct {
+                fn filter(ctx: *anyopaque, rel_path: []const u8, _: []const u8) bool {
+                    const gi_ptr: *GitIgnore = @ptrCast(@alignCast(ctx));
+                    return !gi_ptr.shouldSkipDirectory(rel_path);
+                }
+            }.filter,
+            .context = @ptrCast(gi),
         };
+    }
 
+    var walker = walker_mod.DefaultWalker.init(allocator, start_dir, walker_config) catch |err| {
+        return if (err == error.Aborted) error.Aborted else {};
+    };
+    defer walker.deinit();
+
+    // Determine if we need to prepend start_dir to paths
+    const use_dirname = start_dir.len > 0 and !mem.eql(u8, start_dir, ".");
+
+    // Walk the tree and match entries
+    // Note: Hidden file filtering is now done at the walker level via HiddenConfig
+    while (walker.next() catch null) |entry| {
         const is_dir = entry.kind == .directory;
 
-        // Check gitignore - skip if ignored
-        if (gi.isIgnored(entry_rel_path, is_dir)) {
-            continue;
+        // Skip directories unless ZLOB_ONLYDIR
+        if (is_dir and !info.directories_only) continue;
+
+        // Gitignore filtering for files (directories are already filtered by dir_filter)
+        if (rec_pattern.gitignore_filter) |gi| {
+            if (gi.isIgnored(entry.path, is_dir)) continue;
         }
 
-        // ZLOB_PERIOD handling
-        if (!flags.period and name[0] == '.') {
-            if (!pattern_ctx.starts_with_dot) {
+        // For patterns with dir_components like **/foo/bar/*.c:
+        // Check if the path contains the dir_components in order
+        if (has_dir_components) {
+            // Find the parent directory path
+            const last_slash = mem.lastIndexOf(u8, entry.path, "/") orelse continue;
+            const parent_path = entry.path[0..last_slash];
+
+            // Check if dir_components match at the end of parent_path
+            if (!matchDirComponents(parent_path, rec_pattern.dir_components, rec_pattern.dir_component_alternatives, dir_contexts, enable_extglob)) {
                 continue;
             }
         }
 
-        if (is_dir) {
-            // Check if we should prune this directory
-            if (gi.shouldSkipDirectory(entry_rel_path)) {
-                continue;
+        const matches = if (rec_pattern.file_pattern_contexts) |contexts| blk: {
+            if (enable_extglob and rec_pattern.file_alternatives != null) {
+                break :blk matchWithAlternativesPrecomputedExtglob(entry.basename, rec_pattern.file_alternatives.?, contexts, true);
             }
-
-            // Recurse into subdirectory
-            var subdir = dir.openDir(name, .{ .iterate = true }) catch continue;
-            defer subdir.close();
-
-            try walkWithGitignore(allocator, subdir, start_dir, entry_rel_path, rec_pattern, pattern_ctx, flags, results, info, gi);
-        }
-
-        if (entry.kind == .file or is_dir) {
-            if (info.directories_only and !is_dir) continue;
-            if (shouldSkipFile(name, pattern_ctx, flags)) continue;
-
-            // Match against file pattern
-            const enable_extglob = flags.extglob;
-            const matches = if (rec_pattern.file_pattern_contexts) |contexts| blk: {
-                if (enable_extglob and rec_pattern.file_alternatives != null) {
-                    break :blk matchWithAlternativesPrecomputedExtglob(name, rec_pattern.file_alternatives.?, contexts, true);
-                }
-                break :blk matchWithAlternativesPrecomputed(name, contexts);
-            } else if (rec_pattern.file_alternatives) |alts|
-                matchWithAlternativesExtglob(name, alts, enable_extglob)
-            else if (enable_extglob and extglob.containsExtglob(rec_pattern.file_pattern)) blk: {
-                initExtglob();
-                break :blk extglob.fnmatchExtglob(rec_pattern.file_pattern, name);
-            } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
-                batched_suffix_match.matchSuffix(name)
-            else
-                fnmatchWithContext(pattern_ctx, name);
-
-            if (matches) {
-                const needs_mark = flags.mark and is_dir;
-                const base_path_len = start_dir.len + 1 + entry_rel_path.len;
-                const alloc_len = if (needs_mark) base_path_len + 1 else base_path_len;
-
-                const path_buf_slice = allocator.allocSentinel(u8, alloc_len, 0) catch return error.OutOfMemory;
-
-                @memcpy(path_buf_slice[0..start_dir.len], start_dir);
-                path_buf_slice[start_dir.len] = '/';
-                @memcpy(path_buf_slice[start_dir.len + 1 ..][0..entry_rel_path.len], entry_rel_path);
-
-                const final_path_len = if (needs_mark) blk: {
-                    path_buf_slice[base_path_len] = '/';
-                    path_buf_slice[base_path_len + 1] = 0;
-                    break :blk base_path_len + 1;
-                } else base_path_len;
-
-                results.append(@ptrCast(path_buf_slice.ptr), final_path_len) catch return error.OutOfMemory;
-            }
-        }
-    }
-}
-
-fn globRecursiveHelperCollect(allocator: std.mem.Allocator, rec_pattern: *const RecursivePattern, dirname: []const u8, flags: ZlobFlags, results: *ResultsList, depth: usize, info: *const PatternInfo, errfunc: zlob_errfunc_t, base_dir: ?std.fs.Dir) !void {
-    // Limit recursion depth
-    if (depth > 100) return;
-
-    // Early exit if this directory can't match
-    if (!canMatchPattern(dirname, depth, info)) {
-        return;
-    }
-
-    // Should we match files in this directory?
-    const should_match_here = if (info.literal_prefix.len > 0)
-        mem.startsWith(u8, dirname, info.literal_prefix) and (dirname.len >= info.literal_prefix.len)
-    else
-        true;
-
-    if (should_match_here and rec_pattern.dir_components.len == 0) {
-        try globInDirImplCollect(allocator, rec_pattern.file_pattern, rec_pattern.file_alternatives, rec_pattern.file_pattern_contexts, dirname, flags, results, info.directories_only, errfunc, rec_pattern.gitignore_filter, base_dir);
-        // Continue recursing even if no matches in this directory
-    }
-
-    // Open directory to find subdirectories
-    // If base_dir is provided, use Zig's fs; otherwise use C's opendir for performance
-    if (base_dir) |bd| {
-        var dir = bd.openDir(dirname, .{ .iterate = true }) catch {
-            if (flags.err) return error.Aborted;
-            return;
-        };
-        defer dir.close();
-
-        var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            const name = entry.name;
-            if (name.len == 0 or (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.')))) continue;
-
-            if (name[0] == '.' and !flags.period) {
-                if (rec_pattern.dir_components.len > 0 and rec_pattern.dir_components[0].len > 0 and rec_pattern.dir_components[0][0] == '.') {
-                    // First directory component explicitly starts with '.'
-                } else if (rec_pattern.dir_components.len == 0 and rec_pattern.file_pattern.len > 0 and rec_pattern.file_pattern[0] == '.') {
-                    // File pattern explicitly starts with '.'
-                } else {
-                    continue;
-                }
-            }
-
-            if (entry.kind == .directory) {
-                var subdir_buf: [4096]u8 = undefined;
-                const subdir = if (mem.eql(u8, dirname, ".")) blk: {
-                    @memcpy(subdir_buf[0..name.len], name);
-                    break :blk subdir_buf[0..name.len];
-                } else blk: {
-                    @memcpy(subdir_buf[0..dirname.len], dirname);
-                    subdir_buf[dirname.len] = '/';
-                    @memcpy(subdir_buf[dirname.len + 1 ..][0..name.len], name);
-                    break :blk subdir_buf[0 .. dirname.len + 1 + name.len];
-                };
-
-                var next_rec_pattern = rec_pattern.*;
-                if (rec_pattern.dir_components.len > 0) {
-                    const next_component = rec_pattern.dir_components[0];
-                    const has_alternatives = rec_pattern.dir_component_alternatives != null and
-                        rec_pattern.dir_component_alternatives.?[0] != null;
-
-                    const enable_extglob = flags.extglob;
-                    const has_extglob_pattern = enable_extglob and extglob.containsExtglob(next_component);
-
-                    const matches_component = if (has_alternatives)
-                        matchWithAlternatives(name, rec_pattern.dir_component_alternatives.?[0].?)
-                    else if (has_extglob_pattern) blk: {
-                        initExtglob();
-                        break :blk extglob.fnmatchExtglob(next_component, name);
-                    } else blk: {
-                        const component_ctx = PatternContext.init(next_component);
-                        break :blk fnmatchWithContext(&component_ctx, name);
-                    };
-
-                    if (matches_component) {
-                        next_rec_pattern.dir_components = rec_pattern.dir_components[1..];
-                        if (rec_pattern.dir_component_alternatives) |alts| {
-                            next_rec_pattern.dir_component_alternatives = if (alts.len > 1) alts[1..] else null;
-                        }
-                    }
-                }
-                try globRecursiveHelperCollect(allocator, &next_rec_pattern, subdir, flags, results, depth + 1, info, errfunc, base_dir);
-            }
-        }
-        return;
-    }
-
-    // C-based path (no base_dir)
-    var dirname_z: [4096:0]u8 = undefined;
-    @memcpy(dirname_z[0..dirname.len], dirname);
-    dirname_z[dirname.len] = 0;
-
-    const dir = c.opendir(&dirname_z) orelse {
-        // Directory open error - call errfunc if provided
-        if (errfunc) |efunc| {
-            const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
-            if (efunc(&dirname_z, eerrno) != 0) {
-                return error.Aborted;
-            }
-        }
-        // If ZLOB_ERR is set, abort on error
-        if (flags.err) {
-            return error.Aborted;
-        }
-        // Otherwise, silently skip this directory
-        return;
-    };
-    defer _ = c.closedir(dir);
-
-    // Recursively search subdirectories
-    while (c.readdir(dir)) |entry_raw| {
-        const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-        const name = direntNameSlice(&entry.name);
-
-        if (name.len == 0 or name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) {
-            continue;
-        }
-
-        if (name[0] == '.') {
-            if (flags.period) {
-                // ZLOB_PERIOD allows wildcards to match hidden files
-            } else if (rec_pattern.dir_components.len > 0 and rec_pattern.dir_components[0].len > 0 and rec_pattern.dir_components[0][0] == '.') {
-                // First directory component explicitly starts with '.'
-            } else if (rec_pattern.dir_components.len == 0 and rec_pattern.file_pattern.len > 0 and rec_pattern.file_pattern[0] == '.') {
-                // File pattern explicitly starts with '.'
-            } else {
-                continue;
-            }
-        }
-
-        var is_dir = entry.type == DT_DIR;
-        if (entry.type == DT_UNKNOWN) {
-            var subdir_buf_tmp: [4096:0]u8 = undefined;
-            var subdir_len_tmp: usize = 0;
-
-            if (dirname.len > 0 and !mem.eql(u8, dirname, ".")) {
-                @memcpy(subdir_buf_tmp[0..dirname.len], dirname);
-                subdir_buf_tmp[dirname.len] = '/';
-                subdir_len_tmp = dirname.len + 1;
-            }
-
-            @memcpy(subdir_buf_tmp[subdir_len_tmp..][0..name.len], name);
-            subdir_len_tmp += name.len;
-            subdir_buf_tmp[subdir_len_tmp] = 0;
-
-            var stat_buf: std.c.Stat = undefined;
-            if (std.c.stat(&subdir_buf_tmp, &stat_buf) == 0) {
-                is_dir = std.c.S.ISDIR(stat_buf.mode);
-            }
-        }
-
-        if (is_dir) {
-            var next_rec_pattern = rec_pattern.*;
-            if (rec_pattern.dir_components.len > 0) {
-                const next_component = rec_pattern.dir_components[0];
-
-                // Check if this component has alternatives
-                const has_alternatives = rec_pattern.dir_component_alternatives != null and
-                    rec_pattern.dir_component_alternatives.?[0] != null;
-
-                const enable_extglob = flags.extglob;
-                const has_extglob_pattern = enable_extglob and extglob.containsExtglob(next_component);
-
-                const matches_component = if (has_alternatives)
-                    matchWithAlternatives(name, rec_pattern.dir_component_alternatives.?[0].?)
-                else if (has_extglob_pattern) blk: {
-                    initExtglob();
-                    break :blk extglob.fnmatchExtglob(next_component, name);
-                } else blk: {
-                    const component_ctx = PatternContext.init(next_component);
-                    break :blk fnmatchWithContext(&component_ctx, name);
-                };
-
-                // If matches, consume the dir component for next recursion
-                // But ALWAYS recurse into directories to support ** behavior
-                if (matches_component) {
-                    next_rec_pattern.dir_components = rec_pattern.dir_components[1..];
-                    // Also advance alternatives if present
-                    if (rec_pattern.dir_component_alternatives) |alts| {
-                        next_rec_pattern.dir_component_alternatives = if (alts.len > 1) alts[1..] else null;
-                    }
-                }
-                // Note: we removed the "if (!matches_component) continue;" to allow
-                // recursion into non-matching directories for ** glob behavior
-            }
-
-            var subdir_buf: [4096]u8 = undefined;
-            var subdir_len: usize = 0;
-            if (dirname.len > 0 and !mem.eql(u8, dirname, ".")) {
-                @memcpy(subdir_buf[0..dirname.len], dirname);
-                subdir_buf[dirname.len] = '/';
-                subdir_len = dirname.len + 1;
-            }
-            @memcpy(subdir_buf[subdir_len..][0..name.len], name);
-            subdir_len += name.len;
-            const subdir = subdir_buf[0..subdir_len];
-
-            // Filter by pattern
-            if (!canMatchPattern(subdir, depth + 1, info)) continue;
-
-            // Gitignore filtering - skip ignored directories entirely (pruning)
-            if (rec_pattern.gitignore_filter) |gi| {
-                if (gi.shouldSkipDirectory(subdir)) {
-                    continue;
-                }
-            }
-
-            // Recurse into subdirectory
-            try globRecursiveHelperCollect(allocator, &next_rec_pattern, subdir, flags, results, depth + 1, info, errfunc, null);
-        }
-    }
-}
-
-fn globInDirImplCollect(allocator: std.mem.Allocator, pattern: []const u8, file_alternatives: ?[]const []const u8, file_pattern_contexts: ?[]const PatternContext, dirname: []const u8, flags: ZlobFlags, results: *ResultsList, directories_only: bool, errfunc: zlob_errfunc_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir) !void {
-    const pattern_ctx = PatternContext.init(pattern);
-
-    const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
-
-    // If base_dir is provided, use Zig's fs; otherwise use C's opendir for performance
-    if (base_dir) |bd| {
-        var dir = bd.openDir(dirname, .{ .iterate = true }) catch {
-            if (flags.err) return error.Aborted;
-            return;
-        };
-        defer dir.close();
-
-        var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            const name = entry.name;
-            if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
-
-            const enable_extglob = flags.extglob;
-            const matches = if (file_pattern_contexts) |contexts| blk: {
-                if (enable_extglob and file_alternatives != null) {
-                    break :blk matchWithAlternativesPrecomputedExtglob(name, file_alternatives.?, contexts, true);
-                }
-                break :blk matchWithAlternativesPrecomputed(name, contexts);
-            } else if (file_alternatives) |alts|
-                matchWithAlternativesExtglob(name, alts, enable_extglob)
-            else if (enable_extglob and extglob.containsExtglob(pattern)) blk: {
-                initExtglob();
-                break :blk extglob.fnmatchExtglob(pattern, name);
-            } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
-                batched_suffix_match.matchSuffix(name)
-            else
-                fnmatchWithContext(&pattern_ctx, name);
-
-            if (matches) {
-                if (directories_only and entry.kind != .directory) continue;
-
-                const is_dir = entry.kind == .directory;
-
-                // Use optimized path builder that pre-allocates for trailing slash
-                const path_result = buildFullPathWithMark(allocator, dirname, name, use_dirname, is_dir, flags) catch return error.OutOfMemory;
-
-                if (directories_only and !is_dir) {
-                    allocator.free(path_result.buf);
-                    continue;
-                }
-
-                if (gitignore_filter) |gi| {
-                    // Use base path length (without trailing slash) for gitignore check
-                    const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
-                    const rel_path = if (use_dirname) path_result.buf[0..base_len] else name;
-                    if (gi.isIgnored(rel_path, is_dir)) {
-                        allocator.free(path_result.buf);
-                        continue;
-                    }
-                }
-
-                results.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
-            }
-        }
-        return;
-    }
-
-    // C-based path (no base_dir)
-    var dirname_z: [4096:0]u8 = undefined;
-    @memcpy(dirname_z[0..dirname.len], dirname);
-    dirname_z[dirname.len] = 0;
-
-    const dir = c.opendir(&dirname_z) orelse {
-        // Directory open error - call errfunc if provided
-        if (errfunc) |efunc| {
-            const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
-            if (efunc(&dirname_z, eerrno) != 0) {
-                return error.Aborted;
-            }
-        }
-        // If ZLOB_ERR is set, abort on error
-        if (flags.err) {
-            return error.Aborted;
-        }
-        // Otherwise, silently skip this directory
-        return;
-    };
-    defer _ = c.closedir(dir);
-
-    while (c.readdir(dir)) |entry_raw| {
-        const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-        const name = direntNameSlice(&entry.name);
-
-        if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
-
-        // Match against file pattern (with alternatives if present)
-        // KEY OPTIMIZATION: Use pre-computed pattern contexts to avoid redundant PatternContext.init() calls
-        const enable_extglob_c = flags.extglob;
-        const matches = if (file_pattern_contexts) |contexts| blk: {
-            if (enable_extglob_c and file_alternatives != null) {
-                break :blk matchWithAlternativesPrecomputedExtglob(name, file_alternatives.?, contexts, true);
-            }
-            break :blk matchWithAlternativesPrecomputed(name, contexts);
-        } else if (file_alternatives) |alts|
-            matchWithAlternativesExtglob(name, alts, enable_extglob_c)
-        else if (enable_extglob_c and extglob.containsExtglob(pattern)) blk: {
+            break :blk matchWithAlternativesPrecomputed(entry.basename, contexts);
+        } else if (rec_pattern.file_alternatives) |alts|
+            matchWithAlternativesExtglob(entry.basename, alts, enable_extglob)
+        else if (enable_extglob and extglob.containsExtglob(rec_pattern.file_pattern)) blk: {
             initExtglob();
-            break :blk extglob.fnmatchExtglob(pattern, name);
+            break :blk extglob.fnmatchExtglob(rec_pattern.file_pattern, entry.basename);
         } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
-            batched_suffix_match.matchSuffix(name)
+            batched_suffix_match.matchSuffix(entry.basename)
         else
-            fnmatchWithContext(&pattern_ctx, name);
+            fnmatchWithContext(&pattern_ctx, entry.basename);
 
         if (matches) {
-            // Filter directories if needed
-            if (directories_only) {
-                const entry_dtype = entry.type;
-                if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
-            }
+            if (info.directories_only and !is_dir) continue;
 
-            // Determine is_dir early if we can (avoid stat when possible)
-            var is_dir = entry.type == DT_DIR;
-            const needs_stat = entry.type == DT_UNKNOWN;
+            // Build full path
+            const needs_mark = flags.mark and is_dir;
+            const base_path_len = if (use_dirname) start_dir.len + 1 + entry.path.len else entry.path.len;
+            const alloc_len = if (needs_mark) base_path_len + 1 else base_path_len;
 
-            // If we know is_dir already, use optimized path builder
-            // Otherwise, fall back to old method since we need path for stat
-            if (!needs_stat) {
-                const path_result = buildFullPathWithMark(allocator, dirname, name, use_dirname, is_dir, flags) catch return error.OutOfMemory;
+            const path_buf = allocator.allocSentinel(u8, alloc_len, 0) catch return error.OutOfMemory;
 
-                if (directories_only and !is_dir) {
-                    allocator.free(path_result.buf);
-                    continue;
-                }
-
-                if (gitignore_filter) |gi| {
-                    const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
-                    const rel_path = if (use_dirname) path_result.buf[0..base_len] else name;
-                    if (gi.isIgnored(rel_path, is_dir)) {
-                        allocator.free(path_result.buf);
-                        continue;
-                    }
-                }
-
-                results.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
+            if (use_dirname) {
+                @memcpy(path_buf[0..start_dir.len], start_dir);
+                path_buf[start_dir.len] = '/';
+                @memcpy(path_buf[start_dir.len + 1 ..][0..entry.path.len], entry.path);
             } else {
-                // DT_UNKNOWN: need to stat to determine if directory
-                @branchHint(.unlikely);
-                const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
-                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-                var final_path_len = path_buf_slice.len;
-
-                var stat_buf: std.c.Stat = undefined;
-                if (std.c.stat(path, &stat_buf) == 0) {
-                    is_dir = std.c.S.ISDIR(stat_buf.mode);
-                } else {
-                    allocator.free(path_buf_slice);
-                    continue;
-                }
-
-                if (directories_only and !is_dir) {
-                    allocator.free(path_buf_slice);
-                    continue;
-                }
-
-                if (gitignore_filter) |gi| {
-                    const rel_path = if (use_dirname) path_buf_slice[0..final_path_len] else name;
-                    if (gi.isIgnored(rel_path, is_dir)) {
-                        allocator.free(path_buf_slice);
-                        continue;
-                    }
-                }
-
-                if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
-                    @branchHint(.unlikely);
-                    allocator.free(path_buf_slice);
-                    return error.OutOfMemory;
-                }) |new_path| {
-                    path = new_path;
-                    final_path_len += 1;
-                }
-
-                results.append(path, final_path_len) catch return error.OutOfMemory;
+                @memcpy(path_buf[0..entry.path.len], entry.path);
             }
+
+            const final_len = if (needs_mark) blk: {
+                path_buf[base_path_len] = '/';
+                break :blk base_path_len + 1;
+            } else base_path_len;
+
+            results.append(@ptrCast(path_buf.ptr), final_len) catch return error.OutOfMemory;
         }
     }
 }
 
-// Helper to build full path from dirname and filename
-pub inline fn buildFullPath(allocator: std.mem.Allocator, dirname: []const u8, name: []const u8, use_dirname: bool) ![]u8 {
-    const path_len = if (use_dirname)
-        dirname.len + 1 + name.len
-    else
-        name.len;
+/// Check if dir_components match at the end of the given path.
+/// For pattern **/foo/bar/*.c and path "a/b/foo/bar", returns true.
+fn matchDirComponents(
+    path: []const u8,
+    dir_components: []const []const u8,
+    dir_alternatives: ?[]const ?[]const []const u8,
+    dir_contexts: []const PatternContext,
+    enable_extglob: bool,
+) bool {
+    if (dir_components.len == 0) return true;
 
-    const path_buf_slice = try allocator.allocSentinel(u8, path_len, 0);
+    // Split path into components from the end
+    var path_components: [64][]const u8 = undefined;
+    var path_count: usize = 0;
 
-    if (use_dirname) {
-        @branchHint(.unlikely);
-
-        @memcpy(path_buf_slice[0..dirname.len], dirname);
-        path_buf_slice[dirname.len] = '/';
-        @memcpy(path_buf_slice[dirname.len + 1 ..][0..name.len], name);
-    } else {
-        @memcpy(path_buf_slice[0..name.len], name);
+    var end = path.len;
+    var i = path.len;
+    while (i > 0) : (i -= 1) {
+        if (path[i - 1] == '/') {
+            if (i < end and path_count < 64) {
+                path_components[path_count] = path[i..end];
+                path_count += 1;
+            }
+            end = i - 1;
+        }
+    }
+    if (end > 0 and path_count < 64) {
+        path_components[path_count] = path[0..end];
+        path_count += 1;
     }
 
-    return path_buf_slice;
+    // We need at least as many path components as dir_components
+    if (path_count < dir_components.len) return false;
+
+    // Match dir_components against the last N path components (in reverse order)
+    // path_components is reversed, so path_components[0] is the last component
+    for (0..dir_components.len) |j| {
+        const dir_comp = dir_components[dir_components.len - 1 - j];
+        const path_comp = path_components[j];
+
+        // Check alternatives first
+        if (dir_alternatives) |alts| {
+            if (alts[dir_components.len - 1 - j]) |alt_list| {
+                if (matchWithAlternativesExtglob(path_comp, alt_list, enable_extglob)) continue;
+                return false;
+            }
+        }
+
+        // Check extglob
+        if (enable_extglob and extglob.containsExtglob(dir_comp)) {
+            initExtglob();
+            if (!extglob.fnmatchExtglob(dir_comp, path_comp)) return false;
+            continue;
+        }
+
+        // Use precomputed context
+        if (!fnmatchWithContext(&dir_contexts[dir_components.len - 1 - j], path_comp)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
-/// Result of buildFullPathWithMark - contains buffer and final length
 pub const PathBuildResult = struct {
     ptr: [*c]u8,
     len: usize,
@@ -2770,50 +2144,10 @@ pub inline fn buildFullPathWithMark(
     };
 }
 
-pub inline fn shouldSkipFile(name: []const u8, pattern_ctx: *const PatternContext, flags: ZlobFlags) bool {
-    if (name.len == 0) return true;
+// Note: shouldSkipFile has been removed - filtering is now done at the walker/iterator level
+// via HiddenConfig. This avoids code duplication and ensures POSIX compliance.
 
-    const first_byte = name[0];
-    if (first_byte == '.') {
-        const is_dot = name.len == 1;
-        const is_dotdot = name.len == 2 and name[1] == '.';
-
-        // Handle "." and ".." entries
-        // POSIX: if pattern explicitly starts with '.', then '.' and '..'
-        // should be eligible for matching (e.g., ".*" matches "." and "..")
-        if (is_dot or is_dotdot) {
-            // Don't skip if pattern explicitly asks for "." or ".."
-            if (pattern_ctx.is_dot_or_dotdot) return false;
-            // Don't skip if pattern starts with '.' - allow through to match
-            // This is POSIX compliant: ".*" should match "." and ".."
-            if (pattern_ctx.starts_with_dot) return false;
-            // Skip otherwise (e.g., pattern is "*")
-            return true;
-        }
-
-        // ZLOB_PERIOD: allow wildcards to match hidden files
-        if (flags.period) return false;
-
-        if (!pattern_ctx.starts_with_dot) return true;
-    }
-    return false;
-}
-
-// Helper to check if path is a directory and append '/' if ZLOB_MARK is set
-pub inline fn maybeAppendSlash(allocator: std.mem.Allocator, path: [*c]u8, path_len: usize, is_dir: bool, flags: ZlobFlags) !?[*c]u8 {
-    if (!is_dir or (!flags.mark)) {
-        return null; // No modification needed
-    }
-
-    // Need to append '/' - reallocate with extra space
-    const old_slice = @as([*]u8, @ptrCast(path))[0 .. path_len + 1]; // includes sentinel
-    const new_slice = try allocator.realloc(old_slice, path_len + 2); // +1 for '/', +1 for sentinel
-    new_slice[path_len] = '/';
-    new_slice[path_len + 1] = 0;
-    return @ptrCast(new_slice.ptr);
-}
-
-fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern, base_dir: ?std.fs.Dir) !?void {
+fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern, base_dir: ?std.fs.Dir, fs_provider: walker_mod.FsProvider) !?void {
     // If we have brace alternatives for the filename pattern, use them for matching
     // e.g., "*.{toml,lock}" -> alternatives = ["*.toml", "*.lock"]
     const file_alternatives: ?[]const PatternContext = if (brace_parsed) |bp| blk: {
@@ -2842,137 +2176,33 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
     const enable_extglob = flags.extglob;
 
-    // If base_dir is provided, use Zig's fs; otherwise use C's opendir for performance
-    if (base_dir) |bd| {
-        var dir = bd.openDir(dirname, .{ .iterate = true }) catch {
-            if (flags.err) return error.Aborted;
-            return null;
-        };
-        defer dir.close();
-
-        var names = ResultsList.initWithCapacity(allocator, 256) catch ResultsList.init(allocator);
-        defer names.deinit();
-
-        var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            const name = entry.name;
-            if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
-
-            const matches = if (file_alternatives) |alts| blk: {
-                // Check if we should use extglob matching
-                if (enable_extglob and file_pattern_alts != null) {
-                    for (file_pattern_alts.?, alts) |raw_pat, alt_ctx| {
-                        if (extglob.containsExtglob(raw_pat)) {
-                            initExtglob();
-                            if (extglob.fnmatchExtglob(raw_pat, name)) break :blk true;
-                        } else if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
-                            if (batched_suffix_match.matchSuffix(name)) break :blk true;
-                        } else if (fnmatchWithContext(&alt_ctx, name)) {
-                            break :blk true;
-                        }
-                    }
-                    break :blk false;
-                }
-                for (alts) |alt_ctx| {
-                    if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
-                        if (batched_suffix_match.matchSuffix(name)) break :blk true;
-                    } else if (fnmatchWithContext(&alt_ctx, name)) {
-                        break :blk true;
-                    }
-                }
-                break :blk false;
-            } else if (enable_extglob and extglob.containsExtglob(pattern)) blk: {
-                initExtglob();
-                break :blk extglob.fnmatchExtglob(pattern, name);
-            } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
-                batched_suffix_match.matchSuffix(name)
-            else
-                fnmatchWithContext(&pattern_ctx, name);
-
-            if (matches) {
-                if (directories_only and entry.kind != .directory) continue;
-
-                const is_dir = entry.kind == .directory;
-
-                // Use optimized path builder that pre-allocates for trailing slash
-                const path_result = buildFullPathWithMark(allocator, dirname, name, use_dirname, is_dir, flags) catch return error.OutOfMemory;
-
-                if (directories_only and !is_dir) {
-                    allocator.free(path_result.buf);
-                    continue;
-                }
-
-                if (gitignore_filter) |gi| {
-                    const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
-                    const rel_path = if (use_dirname) path_result.buf[0..base_len] else name;
-                    if (gi.isIgnored(rel_path, is_dir)) {
-                        allocator.free(path_result.buf);
-                        continue;
-                    }
-                }
-
-                names.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
-            }
-        }
-
-        // Zig's iterator skips "." and "..", but when pattern
-        // starts with '.', we need to check if they match the pattern.
-        // This is because POSIX says: "if a filename begins with a <period>, the
-        // <period> shall be explicitly matched" - meaning patterns like ".*"
-        // should match "." and ".."
-        if (pattern_ctx.starts_with_dot and !directories_only) {
-            const dot_entries = [_][]const u8{ ".", ".." };
-
-            for (dot_entries) |dot_name| {
-                const dot_matches = if (enable_extglob and extglob.containsExtglob(pattern)) blk: {
-                    initExtglob();
-                    break :blk extglob.fnmatchExtglob(pattern, dot_name);
-                } else fnmatchWithContext(&pattern_ctx, dot_name);
-
-                if (dot_matches) {
-                    // no gitignore check for . and .. (they're special)
-                    // . and .. are always directories
-                    const path_result = buildFullPathWithMark(allocator, dirname, dot_name, use_dirname, true, flags) catch return error.OutOfMemory;
-                    names.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
-                }
-            }
-        }
-
-        if (names.len() == 0) return null;
-        return finalizeResults(allocator, &names, flags, pzlob);
-    }
-
-    // C-based path (no base_dir)
-    var dirname_z: [4096:0]u8 = undefined;
-    @memcpy(dirname_z[0..dirname.len], dirname);
-    dirname_z[dirname.len] = 0;
-
-    const dir = c.opendir(&dirname_z) orelse {
-        // Directory open error - call errfunc if provided
-        if (errfunc) |efunc| {
-            const eerrno = @as(c_int, @intFromEnum(std.posix.errno(-1)));
-            if (efunc(&dirname_z, eerrno) != 0) {
-                return error.Aborted;
-            }
-        }
-        // If ZLOB_ERR is set, abort on error
-        if (flags.err) {
-            return error.Aborted;
-        }
-        // Otherwise, return null to indicate no matches
-        return null;
-    };
-    defer _ = c.closedir(dir);
-
     var names = ResultsList.initWithCapacity(allocator, 256) catch ResultsList.init(allocator);
     defer names.deinit();
 
-    while (c.readdir(dir)) |entry_raw| {
-        const entry: *const dirent = @ptrCast(@alignCast(entry_raw));
-        const name = direntNameSlice(&entry.name);
-        if (shouldSkipFile(name, &pattern_ctx, flags)) continue;
+    // Compute hidden config from pattern and flags - filtering now happens at iterator level
+    const hidden_config = walker_mod.HiddenConfig.fromPatternAndFlags(
+        pattern_ctx.starts_with_dot,
+        pattern_ctx.is_dot_or_dotdot,
+        flags.period,
+    );
 
-        // Match using brace alternatives if available, otherwise use single pattern
+    // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
+    var iter = walker_mod.DirIterator.openWithProvider(dirname, base_dir, hidden_config, fs_provider) catch |err| {
+        if (errfunc) |efunc| {
+            var path_z: [4096:0]u8 = undefined;
+            const len = @min(dirname.len, 4095);
+            @memcpy(path_z[0..len], dirname[0..len]);
+            path_z[len] = 0;
+            _ = efunc(&path_z, walker_mod.errToErrno(err));
+        }
+        return if (flags.err) error.Aborted else null;
+    };
+    defer iter.close();
+
+    while (iter.next()) |entry| {
+        const name = entry.name;
+        // Note: Hidden file and dot entry filtering is now done at iterator level
+
         const matches = if (file_alternatives) |alts| blk: {
             // Check if we should use extglob matching
             if (enable_extglob and file_pattern_alts != null) {
@@ -2988,7 +2218,6 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
                 }
                 break :blk false;
             }
-            // Try each alternative pattern
             for (alts) |alt_ctx| {
                 if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
                     if (batched_suffix_match.matchSuffix(name)) break :blk true;
@@ -3006,73 +2235,27 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
             fnmatchWithContext(&pattern_ctx, name);
 
         if (matches) {
-            if (directories_only) {
-                const entry_dtype = entry.type;
-                if (entry_dtype != DT_DIR and entry_dtype != DT_UNKNOWN) continue;
-            }
+            const is_dir = entry.kind == .directory;
+            if (directories_only and !is_dir) continue;
 
-            var is_dir = entry.type == DT_DIR;
-            const needs_stat = entry.type == DT_UNKNOWN;
+            // Use optimized path builder that pre-allocates for trailing slash
+            const path_result = buildFullPathWithMark(allocator, dirname, name, use_dirname, is_dir, flags) catch return error.OutOfMemory;
 
-            // If we know is_dir already, use optimized path builder
-            if (!needs_stat) {
-                const path_result = buildFullPathWithMark(allocator, dirname, name, use_dirname, is_dir, flags) catch return error.OutOfMemory;
-
-                if (directories_only and !is_dir) {
+            if (gitignore_filter) |gi| {
+                const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
+                const rel_path = if (use_dirname) path_result.buf[0..base_len] else name;
+                if (gi.isIgnored(rel_path, is_dir)) {
                     allocator.free(path_result.buf);
                     continue;
                 }
-
-                if (gitignore_filter) |gi| {
-                    const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
-                    const rel_path = if (use_dirname) path_result.buf[0..base_len] else name;
-                    if (gi.isIgnored(rel_path, is_dir)) {
-                        allocator.free(path_result.buf);
-                        continue;
-                    }
-                }
-
-                names.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
-            } else {
-                // DT_UNKNOWN: need to stat to determine if directory
-                @branchHint(.unlikely);
-                const path_buf_slice = buildFullPath(allocator, dirname, name, use_dirname) catch return error.OutOfMemory;
-                var path: [*c]u8 = @ptrCast(path_buf_slice.ptr);
-                var final_path_len = path_buf_slice.len;
-
-                var stat_buf: std.c.Stat = undefined;
-                if (std.c.stat(path, &stat_buf) == 0) {
-                    is_dir = std.c.S.ISDIR(stat_buf.mode);
-                } else {
-                    allocator.free(path_buf_slice);
-                    continue;
-                }
-
-                if (directories_only and !is_dir) {
-                    allocator.free(path_buf_slice);
-                    continue;
-                }
-
-                if (gitignore_filter) |gi| {
-                    const rel_path = if (use_dirname) path_buf_slice[0..final_path_len] else name;
-                    if (gi.isIgnored(rel_path, is_dir)) {
-                        allocator.free(path_buf_slice);
-                        continue;
-                    }
-                }
-
-                if (maybeAppendSlash(allocator, path, final_path_len, is_dir, flags) catch {
-                    allocator.free(path_buf_slice);
-                    return error.OutOfMemory;
-                }) |new_path| {
-                    path = new_path;
-                    final_path_len += 1;
-                }
-
-                names.append(path, final_path_len) catch return error.OutOfMemory;
             }
+
+            names.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
         }
     }
+
+    // Note: "." and ".." handling is now done at the iterator level via HiddenConfig.
+    // The iterator includes them when pattern starts with '.' (POSIX compliant)
 
     if (names.len() == 0) {
         if (flags.nocheck) {
@@ -3129,7 +2312,6 @@ pub fn simdFindChar(haystack: []const u8, needle: u8) ?usize {
     return null;
 }
 
-// SIMD-optimized fnmatch with pre-computed pattern context (avoids redundant wildcard checks)
 pub inline fn fnmatchWithContext(ctx: *const PatternContext, string: []const u8) bool {
     // Early rejection: if we know the required last character and it doesn't match, reject immediately
     // This is a very cheap check that can avoid expensive pattern matching
@@ -3654,16 +2836,8 @@ test "DirIterator with standard filesystem" {
     const testing = std.testing;
 
     // Test that DirIterator works with standard filesystem (no ALTDIRFUNC)
-    var pzlob = zlob_t{
-        .zlo_pathc = 0,
-        .zlo_pathv = null,
-        .zlo_offs = 0,
-        .zlo_pathlen = undefined,
-        .zlo_flags = 0,
-    };
-
-    // Open current directory without ALTDIRFUNC
-    var iter = DirIterator.open(".", 0, &pzlob) catch |err| {
+    // Open current directory using walker's DirIterator with default HiddenConfig
+    var iter = walker_mod.DirIterator.open(".", null, walker_mod.HiddenConfig.include_all) catch |err| {
         std.debug.print("Failed to open directory: {}\n", .{err});
         return err;
     };
@@ -3681,7 +2855,7 @@ test "DirIterator with standard filesystem" {
     try testing.expect(count > 0);
 }
 
-test "DirIterator with ALTDIRFUNC" {
+test "DirIterator with ALTDIRFUNC via toFsProvider" {
     const testing = std.testing;
 
     // Mock directory state - must be at file scope for C callbacks
@@ -3698,7 +2872,7 @@ test "DirIterator with ALTDIRFUNC" {
         };
 
         var index: usize = 0;
-        var dirent_storage: zlob_dirent_t = undefined;
+        var dirent_storage: walker_mod.AltDirent = undefined;
 
         fn opendir(_: [*:0]const u8) callconv(.c) ?*anyopaque {
             index = 0;
@@ -3706,7 +2880,7 @@ test "DirIterator with ALTDIRFUNC" {
             return @ptrFromInt(0x12345678);
         }
 
-        fn readdir(_: ?*anyopaque) callconv(.c) ?*zlob_dirent_t {
+        fn readdir(_: ?*anyopaque) callconv(.c) ?*walker_mod.AltDirent {
             if (index >= entries.len) return null;
             dirent_storage.d_name = entries[index].name.ptr;
             dirent_storage.d_type = entries[index].d_type;
@@ -3727,12 +2901,15 @@ test "DirIterator with ALTDIRFUNC" {
         .zlo_pathlen = undefined,
         .zlo_flags = 0,
         .zlo_opendir = MockDir.opendir,
-        .zlo_readdir = MockDir.readdir,
+        .zlo_readdir = @ptrCast(&MockDir.readdir),
         .zlo_closedir = MockDir.closedir,
     };
 
-    // Open with ALTDIRFUNC flag
-    var iter = DirIterator.open("mock_path", ZLOB_ALTDIRFUNC, &pzlob) catch |err| {
+    // Get FsProvider from zlob_t
+    const fs_provider = pzlob.toFsProvider(ZLOB_ALTDIRFUNC);
+
+    // Open with ALTDIRFUNC via walker's unified DirIterator
+    var iter = walker_mod.DirIterator.openWithProvider("mock_path", null, walker_mod.HiddenConfig.include_all, fs_provider) catch |err| {
         std.debug.print("Failed to open mock directory: {}\n", .{err});
         return err;
     };
@@ -3747,13 +2924,13 @@ test "DirIterator with ALTDIRFUNC" {
     while (iter.next()) |entry| {
         if (mem.eql(u8, entry.name, "file1.txt")) {
             found_file1 = true;
-            try testing.expectEqual(std.fs.Dir.Entry.Kind.file, entry.kind);
+            try testing.expectEqual(walker_mod.EntryKind.file, entry.kind);
         } else if (mem.eql(u8, entry.name, "file2.zig")) {
             found_file2 = true;
-            try testing.expectEqual(std.fs.Dir.Entry.Kind.file, entry.kind);
+            try testing.expectEqual(walker_mod.EntryKind.file, entry.kind);
         } else if (mem.eql(u8, entry.name, "subdir")) {
             found_subdir = true;
-            try testing.expectEqual(std.fs.Dir.Entry.Kind.directory, entry.kind);
+            try testing.expectEqual(walker_mod.EntryKind.directory, entry.kind);
         }
         count += 1;
     }
