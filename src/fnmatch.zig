@@ -1,9 +1,12 @@
 //! Unified pattern matching with SIMD optimizations and extglob support
 //!
-//! This module provides the single implementation of fnmatch-style pattern matching:
-//! - SIMD-accelerated literal prefix matching and character search
+//! This module is the SINGLE source of truth for all fnmatch-style pattern matching.
+//! All matching in zlob routes through here. Key design:
+//!
+//! - Iterative star-tracking for `*` wildcards (O(1) stack, zero recursion)
+//! - SIMD-accelerated character search and exact matching
 //! - Bitmap-based bracket expression matching with POSIX character classes
-//! - Template-based fast paths for common patterns (*.ext, prefix*, etc.)
+//! - Template-based fast paths via PatternContext (*.ext, prefix*, etc.)
 //! - Extended glob support: ?() *() +() @() !()
 //! - POSIX escape sequence handling
 
@@ -11,171 +14,199 @@ const std = @import("std");
 const mem = std.mem;
 const pattern_context_mod = @import("pattern_context.zig");
 const suffix_match = @import("suffix_match.zig");
-const flags_mod = @import("flags.zig");
+const flags_mod = @import("zlob_flags");
 
 pub const ZlobFlags = flags_mod.ZlobFlags;
 pub const PatternContext = pattern_context_mod.PatternContext;
 pub const hasWildcards = pattern_context_mod.hasWildcardsSIMD;
 pub const containsExtglob = pattern_context_mod.containsExtglob;
 
+// ============================================================================
+// Public API
+// ============================================================================
+
+/// Match a string against a pattern with flags.
+/// This is the top-level entry point for flag-based matching.
 pub inline fn match(pattern: []const u8, string: []const u8, flags: ZlobFlags) bool {
-    const enable_escapes = !flags.noescape;
     if (flags.extglob and containsExtglob(pattern)) {
         return matchExtglob(pattern, string);
     }
-    return fnmatch_dumb(pattern, string, enable_escapes);
+    return fnmatch(pattern, string, !flags.noescape);
 }
 
+/// Match using a pre-computed PatternContext for repeated matching against the same pattern.
+/// Applies all fast-path optimizations (template, suffix, SIMD exact) before falling back
+/// to the full iterative matcher.
 pub inline fn matchWithContext(ctx: *const PatternContext, string: []const u8, flags: ZlobFlags) bool {
     if (flags.extglob and containsExtglob(ctx.pattern)) {
         return matchExtglob(ctx.pattern, string);
     }
+    return matchWithContextNoExtglob(ctx, string, !flags.noescape);
+}
 
+/// Match using a pre-computed PatternContext without extglob checks.
+/// Used internally by zlob.zig where extglob has already been ruled out.
+pub inline fn matchWithContextNoExtglob(ctx: *const PatternContext, string: []const u8, enable_escapes: bool) bool {
+    // Early rejection: if we know the required last character and it doesn't match
     if (ctx.required_last_char) |required_last| {
         if (string.len == 0 or string[string.len - 1] != required_last) {
             return false;
         }
     }
 
+    // Try template-based fast path (*.ext, prefix*, literal, etc.)
     if (ctx.matchTemplate(string)) |result| {
         return result;
     }
 
+    // Fast path: exact match with SIMD for long strings (only if no wildcards)
     if (ctx.pattern.len == string.len and !ctx.has_wildcards) {
-        const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
-        if (ctx.pattern.len >= vec_len) {
-            const Vec = @Vector(vec_len, u8);
-            const MaskInt = std.meta.Int(.unsigned, vec_len);
-            const all_ones: MaskInt = @as(MaskInt, 0) -% 1;
-            var i: usize = 0;
-            while (i + vec_len <= ctx.pattern.len) : (i += vec_len) {
-                const p_vec: Vec = ctx.pattern[i..][0..vec_len].*;
-                const s_vec: Vec = string[i..][0..vec_len].*;
-                const eq = p_vec == s_vec;
-                const mask_val = @as(MaskInt, @bitCast(eq));
-                if (mask_val != all_ones) return false;
-            }
-            return mem.eql(u8, ctx.pattern[i..], string[i..]);
-        }
-        return mem.eql(u8, ctx.pattern, string);
+        return simdEqual(ctx.pattern, string);
     }
 
     if (ctx.only_suffix_match) |suffix_matcher| {
         return suffix_matcher.match(string);
     }
 
-    return fnmatch_dumb(ctx.pattern, string, !flags.noescape);
+    return fnmatch(ctx.pattern, string, enable_escapes);
 }
 
-pub fn fnmatch_dumb(pattern: []const u8, string: []const u8, enable_escapes: bool) bool {
+/// Core fnmatch with POSIX escapes enabled (the common default).
+pub inline fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
+    return fnmatch(pattern, string, true);
+}
+
+/// fnmatch with configurable escape handling.
+/// enable_escapes: true = backslash escapes next char (POSIX default)
+///                 false = backslash is literal (NOESCAPE mode)
+pub inline fn fnmatchWithFlags(pattern: []const u8, string: []const u8, enable_escapes: bool) bool {
+    return fnmatch(pattern, string, enable_escapes);
+}
+
+/// fnmatch with extglob support.
+/// If extglob is disabled or pattern doesn't contain extglob syntax, falls back to fnmatch.
+pub inline fn fnmatchWithExtglob(pattern: []const u8, string: []const u8, enable_extglob: bool) bool {
+    if (enable_extglob and containsExtglob(pattern)) {
+        return matchExtglob(pattern, string);
+    }
+    return fnmatch(pattern, string, true);
+}
+
+// ============================================================================
+// Core iterative fnmatch — zero recursion, O(1) stack
+//
+// Uses the standard star-tracking algorithm: on encountering `*`, we save
+// the pattern/string positions and advance. On a later mismatch we backtrack
+// to the saved positions, advancing the string by one character.
+//
+// Bracket expressions are matched inline using a 256-bit bitmap (32 bytes on
+// the stack), supporting POSIX character classes.
+// ============================================================================
+
+pub fn fnmatch(pattern: []const u8, string: []const u8, enable_escapes: bool) bool {
     var pi: usize = 0;
     var si: usize = 0;
 
-    // Fast path: check literal prefix before first wildcard or escape
-    while (pi < pattern.len) {
-        const p = pattern[pi];
-        if (p == '*' or p == '?' or p == '[') break;
-        if (enable_escapes and p == '\\') break;
+    // Saved positions for star backtracking (only one star needs to be active
+    // at a time — a new star supersedes the previous one)
+    var star_pi: usize = 0;
+    var star_si: usize = 0;
+    var have_star = false;
 
-        if (si >= string.len or string[si] != p) return false;
-        pi += 1;
-        si += 1;
-    }
+    while (si < string.len or pi < pattern.len) {
+        if (pi < pattern.len) {
+            const pc = pattern[pi];
 
-    // If pattern exhausted, check if string also exhausted
-    if (pi >= pattern.len) return si == string.len;
-
-    // Continue with wildcard matching from current position
-    while (pi < pattern.len) {
-        const p = pattern[pi];
-
-        if (enable_escapes and p == '\\') {
-            // POSIX escape: backslash quotes the next character
-            pi += 1;
-            if (pi >= pattern.len) {
-                // Trailing backslash matches literal backslash
-                if (si >= string.len or string[si] != '\\') return false;
-                si += 1;
-            } else {
-                const escaped = pattern[pi];
-                pi += 1;
-                if (si >= string.len or string[si] != escaped) return false;
-                si += 1;
+            // Handle POSIX escape sequences
+            if (enable_escapes and pc == '\\') {
+                if (pi + 1 < pattern.len) {
+                    pi += 1; // skip backslash, look at escaped char
+                    if (si < string.len and pattern[pi] == string[si]) {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                } else {
+                    // Trailing backslash — match literal backslash
+                    if (si < string.len and string[si] == '\\') {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                }
+                // Fall through to star backtrack
+                if (have_star and star_si < string.len) {
+                    pi = star_pi;
+                    star_si += 1;
+                    si = star_si;
+                    continue;
+                }
+                return false;
             }
+
+            switch (pc) {
+                '*' => {
+                    // Skip consecutive stars (** treated same as * here)
+                    pi += 1;
+                    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+                    // Save position for backtracking
+                    star_pi = pi;
+                    star_si = si;
+                    have_star = true;
+                    continue;
+                },
+                '?' => {
+                    if (si < string.len) {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                    // else fall through to star backtrack
+                },
+                '[' => {
+                    if (si < string.len) {
+                        const result = matchBracketBitmap(pattern, pi, string[si]);
+                        if (result.matched) {
+                            pi = result.new_pi;
+                            si += 1;
+                            continue;
+                        }
+                    }
+                    // else fall through to star backtrack
+                },
+                else => {
+                    if (si < string.len and pc == string[si]) {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                    // else fall through to star backtrack
+                },
+            }
+        }
+
+        // Mismatch — try to backtrack to last star
+        if (have_star and star_si < string.len) {
+            pi = star_pi;
+            star_si += 1;
+            si = star_si;
             continue;
         }
 
-        switch (p) {
-            '*' => {
-                pi += 1;
-                while (pi < pattern.len and pattern[pi] == '*') pi += 1;
-                if (pi >= pattern.len) return true;
-
-                // If next pattern char is a literal (not wildcard/bracket/escape), use SIMD
-                const next = pattern[pi];
-                const is_special = next == '*' or next == '?' or next == '[' or (enable_escapes and next == '\\');
-                if (!is_special) {
-                    // SIMD search for next literal character
-                    var search_start = si;
-                    while (search_start <= string.len) {
-                        if (simdFindChar(string[search_start..], next)) |offset| {
-                            const pos = search_start + offset;
-                            if (fnmatch_dumb(pattern[pi..], string[pos..], enable_escapes)) {
-                                return true;
-                            }
-                            search_start = pos + 1;
-                        } else {
-                            return false;
-                        }
-                    }
-                    return false;
-                } else {
-                    // Fallback for wildcards/brackets/escapes
-                    while (si <= string.len) : (si += 1) {
-                        if (fnmatch_dumb(pattern[pi..], string[si..], enable_escapes)) {
-                            return true;
-                        }
-                    }
-                    return false;
-                }
-            },
-            '?' => {
-                if (si >= string.len) return false;
-                si += 1;
-                pi += 1;
-            },
-            '[' => {
-                if (si >= string.len) return false;
-                pi += 1;
-
-                const ch = string[si];
-                si += 1;
-
-                var negate = false;
-                if (pi < pattern.len and (pattern[pi] == '!' or pattern[pi] == '^')) {
-                    negate = true;
-                    pi += 1;
-                }
-
-                // Use bitmap matching for bracket expressions
-                const result = matchBracketBitmap(pattern, pi, ch);
-                pi = result.new_pi;
-                var matched = result.matched;
-
-                if (negate) matched = !matched;
-                if (!matched) return false;
-            },
-            else => {
-                if (si >= string.len or string[si] != p) return false;
-                si += 1;
-                pi += 1;
-            },
-        }
+        return false;
     }
 
-    return si == string.len;
+    return true;
 }
 
+// Keep old name as an alias for any straggling references
+pub const fnmatch_dumb = fnmatch;
+
+// ============================================================================
+// SIMD utilities
+// ============================================================================
+
+/// SIMD-accelerated character search. Returns index of first occurrence of needle.
 pub fn simdFindChar(haystack: []const u8, needle: u8) ?usize {
     const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
 
@@ -190,8 +221,7 @@ pub fn simdFindChar(haystack: []const u8, needle: u8) ?usize {
             const matches = chunk == needle_vec;
             const mask = @as(MaskInt, @bitCast(matches));
             if (mask != 0) {
-                const first_bit = @ctz(mask);
-                return i + first_bit;
+                return i + @ctz(mask);
             }
         }
         for (haystack[i..], i..) |ch, idx| {
@@ -206,8 +236,42 @@ pub fn simdFindChar(haystack: []const u8, needle: u8) ?usize {
     return null;
 }
 
-inline fn matchBracketBitmap(pattern: []const u8, start_pi: usize, ch: u8) struct { matched: bool, new_pi: usize } {
-    var pi = start_pi;
+/// SIMD-accelerated equality check for two equal-length byte slices.
+fn simdEqual(a: []const u8, b: []const u8) bool {
+    std.debug.assert(a.len == b.len);
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
+    if (a.len >= vec_len) {
+        const Vec = @Vector(vec_len, u8);
+        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const all_ones: MaskInt = @as(MaskInt, 0) -% 1;
+        var i: usize = 0;
+        while (i + vec_len <= a.len) : (i += vec_len) {
+            const av: Vec = a[i..][0..vec_len].*;
+            const bv: Vec = b[i..][0..vec_len].*;
+            if (@as(MaskInt, @bitCast(av == bv)) != all_ones) return false;
+        }
+        return mem.eql(u8, a[i..], b[i..]);
+    }
+    return mem.eql(u8, a, b);
+}
+
+// ============================================================================
+// Bracket expression matching (bitmap-based)
+// ============================================================================
+
+/// Match a bracket expression starting at pattern[bracket_pos] (the '[').
+/// Returns whether the character matched and the pattern index after the closing ']'.
+/// Handles negation (! and ^), ranges (a-z), and POSIX classes ([[:alpha:]]).
+inline fn matchBracketBitmap(pattern: []const u8, bracket_pos: usize, ch: u8) struct { matched: bool, new_pi: usize } {
+    var pi = bracket_pos + 1; // skip '['
+    if (pi >= pattern.len) return .{ .matched = false, .new_pi = pi };
+
+    var negate = false;
+    if (pattern[pi] == '!' or pattern[pi] == '^') {
+        negate = true;
+        pi += 1;
+    }
+
     const bracket_start = pi;
 
     // Build a 256-bit bitmap for the character set
@@ -236,12 +300,9 @@ inline fn matchBracketBitmap(pattern: []const u8, start_pi: usize, ch: u8) struc
             pi += 1;
             const range_end = pattern[pi];
             pi += 1;
-
-            const start_byte = set_c;
-            const end_byte = range_end;
-            if (start_byte <= end_byte) {
-                var range_c = start_byte;
-                while (range_c <= end_byte) : (range_c += 1) {
+            if (set_c <= range_end) {
+                var range_c = set_c;
+                while (range_c <= range_end) : (range_c += 1) {
                     bitmap[range_c >> 3] |= @as(u8, 1) << @as(u3, @truncate(range_c & 7));
                     if (range_c == 255) break;
                 }
@@ -256,12 +317,16 @@ inline fn matchBracketBitmap(pattern: []const u8, start_pi: usize, ch: u8) struc
     if (pi < pattern.len and pattern[pi] == ']') pi += 1;
 
     // Branchless bitmap lookup
-    const matched = (bitmap[ch >> 3] & (@as(u8, 1) << @as(u3, @truncate(ch & 7)))) != 0;
+    var matched = (bitmap[ch >> 3] & (@as(u8, 1) << @as(u3, @truncate(ch & 7)))) != 0;
+    if (negate) matched = !matched;
 
     return .{ .matched = matched, .new_pi = pi };
 }
 
-/// POSIX character class types
+// ============================================================================
+// POSIX character classes
+// ============================================================================
+
 const PosixCharClass = enum {
     alpha,
     digit,
@@ -491,115 +556,134 @@ pub fn splitAlternatives(content: []const u8, buffer: *[32][]const u8) [][]const
 
 /// Match a string against a pattern containing extglob constructs.
 pub fn matchExtglob(pattern: []const u8, string: []const u8) bool {
-    return matchExtglobRecursive(pattern, string, 0, 0);
+    return matchExtglobImpl(pattern, string, 0, 0);
 }
 
-/// Recursive extglob matcher that processes pattern and string positions.
-fn matchExtglobRecursive(pattern: []const u8, string: []const u8, pat_start: usize, str_start: usize) bool {
+/// Extglob matcher that processes pattern and string positions.
+/// Uses iterative star-tracking for `*` wildcards (same O(1) stack approach as fnmatch).
+/// Extglob constructs like @(...) still use bounded recursion through matchExtglobType,
+/// but the `*` wildcard itself never recurses.
+fn matchExtglobImpl(pattern: []const u8, string: []const u8, pat_start: usize, str_start: usize) bool {
     var pi = pat_start;
     var si = str_start;
 
-    while (pi < pattern.len) {
-        // Check for extglob at current position
-        if (detectExtglobAt(pattern, pi)) |ext_type| {
-            const open_paren = pi + 1;
-            const close_paren = findClosingParen(pattern, open_paren) orelse {
-                // Malformed extglob - treat as literal
-                if (si >= string.len or string[si] != pattern[pi]) return false;
-                si += 1;
-                pi += 1;
-                continue;
-            };
+    // Saved positions for star backtracking
+    var star_pi: usize = 0;
+    var star_si: usize = 0;
+    var have_star = false;
 
-            const content = pattern[open_paren + 1 .. close_paren];
-            const rest_pattern = pattern[close_paren + 1 ..];
+    while (si < string.len or pi < pattern.len) {
+        if (pi < pattern.len) {
+            // Check for extglob at current position
+            if (detectExtglobAt(pattern, pi)) |ext_type| {
+                const open_paren = pi + 1;
+                const close_paren = findClosingParen(pattern, open_paren) orelse {
+                    // Malformed extglob — treat prefix char as literal
+                    if (si < string.len and string[si] == pattern[pi]) {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                    if (have_star and star_si < string.len) {
+                        pi = star_pi;
+                        star_si += 1;
+                        si = star_si;
+                        continue;
+                    }
+                    return false;
+                };
 
-            var alt_buffer: [32][]const u8 = undefined;
-            const alternatives = splitAlternatives(content, &alt_buffer);
+                const content = pattern[open_paren + 1 .. close_paren];
+                const rest_pattern = pattern[close_paren + 1 ..];
 
-            return matchExtglobType(ext_type, alternatives, rest_pattern, string, si);
-        }
+                var alt_buffer: [32][]const u8 = undefined;
+                const alternatives = splitAlternatives(content, &alt_buffer);
 
-        // Handle regular pattern characters
-        const ch = pattern[pi];
+                // Try matching the extglob construct.
+                // If it succeeds, we're done (rest_pattern handles the tail).
+                // If it fails and we have a saved star, backtrack.
+                if (matchExtglobType(ext_type, alternatives, rest_pattern, string, si)) {
+                    return true;
+                }
 
-        switch (ch) {
-            '*' => {
-                pi += 1;
-                while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+                // Extglob didn't match — try star backtrack
+                if (have_star and star_si < string.len) {
+                    pi = star_pi;
+                    star_si += 1;
+                    si = star_si;
+                    continue;
+                }
+                return false;
+            }
 
-                if (pi >= pattern.len) return true;
+            const ch = pattern[pi];
 
-                // Determine the first expected literal character from the rest of the pattern
-                // to skip ahead using SIMD search instead of trying every position
-                const next_ch = pattern[pi];
-                const is_literal = next_ch != '*' and next_ch != '?' and next_ch != '[' and next_ch != '\\' and
-                    (detectExtglobAt(pattern, pi) == null);
-
-                if (is_literal) {
-                    // Use SIMD to find candidate positions for the next literal char
-                    var search_start = si;
-                    while (search_start <= string.len) {
-                        if (simdFindChar(string[search_start..], next_ch)) |offset| {
-                            const pos = search_start + offset;
-                            if (matchExtglobRecursive(pattern, string, pi, pos)) return true;
-                            search_start = pos + 1;
-                        } else {
-                            return false;
+            switch (ch) {
+                '*' => {
+                    pi += 1;
+                    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+                    star_pi = pi;
+                    star_si = si;
+                    have_star = true;
+                    continue;
+                },
+                '?' => {
+                    if (si < string.len) {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                },
+                '[' => {
+                    if (si < string.len) {
+                        const result = matchBracketBitmap(pattern, pi, string[si]);
+                        if (result.matched) {
+                            pi = result.new_pi;
+                            si += 1;
+                            continue;
                         }
                     }
-                    return false;
-                } else {
-                    while (si <= string.len) : (si += 1) {
-                        if (matchExtglobRecursive(pattern, string, pi, si)) return true;
+                },
+                '\\' => {
+                    if (pi + 1 < pattern.len) {
+                        pi += 1;
+                        if (si < string.len and pattern[pi] == string[si]) {
+                            pi += 1;
+                            si += 1;
+                            continue;
+                        }
+                    }
+                    // Fall through to star backtrack
+                    if (have_star and star_si < string.len) {
+                        pi = star_pi;
+                        star_si += 1;
+                        si = star_si;
+                        continue;
                     }
                     return false;
-                }
-            },
-            '?' => {
-                if (si >= string.len) return false;
-                si += 1;
-                pi += 1;
-            },
-            '[' => {
-                // Delegate bracket matching to matchCore for single character
-                if (si >= string.len) return false;
-                var bracket_end = pi + 1;
-                if (bracket_end < pattern.len and (pattern[bracket_end] == '!' or pattern[bracket_end] == '^')) {
-                    bracket_end += 1;
-                }
-                if (bracket_end < pattern.len and pattern[bracket_end] == ']') {
-                    bracket_end += 1;
-                }
-                while (bracket_end < pattern.len and pattern[bracket_end] != ']') {
-                    bracket_end += 1;
-                }
-                if (bracket_end < pattern.len) {
-                    bracket_end += 1; // Include the ]
-                }
-
-                const bracket_pattern = pattern[pi..bracket_end];
-                const single_char = string[si .. si + 1];
-                if (!fnmatch_dumb(bracket_pattern, single_char, true)) return false;
-                si += 1;
-                pi = bracket_end;
-            },
-            '\\' => {
-                pi += 1;
-                if (pi >= pattern.len) return false;
-                if (si >= string.len or string[si] != pattern[pi]) return false;
-                si += 1;
-                pi += 1;
-            },
-            else => {
-                if (si >= string.len or string[si] != ch) return false;
-                si += 1;
-                pi += 1;
-            },
+                },
+                else => {
+                    if (si < string.len and ch == string[si]) {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                },
+            }
         }
+
+        // Mismatch — try to backtrack to last star
+        if (have_star and star_si < string.len) {
+            pi = star_pi;
+            star_si += 1;
+            si = star_si;
+            continue;
+        }
+
+        return false;
     }
 
-    return si == string.len;
+    return true;
 }
 
 fn matchExtglobType(
@@ -628,13 +712,17 @@ fn matchAt(alternatives: []const []const u8, rest_pattern: []const u8, string: [
 
 /// ?(a|b) - Match zero or one occurrence
 fn matchQuestion(alternatives: []const []const u8, rest_pattern: []const u8, string: []const u8, str_pos: usize) bool {
-    if (matchExtglobRecursive(rest_pattern, string, 0, str_pos)) return true;
+    // Zero occurrences
+    if (matchExtglobImpl(rest_pattern, string, 0, str_pos)) return true;
+    // One occurrence
     return matchAt(alternatives, rest_pattern, string, str_pos);
 }
 
 /// *(a|b) - Match zero or more occurrences
 fn matchStar(alternatives: []const []const u8, rest_pattern: []const u8, string: []const u8, str_pos: usize) bool {
-    if (matchExtglobRecursive(rest_pattern, string, 0, str_pos)) return true;
+    // Zero occurrences
+    if (matchExtglobImpl(rest_pattern, string, 0, str_pos)) return true;
+    // One or more
     return matchPlus(alternatives, rest_pattern, string, str_pos);
 }
 
@@ -659,8 +747,8 @@ fn matchPlusInner(alternatives: []const []const u8, rest_pattern: []const u8, st
         var end_pos = str_pos;
         while (end_pos <= string.len) : (end_pos += 1) {
             const candidate = string[str_pos..end_pos];
-            if (fnmatch_dumb(alt, candidate, true)) {
-                if (matchExtglobRecursive(rest_pattern, string, 0, end_pos)) return true;
+            if (fnmatch(alt, candidate, true)) {
+                if (matchExtglobImpl(rest_pattern, string, 0, end_pos)) return true;
                 if (end_pos > str_pos) {
                     if (matchPlusInner(alternatives, rest_pattern, string, end_pos, visited)) return true;
                 }
@@ -678,14 +766,14 @@ fn matchNot(alternatives: []const []const u8, rest_pattern: []const u8, string: 
 
         var matches_any = false;
         for (alternatives) |alt| {
-            if (fnmatch_dumb(alt, candidate, true)) {
+            if (fnmatch(alt, candidate, true)) {
                 matches_any = true;
                 break;
             }
         }
 
         if (!matches_any) {
-            if (matchExtglobRecursive(rest_pattern, string, 0, end_pos)) return true;
+            if (matchExtglobImpl(rest_pattern, string, 0, end_pos)) return true;
         }
     }
 
@@ -696,8 +784,8 @@ fn tryMatchAlternative(alt: []const u8, rest_pattern: []const u8, string: []cons
     var end_pos = str_pos;
     while (end_pos <= string.len) : (end_pos += 1) {
         const candidate = string[str_pos..end_pos];
-        if (fnmatch_dumb(alt, candidate, true)) {
-            if (matchExtglobRecursive(rest_pattern, string, 0, end_pos)) return true;
+        if (fnmatch(alt, candidate, true)) {
+            if (matchExtglobImpl(rest_pattern, string, 0, end_pos)) return true;
         }
     }
     return false;
@@ -733,6 +821,15 @@ test "match - empty patterns" {
     try std.testing.expect(!match("", "a", .{}));
     try std.testing.expect(match("*", "", .{}));
     try std.testing.expect(match("*", "anything", .{}));
+}
+
+test "fnmatch - iterative star does not overflow stack" {
+    // This pattern would cause stack overflow with recursive implementation
+    // because * tries every position. With iterative approach it's O(n).
+    try std.testing.expect(fnmatch("*.rs", "hello.rs", true));
+    try std.testing.expect(!fnmatch("*.rs", "hello.txt", true));
+    try std.testing.expect(fnmatch("a*b*c*d", "aXbYcZd", true));
+    try std.testing.expect(!fnmatch("a*b*c*d", "aXbYcZ", true));
 }
 
 test "detectExtglobAt - basic detection" {

@@ -13,6 +13,7 @@
 const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
+const zlob_flags = @import("zlob_flags");
 const fnmatch = zlob.fnmatch;
 const pattern_context = zlob.pattern_context;
 const PatternContext = pattern_context.PatternContext;
@@ -272,7 +273,7 @@ test "fnmatch - star in middle" {
 
 test "matchPaths - empty file list with NOCHECK" {
     const paths = [_][]const u8{};
-    var result = try zlob.matchPaths(testing.allocator, "*.txt", &paths, zlob.ZLOB_NOCHECK);
+    var result = try zlob.matchPaths(testing.allocator, "*.txt", &paths, zlob_flags.ZLOB_NOCHECK);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);

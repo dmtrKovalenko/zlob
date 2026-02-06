@@ -1,12 +1,12 @@
 const std = @import("std");
 const testing = std.testing;
 const c_lib = @import("c_lib");
+const zlob_flags = @import("zlob_flags");
 const c = std.c;
 
-// Re-import only the constants we need from c_lib's zlob_t
-const ZLOB_ERR = 1 << 0; // 0x0001
-const ZLOB_NOMATCH = 3;
-const ZLOB_ABORTED = 2;
+const ZLOB_ERR = zlob_flags.ZLOB_ERR;
+const ZLOB_NOMATCH = zlob_flags.ZLOB_NOMATCH;
+const ZLOB_ABORTED = zlob_flags.ZLOB_ABORTED;
 
 // Test structure to track errfunc calls
 const ErrorCallbackContext = struct {

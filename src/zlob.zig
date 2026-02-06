@@ -3,7 +3,8 @@ const builtin = @import("builtin");
 const suffix_match = @import("suffix_match.zig");
 const brace_optimizer = @import("brace_optimizer.zig");
 const pattern_context_internal = @import("pattern_context.zig");
-const flags_mod = @import("flags.zig");
+const sorting = @import("sorting.zig");
+const zlob_flags = @import("zlob_flags");
 const walker_mod = @import("walker");
 const fnmatch_internal = @import("fnmatch.zig");
 const c = std.c;
@@ -24,7 +25,6 @@ pub const hasWildcardsSIMD = pattern_context_internal.hasWildcardsSIMD;
 pub const indexOfCharSIMD = pattern_context_internal.indexOfCharSIMD;
 pub const lastIndexOfCharSIMD = pattern_context_internal.lastIndexOfCharSIMD;
 pub const containsExtglob = fnmatch_internal.containsExtglob;
-pub const simdFindChar = fnmatch_internal.simdFindChar;
 pub const gitignore = @import("gitignore.zig");
 pub const GitIgnore = gitignore.GitIgnore;
 
@@ -53,7 +53,6 @@ pub const zlob_dirent_t = extern struct {
     }
 };
 
-/// Function pointer types for custom directory access (matches glibc glob_t)
 pub const opendir_t = ?*const fn (path: [*:0]const u8) callconv(.c) ?*anyopaque;
 pub const readdir_t = ?*const fn (dir: ?*anyopaque) callconv(.c) ?*zlob_dirent_t;
 pub const closedir_t = ?*const fn (dir: ?*anyopaque) callconv(.c) void;
@@ -112,7 +111,7 @@ pub const zlob_t = extern struct {
 
     /// Convert zlob_t's ALTDIRFUNC callbacks to a walker FsProvider.
     /// This enables seamless integration with the walker module.
-    pub fn toFsProvider(self: *const zlob_t, flags: c_int) walker_mod.FsProvider {
+    pub fn toFsProvider(self: *const zlob_t, flags: c_int) walker_mod.AltFs {
         const use_altdirfunc = (flags & ZLOB_ALTDIRFUNC) != 0 and
             self.zlo_opendir != null and
             self.zlo_readdir != null and
@@ -125,12 +124,9 @@ pub const zlob_t = extern struct {
                 .closedir = @ptrCast(self.zlo_closedir),
             };
         }
-        return walker_mod.FsProvider.real_fs;
+        return walker_mod.AltFs.real_fs;
     }
 };
-
-// Note: DirIterator has been unified into walker.zig
-// Use walker_mod.DirIterator.openWithProvider() with zlob_t.toFsProvider() for ALTDIRFUNC support
 
 fn globLiteralPath(allocator: Allocator, path: []const u8, flags: ZlobFlags, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !bool {
     const root = base_dir orelse std.fs.cwd();
@@ -175,35 +171,12 @@ fn globLiteralPath(allocator: Allocator, path: []const u8, flags: ZlobFlags, pzl
     return true;
 }
 
-// ============================================================================
-// Flag constants and types - imported from flags.zig (single source of truth)
-// ============================================================================
-pub const ZLOB_ERR = flags_mod.ZLOB_ERR;
-pub const ZLOB_MARK = flags_mod.ZLOB_MARK;
-pub const ZLOB_NOSORT = flags_mod.ZLOB_NOSORT;
-pub const ZLOB_DOOFFS = flags_mod.ZLOB_DOOFFS;
-pub const ZLOB_NOCHECK = flags_mod.ZLOB_NOCHECK;
-pub const ZLOB_APPEND = flags_mod.ZLOB_APPEND;
-pub const ZLOB_NOESCAPE = flags_mod.ZLOB_NOESCAPE;
-pub const ZLOB_PERIOD = flags_mod.ZLOB_PERIOD;
-pub const ZLOB_MAGCHAR = flags_mod.ZLOB_MAGCHAR;
-pub const ZLOB_ALTDIRFUNC = flags_mod.ZLOB_ALTDIRFUNC;
-pub const ZLOB_BRACE = flags_mod.ZLOB_BRACE;
-pub const ZLOB_NOMAGIC = flags_mod.ZLOB_NOMAGIC;
-pub const ZLOB_TILDE = flags_mod.ZLOB_TILDE;
-pub const ZLOB_ONLYDIR = flags_mod.ZLOB_ONLYDIR;
-pub const ZLOB_TILDE_CHECK = flags_mod.ZLOB_TILDE_CHECK;
-pub const ZLOB_GITIGNORE = flags_mod.ZLOB_GITIGNORE;
-pub const ZLOB_DOUBLESTAR_RECURSIVE = flags_mod.ZLOB_DOUBLESTAR_RECURSIVE;
-pub const ZLOB_EXTGLOB = flags_mod.ZLOB_EXTGLOB;
-pub const ZLOB_RECOMMENDED = flags_mod.ZLOB_RECOMMENDED;
-pub const ZLOB_FLAGS_SHARED_STRINGS = flags_mod.ZLOB_FLAGS_SHARED_STRINGS;
-pub const ZLOB_FLAGS_OWNS_STRINGS = flags_mod.ZLOB_FLAGS_OWNS_STRINGS;
-pub const ZLOB_NOSPACE = flags_mod.ZLOB_NOSPACE;
-pub const ZLOB_ABORTED = flags_mod.ZLOB_ABORTED;
-pub const ZLOB_NOMATCH = flags_mod.ZLOB_NOMATCH;
-pub const ZlobFlags = flags_mod.ZlobFlags;
-pub const GlobError = flags_mod.GlobError;
+pub const ZlobFlags = zlob_flags.ZlobFlags;
+pub const GlobError = zlob_flags.GlobError;
+
+const ZLOB_ALTDIRFUNC = zlob_flags.ZLOB_ALTDIRFUNC;
+const ZLOB_FLAGS_OWNS_STRINGS = zlob_flags.ZLOB_FLAGS_OWNS_STRINGS;
+const ZLOB_FLAGS_SHARED_STRINGS = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
 
 pub const zlob_errfunc_t = ?*const fn (epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int;
 
@@ -417,18 +390,6 @@ inline fn matchWithAlternatives(name: []const u8, alternatives: []const []const 
     return false;
 }
 
-/// Match a name against a pattern with extglob support
-/// Uses extglob matching if enable_extglob is true and pattern contains extglob syntax
-inline fn matchWithExtglobSupport(name: []const u8, pattern: []const u8, ctx: *const PatternContext, enable_extglob: bool) bool {
-    if (enable_extglob and fnmatch_internal.containsExtglob(pattern)) {
-        return fnmatch_internal.matchExtglob(pattern, name);
-    }
-    if (ctx.simd_batched_suffix_match) |batched| {
-        return batched.matchSuffix(name);
-    }
-    return fnmatchWithContext(ctx, name);
-}
-
 /// Match a name against multiple alternative patterns with extglob support
 inline fn matchWithAlternativesExtglob(name: []const u8, alternatives: []const []const u8, enable_extglob: bool) bool {
     for (alternatives) |alt| {
@@ -462,151 +423,6 @@ inline fn matchWithAlternativesPrecomputedExtglob(name: []const u8, patterns: []
     return false;
 }
 
-fn canMatchPattern(
-    dir_path: []const u8,
-    current_depth: usize,
-    info: *const PatternInfo,
-) bool {
-    if (info.max_depth) |max| {
-        if (current_depth >= max) return false;
-    }
-
-    if (info.literal_prefix.len > 0) {
-        // or literal_prefix must be a prefix of directory
-        if (dir_path.len < info.literal_prefix.len) {
-            // dir_path is shorter - must be a prefix of literal_prefix
-            return mem.startsWith(u8, info.literal_prefix, dir_path) and
-                (info.literal_prefix.len == dir_path.len or
-                    info.literal_prefix[dir_path.len] == '/');
-        } else {
-            // dir_path is longer - literal_prefix must be a prefix
-            return mem.startsWith(u8, dir_path, info.literal_prefix) and
-                (dir_path.len == info.literal_prefix.len or
-                    dir_path[info.literal_prefix.len] == '/');
-        }
-    }
-
-    return true;
-}
-
-fn simdStrCmp(a: []const u8, b: []const u8) std.math.Order {
-    const min_len = @min(a.len, b.len);
-
-    // Use CPU-optimal vector size
-    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
-
-    if (min_len >= vec_len) {
-        const Vec = @Vector(vec_len, u8);
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
-        const all_ones: MaskInt = @as(MaskInt, 0) -% 1; // All bits set
-
-        var i: usize = 0;
-        while (i + vec_len <= min_len) : (i += vec_len) {
-            const a_vec: Vec = a[i..][0..vec_len].*;
-            const b_vec: Vec = b[i..][0..vec_len].*;
-            const eq = a_vec == b_vec;
-            const mask = @as(MaskInt, @bitCast(eq));
-
-            if (mask != all_ones) {
-                // Found difference, find first differing byte
-                const first_diff = @ctz(~mask);
-                const a_byte = a[i + first_diff];
-                const b_byte = b[i + first_diff];
-                if (a_byte < b_byte) return .lt;
-                if (a_byte > b_byte) return .gt;
-            }
-        }
-        // Compare remainder byte-by-byte
-        for (a[i..min_len], b[i..min_len]) |a_byte, b_byte| {
-            if (a_byte < b_byte) return .lt;
-            if (a_byte > b_byte) return .gt;
-        }
-    } else {
-        // Fallback for short strings
-        for (a[0..min_len], b[0..min_len]) |a_byte, b_byte| {
-            if (a_byte < b_byte) return .lt;
-            if (a_byte > b_byte) return .gt;
-        }
-    }
-
-    // All bytes equal up to min_len, compare lengths
-    if (a.len < b.len) return .lt;
-    if (a.len > b.len) return .gt;
-    return .eq;
-}
-
-/// Sort context for sorting paths with pre-computed lengths
-/// This avoids the O(n) strlen() call per comparison that mem.sliceTo would require
-const PathSortContext = struct {
-    paths: [*][*c]u8,
-    lengths: [*]usize,
-
-    /// Compare two paths using their pre-computed lengths
-    /// This is significantly faster than mem.sliceTo which scans for null terminators
-    fn lessThan(ctx: PathSortContext, a_idx: usize, b_idx: usize) bool {
-        const a_ptr = ctx.paths[a_idx];
-        const b_ptr = ctx.paths[b_idx];
-        const a_len = ctx.lengths[a_idx];
-        const b_len = ctx.lengths[b_idx];
-
-        // Create slices using known lengths - O(1) instead of O(n) for mem.sliceTo
-        const slice_a = @as([*]const u8, @ptrCast(a_ptr))[0..a_len];
-        const slice_b = @as([*]const u8, @ptrCast(b_ptr))[0..b_len];
-
-        return simdStrCmp(slice_a, slice_b) == .lt;
-    }
-};
-
-/// Sort paths in-place using pre-computed lengths from zlo_pathlen
-/// This is much faster than C's qsort with mem.sliceTo because:
-/// 1. We use known lengths instead of scanning for null terminators
-/// 2. Zig's sort is cache-friendly and doesn't require function pointer indirection
-fn sortPathsWithLengths(paths: [*][*c]u8, lengths: [*]usize, count: usize) void {
-    if (count <= 1) return;
-
-    // Create index array for indirect sorting
-    // We sort indices and then rearrange paths/lengths accordingly
-    var indices_buf: [4096]usize = undefined;
-    const indices = indices_buf[0..count];
-    for (indices, 0..) |*idx, i| {
-        idx.* = i;
-    }
-
-    const ctx = PathSortContext{ .paths = paths, .lengths = lengths };
-    std.mem.sort(usize, indices, ctx, PathSortContext.lessThan);
-
-    // Rearrange paths and lengths according to sorted indices using cycle sort
-    // This is O(n) with O(1) extra space for the swap temps
-    var visited_buf: [4096]bool = undefined;
-    const visited = visited_buf[0..count];
-    @memset(visited, false);
-
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        if (visited[i] or indices[i] == i) {
-            visited[i] = true;
-            continue;
-        }
-
-        // Follow the cycle
-        var j = i;
-        const temp_path = paths[i];
-        const temp_len = lengths[i];
-
-        while (indices[j] != i) {
-            const next = indices[j];
-            paths[j] = paths[next];
-            lengths[j] = lengths[next];
-            visited[j] = true;
-            j = next;
-        }
-
-        paths[j] = temp_path;
-        lengths[j] = temp_len;
-        visited[j] = true;
-    }
-}
-
 fn buildPathInBuffer(buf: []u8, dir: []const u8, name: []const u8) []const u8 {
     var len: usize = 0;
 
@@ -623,7 +439,7 @@ fn buildPathInBuffer(buf: []u8, dir: []const u8, name: []const u8) []const u8 {
     return buf[0..len];
 }
 
-fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.FsProvider) !?void {
+fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.AltFs) !?void {
     // Note: gitignore filtering is not fully implemented in this path
     // The main recursive and filtered paths handle gitignore
     _ = gitignore_filter;
@@ -694,11 +510,9 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         return null;
     }
 
-    // Note: sorting is now handled inside finalizeResults using pre-computed lengths
     return finalizeResults(allocator, &result_paths, flags, pzlob);
 }
 
-// Recursive helper to expand wildcard components level by level
 fn expandWildcardComponents(
     allocator: std.mem.Allocator,
     current_dir: []const u8,
@@ -709,7 +523,7 @@ fn expandWildcardComponents(
     flags: ZlobFlags,
     errfunc: zlob_errfunc_t,
     base_dir: ?std.fs.Dir,
-    fs_provider: walker_mod.FsProvider,
+    fs_provider: walker_mod.AltFs,
 ) !void {
     if (component_idx > 65536) {
         @branchHint(.unlikely);
@@ -742,22 +556,14 @@ fn expandWildcardComponents(
             flags.period,
         );
 
-        var iter = walker_mod.DirIterator.openWithProvider(current_dir, base_dir, hidden_config, fs_provider) catch |err| {
-            if (errfunc) |ef| {
-                var path_z: [4096:0]u8 = undefined;
-                const len = @min(current_dir.len, 4095);
-                @memcpy(path_z[0..len], current_dir[0..len]);
-                path_z[len] = 0;
-                if (ef(&path_z, walker_mod.errToErrno(err)) != 0) {
-                    return error.Aborted;
-                }
-            }
-            if (flags.err) return error.Aborted;
-            return;
-        };
-        defer iter.close();
+        var iter = walker_mod.DirIterator.openHandled(current_dir, base_dir, hidden_config, fs_provider, .{
+            .err_callback = errfunc,
+            .abort_on_error = flags.err,
+        }) catch return error.Aborted;
+        if (iter == null) return;
+        defer iter.?.close();
 
-        while (iter.next()) |entry| {
+        while (iter.?.next()) |entry| {
             const name = entry.name;
             if (!is_final and entry.kind != .directory) continue;
 
@@ -799,7 +605,7 @@ fn expandWildcardComponents(
     }
 }
 
-fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.FsProvider) !?void {
+fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.AltFs) !?void {
     var effective_pattern = pattern;
     var flags = flags_in;
 
@@ -852,7 +658,6 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     // - "{src,lib}/*.c" - braces in directory
     // - "common/*/*.{rs,toml}" - braces in filename with wildcard dirs
     // - "{src,lib}/*/*.{c,h}" - braces in both
-    // Skip if pattern has ** - those go through globRecursive
     if (brace_parsed) |parsed| {
         if (!parsed.has_recursive) {
             // Check if we need the braced component walker:
@@ -887,7 +692,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
 
     // Fast path: simple pattern with literal prefix (e.g., "src/foo/*.txt")
     if (info.simple_extension != null and info.literal_prefix.len > 0) {
-        return globInDirFiltered(allocator, info.wildcard_suffix, info.literal_prefix, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
+        return globInSingleDirWithFnmatch(allocator, info.wildcard_suffix, info.literal_prefix, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
     }
 
     // Only use recursive glob handling if ZLOB_DOUBLESTAR_RECURSIVE is set
@@ -982,17 +787,13 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
         filename_pattern = effective_pattern[dir_end + 1 ..];
     }
 
-    // Only check for ** in filename if doublestar_recursive is enabled
-    if (flags.doublestar_recursive) {
-        if (mem.indexOf(u8, filename_pattern, "**")) |_| {
-            return globRecursive(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, base_dir, fs_provider);
-        }
+    if (flags.doublestar_recursive and info.has_recursive) {
+        return globRecursive(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, base_dir, fs_provider);
     }
 
-    return globInDirFiltered(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
+    return globInSingleDirWithFnmatch(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
 }
 
-/// Helper to return pattern as result (for ZLOB_NOCHECK)
 fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, pzlob: *zlob_t) !?void {
     const path_copy = try allocator.allocSentinel(u8, pattern.len, 0);
     @memcpy(path_copy[0..pattern.len], pattern);
@@ -1014,7 +815,6 @@ fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, pzlo
 }
 
 // Helper to expand tilde (~) in patterns
-
 //   - The expanded pattern (allocated if expanded, original if no tilde)
 //   - null if ZLOB_TILDE_CHECK is set and expansion fails (indicates no match)
 fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: ZlobFlags) !?[:0]const u8 {
@@ -1176,7 +976,7 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
 }
 
 // Expand brace patterns and glob each independently (no ZLOB_APPEND manipulation)
-fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.FsProvider) !?void {
+fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.AltFs) !?void {
     // Use brace_optimizer.expandBraces for consistent nested brace handling
     const expanded = try brace_optimizer.expandBraces(allocator, pattern);
     defer {
@@ -1248,7 +1048,7 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
 
     // Sort using pre-computed lengths - no strlen() calls!
     if (!flags.nosort) {
-        sortPathsWithLengths(@ptrCast(result), pathlen_buf.ptr, count);
+        sorting.sortPaths(@ptrCast(result), pathlen_buf.ptr, count);
     }
 
     pzlob.zlo_pathc = count;
@@ -1283,11 +1083,11 @@ inline fn matchWithAlternativesPrecomputed(name: []const u8, contexts: []const P
     return false;
 }
 
-fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.FsProvider) !?void {
+fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker_mod.AltFs) !?void {
     const info = analyzePattern(pattern, flags);
 
     // Split pattern at **
-    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInDirFiltered(allocator, pattern, dirname, flags, errfunc, pzlob, directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
+    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInSingleDirWithFnmatch(allocator, pattern, dirname, flags, errfunc, pzlob, directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
 
     var after_double_star = pattern[double_star_pos + 2 ..];
 
@@ -1480,7 +1280,7 @@ fn globWithBracedComponents(
     directories_only: bool,
     gitignore_filter: ?*GitIgnore,
     base_dir: ?std.fs.Dir,
-    fs_provider: walker_mod.FsProvider,
+    fs_provider: walker_mod.AltFs,
 ) !?void {
     _ = gitignore_filter; // TODO: Apply gitignore filtering
 
@@ -1645,7 +1445,7 @@ fn walkBracedComponents(
     directories_only: bool,
     errfunc: zlob_errfunc_t,
     base_dir: ?std.fs.Dir,
-    fs_provider: walker_mod.FsProvider,
+    fs_provider: walker_mod.AltFs,
     comptime onComplete: fn (std.mem.Allocator, []const u8, *ResultsList, bool) error{ OutOfMemory, Aborted }!void,
 ) error{ OutOfMemory, Aborted }!void {
     if (component_idx >= matchers.len) {
@@ -1665,22 +1465,14 @@ fn walkBracedComponents(
     };
 
     // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
-    var iter = walker_mod.DirIterator.openWithProvider(current_dir, base_dir, hidden_config, fs_provider) catch |err| {
-        if (errfunc) |ef| {
-            var path_z: [4096:0]u8 = undefined;
-            const len = @min(current_dir.len, 4095);
-            @memcpy(path_z[0..len], current_dir[0..len]);
-            path_z[len] = 0;
-            if (ef(&path_z, walker_mod.errToErrno(err)) != 0) {
-                return error.Aborted;
-            }
-        }
-        if (flags.err) return error.Aborted;
-        return;
-    };
-    defer iter.close();
+    var iter = walker_mod.DirIterator.openHandled(current_dir, base_dir, hidden_config, fs_provider, .{
+        .err_callback = errfunc,
+        .abort_on_error = flags.err,
+    }) catch return error.Aborted;
+    if (iter == null) return;
+    defer iter.?.close();
 
-    while (iter.next()) |entry| {
+    while (iter.?.next()) |entry| {
         // Note: Hidden file filtering is now done at iterator level
         if (!is_final and entry.kind != .directory) continue;
 
@@ -1720,7 +1512,7 @@ fn globRecursiveWithBracedPrefix(
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
     base_dir: ?std.fs.Dir,
-    fs_provider: walker_mod.FsProvider,
+    fs_provider: walker_mod.AltFs,
 ) !void {
     // If we've matched all pre-doublestar components, start the recursive walk
     if (component_idx >= pre_ds_components.len) {
@@ -1744,22 +1536,14 @@ fn globRecursiveWithBracedPrefix(
     };
 
     // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
-    var iter = walker_mod.DirIterator.openWithProvider(current_dir, base_dir, hidden_config, fs_provider) catch |err| {
-        if (errfunc) |ef| {
-            var path_z: [4096:0]u8 = undefined;
-            const len = @min(current_dir.len, 4095);
-            @memcpy(path_z[0..len], current_dir[0..len]);
-            path_z[len] = 0;
-            if (ef(&path_z, walker_mod.errToErrno(err)) != 0) {
-                return error.Aborted;
-            }
-        }
-        if (flags.err) return error.Aborted;
-        return;
-    };
-    defer iter.close();
+    var iter = walker_mod.DirIterator.openHandled(current_dir, base_dir, hidden_config, fs_provider, .{
+        .err_callback = errfunc,
+        .abort_on_error = flags.err,
+    }) catch return error.Aborted;
+    if (iter == null) return;
+    defer iter.?.close();
 
-    while (iter.next()) |entry| {
+    while (iter.?.next()) |entry| {
         // Note: Hidden file filtering is now done at iterator level
         if (entry.kind != .directory) continue;
 
@@ -1821,7 +1605,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
         pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
 
         if (!flags.nosort and new_count > 0) {
-            sortPathsWithLengths(@ptrCast(result + offs + old_count), pathlen_buf.ptr + old_count, new_count);
+            sorting.sortPaths(@ptrCast(result + offs + old_count), pathlen_buf.ptr + old_count, new_count);
         }
     } else if (offs == 0) {
         // Fast path: no offset slots needed, transfer ownership directly from ResultsList
@@ -1835,7 +1619,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
         pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
 
         if (!flags.nosort) {
-            sortPathsWithLengths(@ptrCast(pzlob.zlo_pathv), pathlen_buf.ptr, new_count);
+            sorting.sortPaths(@ptrCast(pzlob.zlo_pathv), pathlen_buf.ptr, new_count);
         }
     } else {
         // ZLOB_DOOFFS: need offset slots at the beginning, must allocate fresh buffers
@@ -1855,7 +1639,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
         pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
 
         if (!flags.nosort) {
-            sortPathsWithLengths(@ptrCast(result + offs), pathlen_buf.ptr, new_count);
+            sorting.sortPaths(@ptrCast(result + offs), pathlen_buf.ptr, new_count);
         }
     }
 }
@@ -1865,7 +1649,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
 // walkWithGitignore function anymore.
 // This function handles both simple (**/*.txt) and complex (**/foo/*.txt) patterns.
 // Uses comptime parameter to eliminate runtime branch for dir_components check.
-inline fn globRecursiveWalk(
+fn globRecursiveWalk(
     allocator: std.mem.Allocator,
     rec_pattern: *const RecursivePattern,
     start_dir: []const u8,
@@ -1874,7 +1658,7 @@ inline fn globRecursiveWalk(
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
     base_dir: ?std.fs.Dir,
-    fs_provider: walker_mod.FsProvider,
+    fs_provider: walker_mod.AltFs,
 ) !void {
     // Dispatch to the appropriate comptime-specialized version
     if (rec_pattern.dir_components.len > 0) {
@@ -1885,7 +1669,7 @@ inline fn globRecursiveWalk(
 }
 
 /// Implementation with comptime-known has_dir_components to eliminate runtime branching
-inline fn globRecursiveWalkImpl(
+fn globRecursiveWalkImpl(
     comptime has_dir_components: bool,
     allocator: std.mem.Allocator,
     rec_pattern: *const RecursivePattern,
@@ -1895,7 +1679,7 @@ inline fn globRecursiveWalkImpl(
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
     base_dir: ?std.fs.Dir,
-    fs_provider: walker_mod.FsProvider,
+    fs_provider: walker_mod.AltFs,
 ) !void {
     // Pattern context for file matching
     const pattern_ctx = PatternContext.init(rec_pattern.file_pattern);
@@ -2143,10 +1927,7 @@ pub inline fn buildFullPathWithMark(
     };
 }
 
-// Note: shouldSkipFile has been removed - filtering is now done at the walker/iterator level
-// via HiddenConfig. This avoids code duplication and ensures POSIX compliance.
-
-fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern, base_dir: ?std.fs.Dir, fs_provider: walker_mod.FsProvider) !?void {
+fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern, base_dir: ?std.fs.Dir, fs_provider: walker_mod.AltFs) !?void {
     // If we have brace alternatives for the filename pattern, use them for matching
     // e.g., "*.{toml,lock}" -> alternatives = ["*.toml", "*.lock"]
     const file_alternatives: ?[]const PatternContext = if (brace_parsed) |bp| blk: {
@@ -2186,19 +1967,14 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
     );
 
     // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
-    var iter = walker_mod.DirIterator.openWithProvider(dirname, base_dir, hidden_config, fs_provider) catch |err| {
-        if (errfunc) |efunc| {
-            var path_z: [4096:0]u8 = undefined;
-            const len = @min(dirname.len, 4095);
-            @memcpy(path_z[0..len], dirname[0..len]);
-            path_z[len] = 0;
-            _ = efunc(&path_z, walker_mod.errToErrno(err));
-        }
-        return if (flags.err) error.Aborted else null;
-    };
-    defer iter.close();
+    var iter = walker_mod.DirIterator.openHandled(dirname, base_dir, hidden_config, fs_provider, .{
+        .err_callback = errfunc,
+        .abort_on_error = flags.err,
+    }) catch return error.Aborted;
+    if (iter == null) return null;
+    defer iter.?.close();
 
-    while (iter.next()) |entry| {
+    while (iter.?.next()) |entry| {
         const name = entry.name;
         // Note: Hidden file and dot entry filtering is now done at iterator level
 
@@ -2280,23 +2056,16 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
     return finalizeResults(allocator, &names, flags, pzlob);
 }
 
-// All fnmatch functionality is now in fnmatch.zig — these are thin wrappers for internal use
+// All fnmatch functionality lives in fnmatch.zig — these are thin wrappers for internal use.
+// This eliminates code duplication and ensures a single iterative (non-recursive) implementation.
+
+pub const simdFindChar = fnmatch_internal.simdFindChar;
+pub const fnmatchFull = fnmatch_internal.fnmatchFull;
+pub const fnmatchWithFlags = fnmatch_internal.fnmatchWithFlags;
+pub const fnmatchWithExtglob = fnmatch_internal.fnmatchWithExtglob;
 
 pub inline fn fnmatchWithContext(ctx: *const PatternContext, string: []const u8) bool {
-    return fnmatch_internal.matchWithContext(ctx, string, .{});
-}
-
-pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
-    return fnmatch_internal.fnmatch_dumb(pattern, string, true);
-}
-
-pub fn fnmatchWithFlags(pattern: []const u8, string: []const u8, enable_escapes: bool) bool {
-    return fnmatch_internal.fnmatch_dumb(pattern, string, enable_escapes);
-}
-
-pub fn fnmatchWithExtglob(pattern: []const u8, string: []const u8, enable_extglob: bool) bool {
-    const flags = if (enable_extglob) flags_mod.ZlobFlags{ .extglob = true } else flags_mod.ZlobFlags{};
-    return fnmatch_internal.match(pattern, string, flags);
+    return fnmatch_internal.matchWithContextNoExtglob(ctx, string, true);
 }
 
 /// Internal globfree function - frees zlob_t structure
@@ -2368,180 +2137,3 @@ pub const GlobResults = struct {
         return result;
     }
 };
-
-// ============================================================================
-// Tests for ZlobFlags packed struct
-// ============================================================================
-
-test "ZlobFlags bit positions match integer constants" {
-    const testing = std.testing;
-
-    // Verify each flag maps to the correct bit position
-    const f_err = ZlobFlags{ .err = true };
-    const f_mark = ZlobFlags{ .mark = true };
-    const f_nosort = ZlobFlags{ .nosort = true };
-    const f_dooffs = ZlobFlags{ .dooffs = true };
-    const f_nocheck = ZlobFlags{ .nocheck = true };
-    const f_append = ZlobFlags{ .append = true };
-    const f_noescape = ZlobFlags{ .noescape = true };
-    const f_period = ZlobFlags{ .period = true };
-    const f_magchar = ZlobFlags{ .magchar = true };
-    const f_altdirfunc = ZlobFlags{ .altdirfunc = true };
-    const f_brace = ZlobFlags{ .brace = true };
-    const f_nomagic = ZlobFlags{ .nomagic = true };
-    const f_tilde = ZlobFlags{ .tilde = true };
-    const f_onlydir = ZlobFlags{ .onlydir = true };
-    const f_tilde_check = ZlobFlags{ .tilde_check = true };
-    const f_gitignore = ZlobFlags{ .gitignore = true };
-
-    try testing.expectEqual(@as(u32, ZLOB_ERR), f_err.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_MARK), f_mark.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_NOSORT), f_nosort.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_DOOFFS), f_dooffs.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_NOCHECK), f_nocheck.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_APPEND), f_append.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_NOESCAPE), f_noescape.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_PERIOD), f_period.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_MAGCHAR), f_magchar.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_ALTDIRFUNC), f_altdirfunc.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_BRACE), f_brace.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_NOMAGIC), f_nomagic.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_TILDE), f_tilde.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_ONLYDIR), f_onlydir.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_TILDE_CHECK), f_tilde_check.toU32());
-    try testing.expectEqual(@as(u32, ZLOB_GITIGNORE), f_gitignore.toU32());
-}
-
-test "ZlobFlags roundtrip conversion" {
-    const testing = std.testing;
-
-    // Test multiple flags combined
-    const combined: u32 = ZLOB_MARK | ZLOB_NOSORT | ZLOB_BRACE | ZLOB_GITIGNORE;
-    const flags = ZlobFlags.fromU32(combined);
-
-    try testing.expect(flags.mark);
-    try testing.expect(flags.nosort);
-    try testing.expect(flags.brace);
-    try testing.expect(flags.gitignore);
-    try testing.expect(!flags.err);
-    try testing.expect(!flags.period);
-
-    // Roundtrip back to integer
-    try testing.expectEqual(combined, flags.toU32());
-
-    // Test c_int conversion
-    const combined_cint: c_int = @bitCast(combined);
-    try testing.expectEqual(combined_cint, flags.toInt());
-
-    const from_cint = ZlobFlags.fromInt(flags.toInt());
-    try testing.expectEqual(combined, from_cint.toU32());
-}
-
-test "DirIterator with standard filesystem" {
-    const testing = std.testing;
-
-    // Test that DirIterator works with standard filesystem (no ALTDIRFUNC)
-    // Open current directory using walker's DirIterator with default HiddenConfig
-    var iter = walker_mod.DirIterator.open(".", null, walker_mod.HiddenConfig.include_all) catch |err| {
-        std.debug.print("Failed to open directory: {}\n", .{err});
-        return err;
-    };
-    defer iter.close();
-
-    // Should be able to iterate
-    var count: usize = 0;
-    while (iter.next()) |entry| {
-        _ = entry;
-        count += 1;
-        if (count > 100) break; // Safety limit
-    }
-
-    // Current directory should have at least some entries
-    try testing.expect(count > 0);
-}
-
-test "DirIterator with ALTDIRFUNC via toFsProvider" {
-    const testing = std.testing;
-
-    // Mock directory state - must be at file scope for C callbacks
-    const MockDir = struct {
-        const Entry = struct {
-            name: [:0]const u8,
-            d_type: u8,
-        };
-
-        const entries = [_]Entry{
-            .{ .name = "file1.txt", .d_type = 8 }, // DT_REG
-            .{ .name = "file2.zig", .d_type = 8 },
-            .{ .name = "subdir", .d_type = 4 }, // DT_DIR
-        };
-
-        var index: usize = 0;
-        var dirent_storage: walker_mod.AltDirent = undefined;
-
-        fn opendir(_: [*:0]const u8) callconv(.c) ?*anyopaque {
-            index = 0;
-            // Return non-null to indicate success
-            return @ptrFromInt(0x12345678);
-        }
-
-        fn readdir(_: ?*anyopaque) callconv(.c) ?*walker_mod.AltDirent {
-            if (index >= entries.len) return null;
-            dirent_storage.d_name = entries[index].name.ptr;
-            dirent_storage.d_type = entries[index].d_type;
-            index += 1;
-            return &dirent_storage;
-        }
-
-        fn closedir(_: ?*anyopaque) callconv(.c) void {
-            index = 0;
-        }
-    };
-
-    // Set up zlob_t with ALTDIRFUNC callbacks
-    var pzlob = zlob_t{
-        .zlo_pathc = 0,
-        .zlo_pathv = null,
-        .zlo_offs = 0,
-        .zlo_pathlen = undefined,
-        .zlo_flags = 0,
-        .zlo_opendir = MockDir.opendir,
-        .zlo_readdir = @ptrCast(&MockDir.readdir),
-        .zlo_closedir = MockDir.closedir,
-    };
-
-    // Get FsProvider from zlob_t
-    const fs_provider = pzlob.toFsProvider(ZLOB_ALTDIRFUNC);
-
-    // Open with ALTDIRFUNC via walker's unified DirIterator
-    var iter = walker_mod.DirIterator.openWithProvider("mock_path", null, walker_mod.HiddenConfig.include_all, fs_provider) catch |err| {
-        std.debug.print("Failed to open mock directory: {}\n", .{err});
-        return err;
-    };
-    defer iter.close();
-
-    // Verify we get the mock entries
-    var found_file1 = false;
-    var found_file2 = false;
-    var found_subdir = false;
-    var count: usize = 0;
-
-    while (iter.next()) |entry| {
-        if (mem.eql(u8, entry.name, "file1.txt")) {
-            found_file1 = true;
-            try testing.expectEqual(walker_mod.EntryKind.file, entry.kind);
-        } else if (mem.eql(u8, entry.name, "file2.zig")) {
-            found_file2 = true;
-            try testing.expectEqual(walker_mod.EntryKind.file, entry.kind);
-        } else if (mem.eql(u8, entry.name, "subdir")) {
-            found_subdir = true;
-            try testing.expectEqual(walker_mod.EntryKind.directory, entry.kind);
-        }
-        count += 1;
-    }
-
-    try testing.expectEqual(@as(usize, 3), count);
-    try testing.expect(found_file1);
-    try testing.expect(found_file2);
-    try testing.expect(found_subdir);
-}

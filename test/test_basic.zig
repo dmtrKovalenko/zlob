@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
+const zlob_flags = @import("zlob_flags");
 const test_utils = @import("test_utils");
 const zlobIsomorphicTest = test_utils.zlobIsomorphicTest;
 const TestResult = test_utils.TestResult;
@@ -187,7 +188,7 @@ test "matchPaths - NOSORT flag" {
         "b.txt",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "*.txt", &files, zlob.ZLOB_NOSORT);
+    var result = try zlob.matchPaths(testing.allocator, "*.txt", &files, zlob_flags.ZLOB_NOSORT);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);

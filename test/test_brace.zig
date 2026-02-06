@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
+const zlob_flags = @import("zlob_flags");
 const test_utils = @import("test_utils");
 const zlobIsomorphicTest = test_utils.zlobIsomorphicTest;
 const testMatchPathsOnly = test_utils.testMatchPathsOnly;
@@ -14,7 +15,7 @@ test "ZLOB_BRACE - basic brace expansion" {
         "d.txt",
     };
 
-    try zlobIsomorphicTest(&files, "{a,b,c}.txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{a,b,c}.txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("a.txt"));
@@ -34,7 +35,7 @@ test "ZLOB_BRACE - brace with wildcards" {
         "baz.txt",
     };
 
-    try zlobIsomorphicTest(&files, "{foo,bar}.*", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{foo,bar}.*", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(4, result.count);
             try testing.expect(result.hasPath("foo.txt"));
@@ -56,7 +57,7 @@ test "ZLOB_BRACE - wildcard with brace extension" {
         "readme.txt",
     };
 
-    try zlobIsomorphicTest(&files, "test.{txt,log,md}", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "test.{txt,log,md}", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("test.txt"));
@@ -77,7 +78,7 @@ test "ZLOB_BRACE - recursive" {
     };
 
     // Recursive + brace: use testMatchPathsOnly for deterministic results
-    try testMatchPathsOnly(&files, "**/*.{md,log}", zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, struct {
+    try testMatchPathsOnly(&files, "**/*.{md,log}", zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(4, result.count);
         }
@@ -95,7 +96,7 @@ test "ZLOB_BRACE - wildcard extension" {
         "readme.txt",
     };
 
-    try zlobIsomorphicTest(&files, "*.{txt,log,md}", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "*.{txt,log,md}", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(6, result.count);
         }
@@ -110,7 +111,7 @@ test "ZLOB_BRACE - two alternatives" {
         "test.h",
     };
 
-    try zlobIsomorphicTest(&files, "main.{c,h}", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "main.{c,h}", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(2, result.count);
             try testing.expect(result.hasPath("main.c"));
@@ -125,7 +126,7 @@ test "ZLOB_BRACE - single alternative" {
         "test.log",
     };
 
-    try zlobIsomorphicTest(&files, "test.{txt}", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "test.{txt}", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(1, result.count);
             try testing.expect(result.hasPath("test.txt"));
@@ -142,7 +143,7 @@ test "ZLOB_BRACE - multiple brace groups" {
         "c/x.txt",
     };
 
-    try zlobIsomorphicTest(&files, "{a,b}/{x,y}.txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{a,b}/{x,y}.txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(4, result.count);
             try testing.expect(result.hasPath("a/x.txt"));
@@ -178,7 +179,7 @@ test "ZLOB_BRACE - prefix and suffix" {
         "prefix_d_suffix.txt",
     };
 
-    try zlobIsomorphicTest(&files, "prefix_{a,b,c}_suffix.txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "prefix_{a,b,c}_suffix.txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("prefix_a_suffix.txt"));
@@ -198,7 +199,7 @@ test "ZLOB_BRACE - with paths" {
         "docs/readme.md",
     };
 
-    try zlobIsomorphicTest(&files, "{src,lib}/*.zig", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{src,lib}/*.zig", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(4, result.count);
             try testing.expect(result.hasPath("src/main.zig"));
@@ -217,7 +218,7 @@ test "ZLOB_BRACE - numeric alternatives" {
         "file4.txt",
     };
 
-    try zlobIsomorphicTest(&files, "file{1,2,3}.txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "file{1,2,3}.txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("file1.txt"));
@@ -236,7 +237,7 @@ test "ZLOB_BRACE - empty alternatives" {
     };
 
     // {,_suffix} should match both empty string and "_suffix"
-    try zlobIsomorphicTest(&files, "test{,_suffix}.txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "test{,_suffix}.txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(2, result.count);
             try testing.expect(result.hasPath("test.txt"));
@@ -257,7 +258,7 @@ test "ZLOB_BRACE - complex real-world pattern" {
         "docs/readme.md",
     };
 
-    try zlobIsomorphicTest(&files, "{src,lib}/*.{c,h}", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{src,lib}/*.{c,h}", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(6, result.count);
             try testing.expect(result.hasPath("src/main.c"));
@@ -276,7 +277,7 @@ test "ZLOB_BRACE - no matches" {
         "b.txt",
     };
 
-    try zlobIsomorphicTest(&files, "{x,y,z}.txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{x,y,z}.txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(0, result.count);
         }
@@ -292,7 +293,7 @@ test "ZLOB_BRACE - combined with character class" {
         "c1.txt",
     };
 
-    try zlobIsomorphicTest(&files, "{a,b}[12].txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{a,b}[12].txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(4, result.count);
             try testing.expect(result.hasPath("a1.txt"));
@@ -311,7 +312,7 @@ test "ZLOB_BRACE - long alternatives" {
         "very_long_alternative_name_three.txt",
     };
 
-    try zlobIsomorphicTest(&files, "very_long_alternative_name_{one,two,three}.txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "very_long_alternative_name_{one,two,three}.txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("very_long_alternative_name_one.txt"));
@@ -485,7 +486,7 @@ test "ZLOB_BRACE filesystem - simple extension alternatives" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -513,7 +514,7 @@ test "ZLOB_BRACE filesystem - wildcard with extension alternatives" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -541,7 +542,7 @@ test "ZLOB_BRACE filesystem - directory alternatives" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -568,7 +569,7 @@ test "ZLOB_BRACE filesystem - C source and header files" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -604,7 +605,7 @@ test "ZLOB_BRACE filesystem - recursive with extension alternatives" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -642,7 +643,7 @@ test "ZLOB_BRACE filesystem - recursive with directory alternatives" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -670,7 +671,7 @@ test "ZLOB_BRACE filesystem - complex pattern with multiple brace groups" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -701,7 +702,7 @@ test "ZLOB_BRACE filesystem - single alternative (should still work)" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -728,7 +729,7 @@ test "ZLOB_BRACE filesystem - many alternatives" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -755,10 +756,10 @@ test "ZLOB_BRACE filesystem - no matches returns NOMATCH" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, zlob.ZLOB_NOMATCH), result);
+    try testing.expectEqual(@as(c_int, zlob_flags.ZLOB_NOMATCH), result);
 }
 
 test "ZLOB_BRACE filesystem - without flag treats braces as literal" {
@@ -785,7 +786,7 @@ test "ZLOB_BRACE filesystem - without flag treats braces as literal" {
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Should not match anything because there's no file named "*.{toml,lock}"
-    try testing.expectEqual(@as(c_int, zlob.ZLOB_NOMATCH), result);
+    try testing.expectEqual(@as(c_int, zlob_flags.ZLOB_NOMATCH), result);
 }
 
 // ============================================================================
@@ -811,7 +812,7 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_MARK" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_MARK, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_MARK, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -843,7 +844,7 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_NOSORT" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_NOSORT, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_NOSORT, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -870,7 +871,7 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_NOCHECK" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_NOCHECK, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_NOCHECK, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -899,7 +900,7 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_ONLYDIR" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -931,7 +932,7 @@ test "ZLOB_BRACE filesystem - with ZLOB_APPEND" {
     // First glob: get .toml files
     const pattern1 = try allocator.dupeZ(u8, "*.toml");
     defer allocator.free(pattern1);
-    const result1 = c_lib.zlob(pattern1.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result1 = c_lib.zlob(pattern1.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     try testing.expectEqual(0, result1);
     const first_count = pzlob.zlo_pathc;
     try testing.expectEqual(1, first_count); // Cargo.toml
@@ -939,7 +940,7 @@ test "ZLOB_BRACE filesystem - with ZLOB_APPEND" {
     // Second glob: append .lock files
     const pattern2 = try allocator.dupeZ(u8, "*.lock");
     defer allocator.free(pattern2);
-    const result2 = c_lib.zlob(pattern2.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_APPEND, null, &pzlob);
+    const result2 = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_APPEND, null, &pzlob);
     defer c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result2);
@@ -970,7 +971,7 @@ test "ZLOB_BRACE filesystem - many files with brace pattern" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1001,7 +1002,7 @@ test "ZLOB_BRACE filesystem - Cargo pattern (Rust project)" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1029,7 +1030,7 @@ test "ZLOB_BRACE filesystem - documentation pattern" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1056,7 +1057,7 @@ test "ZLOB_BRACE filesystem - web assets pattern" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1083,7 +1084,7 @@ test "ZLOB_BRACE filesystem - config files pattern" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1110,7 +1111,7 @@ test "ZLOB_BRACE filesystem - header files in multiple directories" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE | zlob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1147,7 +1148,7 @@ test "ZLOB_BRACE filesystem - wildcard dir with brace extension" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1188,7 +1189,7 @@ test "ZLOB_BRACE filesystem - literal prefix with wildcard dir and brace extensi
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1216,7 +1217,7 @@ test "ZLOB_BRACE filesystem - question mark wildcard with brace extension" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1244,7 +1245,7 @@ test "ZLOB_BRACE filesystem - multiple wildcard dirs with brace extension" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1274,7 +1275,7 @@ test "ZLOB_BRACE filesystem - brace dir AND wildcard dir AND brace extension" {
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, zlob.ZLOB_BRACE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -1292,7 +1293,7 @@ test "ZLOB_BRACE - nested braces {a,{b,c}}.txt" {
     };
 
     // {a,{b,c}}.txt should expand to a.txt, b.txt, c.txt
-    try zlobIsomorphicTest(&files, "{a,{b,c}}.txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{a,{b,c}}.txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(@as(usize, 3), result.count);
             try testing.expect(result.hasPath("a.txt"));
@@ -1311,7 +1312,7 @@ test "ZLOB_BRACE - deeply nested braces {{a,b},{c,d}}.txt" {
     };
 
     // {{a,b},{c,d}}.txt should expand to a.txt, b.txt, c.txt, d.txt
-    try zlobIsomorphicTest(&files, "{{a,b},{c,d}}.txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{{a,b},{c,d}}.txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(@as(usize, 4), result.count);
             try testing.expect(result.hasPath("a.txt"));
@@ -1331,7 +1332,7 @@ test "ZLOB_BRACE - mixed nested {a,b,{c,d}}.txt" {
     };
 
     // {a,b,{c,d}}.txt should expand to a.txt, b.txt, c.txt, d.txt
-    try zlobIsomorphicTest(&files, "{a,b,{c,d}}.txt", zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{a,b,{c,d}}.txt", zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(@as(usize, 4), result.count);
             try testing.expect(result.hasPath("a.txt"));
@@ -1350,7 +1351,7 @@ test "combined flags - BRACE and NOCHECK" {
     // With BRACE + NOCHECK when NO alternatives match:
     // libc behavior: returns the ORIGINAL unexpanded pattern as a single result
     // (not each expanded alternative separately)
-    var result = try zlob.matchPaths(testing.allocator, "{x,y,z}.txt", &files, zlob.ZLOB_BRACE | zlob.ZLOB_NOCHECK);
+    var result = try zlob.matchPaths(testing.allocator, "{x,y,z}.txt", &files, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_NOCHECK);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.match_count);
@@ -1363,10 +1364,9 @@ test "combined flags - BRACE and NOCHECK" {
 
     // With BRACE + NOCHECK when SOME alternatives match:
     // libc behavior: returns only the matching files (not the non-matching patterns)
-    var resultPartial = try zlob.matchPaths(testing.allocator, "{a,x,y}.txt", &filesPartial, zlob.ZLOB_BRACE | zlob.ZLOB_NOCHECK);
+    var resultPartial = try zlob.matchPaths(testing.allocator, "{a,x,y}.txt", &filesPartial, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_NOCHECK);
     defer resultPartial.deinit();
 
     try testing.expectEqual(@as(usize, 1), resultPartial.match_count);
     try testing.expectEqualStrings("a.txt", resultPartial.paths[0]);
 }
-

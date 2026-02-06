@@ -9,6 +9,10 @@
 const std = @import("std");
 const glob = @import("zlob");
 
+// Re-export the flags module as a namespace
+// Consumers access constants via zlob.flags.ZLOB_MARK, zlob.flags.ZlobFlags, etc.
+pub const flags = @import("zlob_flags");
+
 // Re-export modules through zlob_core to avoid module conflicts
 pub const fnmatch = glob.fnmatch;
 pub const pattern_context = glob.pattern_context;
@@ -20,29 +24,6 @@ pub const analyzePattern = glob.analyzePattern;
 pub const simdFindChar = glob.simdFindChar;
 pub const hasWildcardsSIMD = glob.hasWildcardsSIMD;
 pub const ZlobFlags = glob.ZlobFlags;
-
-// used mostloy by the tests
-pub const ZLOB_APPEND = glob.ZLOB_APPEND;
-pub const ZLOB_DOOFFS = glob.ZLOB_DOOFFS;
-pub const ZLOB_ERR = glob.ZLOB_ERR;
-pub const ZLOB_MARK = glob.ZLOB_MARK;
-pub const ZLOB_NOCHECK = glob.ZLOB_NOCHECK;
-pub const ZLOB_NOSORT = glob.ZLOB_NOSORT;
-pub const ZLOB_NOESCAPE = glob.ZLOB_NOESCAPE;
-pub const ZLOB_MAGCHAR = glob.ZLOB_MAGCHAR;
-pub const ZLOB_NOMAGIC = glob.ZLOB_NOMAGIC;
-pub const ZLOB_TILDE = glob.ZLOB_TILDE;
-pub const ZLOB_BRACE = glob.ZLOB_BRACE;
-pub const ZLOB_PERIOD = glob.ZLOB_PERIOD;
-pub const ZLOB_ONLYDIR = glob.ZLOB_ONLYDIR;
-pub const ZLOB_TILDE_CHECK = glob.ZLOB_TILDE_CHECK;
-pub const ZLOB_GITIGNORE = glob.ZLOB_GITIGNORE;
-pub const ZLOB_DOUBLESTAR_RECURSIVE = glob.ZLOB_DOUBLESTAR_RECURSIVE;
-pub const ZLOB_EXTGLOB = glob.ZLOB_EXTGLOB;
-pub const ZLOB_RECOMMENDED = glob.ZLOB_RECOMMENDED;
-pub const ZLOB_NOSPACE = glob.ZLOB_NOSPACE;
-pub const ZLOB_ABORTED = glob.ZLOB_ABORTED;
-pub const ZLOB_NOMATCH = glob.ZLOB_NOMATCH;
 
 /// Perform file system walking and collect matching results to GlobResults
 ///
@@ -59,7 +40,7 @@ pub const ZLOB_NOMATCH = glob.ZLOB_NOMATCH;
 ///
 /// Example with integer flags (legacy):
 /// ```zig
-/// if (try zlob.match(allocator, "**/*.zig", zlob.ZLOB_BRACE | zlob.ZLOB_GITIGNORE)) |*result| {
+/// if (try zlob.match(allocator, "**/*.zig", zlob.flags.ZLOB_BRACE | zlob.flags.ZLOB_GITIGNORE)) |*result| {
 ///     defer result.deinit();
 ///     for (result.paths) |path| {
 ///         std.debug.print("{s}\n", .{path});

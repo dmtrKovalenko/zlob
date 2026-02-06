@@ -9,6 +9,7 @@
 const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
+const zlob_flags = @import("zlob_flags");
 const fnmatch = zlob.fnmatch;
 const test_utils = @import("test_utils");
 const testMatchPathsOnly = test_utils.testMatchPathsOnly;
@@ -141,7 +142,7 @@ test "matchPaths - double star in matchPaths" {
         "b.txt",
     };
 
-    var result = try zlob.matchPaths(testing.allocator, "**/*.txt", &files, zlob.ZLOB_DOUBLESTAR_RECURSIVE);
+    var result = try zlob.matchPaths(testing.allocator, "**/*.txt", &files, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 3), result.match_count);

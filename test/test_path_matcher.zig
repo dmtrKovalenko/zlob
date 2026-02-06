@@ -1,12 +1,13 @@
 const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
+const zlob_flags = @import("zlob_flags");
 
 // Create alias for easier access
 const matchPaths = zlob.matchPaths;
-const ZLOB_NOSORT = zlob.ZLOB_NOSORT;
-const ZLOB_NOCHECK = zlob.ZLOB_NOCHECK;
-const ZLOB_PERIOD = zlob.ZLOB_PERIOD;
+const ZLOB_NOSORT = zlob_flags.ZLOB_NOSORT;
+const ZLOB_NOCHECK = zlob_flags.ZLOB_NOCHECK;
+const ZLOB_PERIOD = zlob_flags.ZLOB_PERIOD;
 
 // Test basic ** patterns
 

@@ -6,6 +6,7 @@
 const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
+const zlob_flags = @import("zlob_flags");
 const test_utils = @import("test_utils");
 const zlobIsomorphicTest = test_utils.zlobIsomorphicTest;
 const testMatchPathsOnly = test_utils.testMatchPathsOnly;
@@ -18,7 +19,7 @@ const TestResult = test_utils.TestResult;
 test "@(pattern) matches exactly one alternative" {
     const files = [_][]const u8{ "foo.js", "bar.js", "baz.js", "qux.js" };
 
-    try zlobIsomorphicTest(&files, "@(foo|bar).js", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "@(foo|bar).js", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(2, result.count);
             try testing.expect(result.hasPath("foo.js"));
@@ -32,7 +33,7 @@ test "@(pattern) matches exactly one alternative" {
 test "@(a|b|c) multiple alternatives" {
     const files = [_][]const u8{ "test.c", "test.h", "test.cpp", "test.txt" };
 
-    try zlobIsomorphicTest(&files, "test.@(c|h|cpp)", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "test.@(c|h|cpp)", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("test.c"));
@@ -46,7 +47,7 @@ test "@(a|b|c) multiple alternatives" {
 test "*.@(js|ts) extension matching" {
     const files = [_][]const u8{ "app.js", "app.ts", "app.zig", "index.js", "index.json", "style.zig" };
 
-    try zlobIsomorphicTest(&files, "*.@(js|ts)", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "*.@(js|ts)", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("app.js"));
@@ -59,7 +60,7 @@ test "*.@(js|ts) extension matching" {
 test "@(foo) single alternative" {
     const files = [_][]const u8{ "foo.txt", "bar.txt" };
 
-    try zlobIsomorphicTest(&files, "@(foo).txt", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "@(foo).txt", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(1, result.count);
             try testing.expect(result.hasPath("foo.txt"));
@@ -74,7 +75,7 @@ test "@(foo) single alternative" {
 test "?(pattern) matches zero occurrences" {
     const files = [_][]const u8{ "test.txt", "test_suffix.txt" };
 
-    try zlobIsomorphicTest(&files, "test?(_suffix).txt", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "test?(_suffix).txt", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(2, result.count);
             try testing.expect(result.hasPath("test.txt"));
@@ -86,7 +87,7 @@ test "?(pattern) matches zero occurrences" {
 test "?(pattern) matches one occurrence" {
     const files = [_][]const u8{ "file.txt", "file.backup.txt" };
 
-    try zlobIsomorphicTest(&files, "file?(.backup).txt", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "file?(.backup).txt", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(2, result.count);
         }
@@ -96,7 +97,7 @@ test "?(pattern) matches one occurrence" {
 test "?(a|b) with multiple alternatives" {
     const files = [_][]const u8{ "main.c", "main_debug.c", "main_release.c", "main_test.c" };
 
-    try zlobIsomorphicTest(&files, "main?(_debug|_release).c", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "main?(_debug|_release).c", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.hasPath("main.c"));
@@ -114,7 +115,7 @@ test "?(a|b) with multiple alternatives" {
 test "*(pattern) matches zero occurrences" {
     const files = [_][]const u8{ "ab", "aXb", "aXXb" };
 
-    try zlobIsomorphicTest(&files, "a*(X)b", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "a*(X)b", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
         }
@@ -124,7 +125,7 @@ test "*(pattern) matches zero occurrences" {
 test "*(pattern) matches multiple occurrences" {
     const files = [_][]const u8{ "test", "testABC", "testABCABC", "testABCABCABC" };
 
-    try zlobIsomorphicTest(&files, "test*(ABC)", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "test*(ABC)", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(4, result.count);
         }
@@ -138,7 +139,7 @@ test "*(pattern) matches multiple occurrences" {
 test "+(pattern) requires at least one match" {
     const files = [_][]const u8{ "ab", "aXb", "aXXb", "aXXXb" };
 
-    try zlobIsomorphicTest(&files, "a+(X)b", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "a+(X)b", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             // Should NOT match "ab" (zero X's), but should match the others
             try testing.expectEqual(3, result.count);
@@ -153,7 +154,7 @@ test "+(pattern) requires at least one match" {
 test "+(a|b) with alternatives" {
     const files = [_][]const u8{ "X", "Xa", "Xb", "Xab", "Xba", "Xaaa" };
 
-    try zlobIsomorphicTest(&files, "X+(a|b)", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "X+(a|b)", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             // Should NOT match "X" (zero occurrences)
             try testing.expectEqual(5, result.count);
@@ -169,7 +170,7 @@ test "+(a|b) with alternatives" {
 test "*.!(js) matches non-js files" {
     const files = [_][]const u8{ "app.js", "app.json", "app.ts", "app.zig", "app.html" };
 
-    try zlobIsomorphicTest(&files, "*.!(js)", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "*.!(js)", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(4, result.count);
             try testing.expect(result.noPathEndsWith(".js"));
@@ -184,7 +185,7 @@ test "*.!(js) matches non-js files" {
 test "*.!(js|ts) matches non-js-ts files" {
     const files = [_][]const u8{ "app.js", "app.ts", "app.zig", "app.html", "app.json" };
 
-    try zlobIsomorphicTest(&files, "*.!(js|ts)", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "*.!(js|ts)", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.noPathEndsWith(".js"));
@@ -196,7 +197,7 @@ test "*.!(js|ts) matches non-js-ts files" {
 test "prefix.!(ext) with prefix" {
     const files = [_][]const u8{ "config.json", "config.yaml", "config.yml", "config.toml" };
 
-    try zlobIsomorphicTest(&files, "config.!(json)", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "config.!(json)", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.noPathEndsWith(".json"));
@@ -207,7 +208,7 @@ test "prefix.!(ext) with prefix" {
 test "negation with wildcards *.!(j*)" {
     const files = [_][]const u8{ "app.js", "app.json", "app.jsx", "app.zig", "app.txt" };
 
-    try zlobIsomorphicTest(&files, "*.!(j*)", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "*.!(j*)", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(2, result.count);
             // Should not include files with extension starting with 'j'
@@ -234,7 +235,7 @@ test "**/*.!(js) recursive negation" {
         "test/test.txt",
     };
 
-    try zlobIsomorphicTest(&files, "**/*.!(js)", zlob.ZLOB_EXTGLOB | zlob.ZLOB_DOUBLESTAR_RECURSIVE, struct {
+    try zlobIsomorphicTest(&files, "**/*.!(js)", zlob_flags.ZLOB_EXTGLOB | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(result.noPathEndsWith(".js"));
@@ -250,7 +251,7 @@ test "**/@(foo|bar)/*.txt recursive with extglob directory" {
         "lib/foo/data.txt",
     };
 
-    try zlobIsomorphicTest(&files, "**/@(foo|bar)/*.txt", zlob.ZLOB_EXTGLOB | zlob.ZLOB_DOUBLESTAR_RECURSIVE, struct {
+    try zlobIsomorphicTest(&files, "**/@(foo|bar)/*.txt", zlob_flags.ZLOB_EXTGLOB | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(!result.hasPathEndingWith("baz/test.txt"));
@@ -265,7 +266,7 @@ test "**/@(foo|bar)/*.txt recursive with extglob directory" {
 test "@() combined with regular wildcards" {
     const files = [_][]const u8{ "test_foo.c", "test_bar.c", "test_baz.h", "other_foo.c" };
 
-    try zlobIsomorphicTest(&files, "test_@(foo|bar).*", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "test_@(foo|bar).*", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(2, result.count);
             try testing.expect(result.hasPath("test_foo.c"));
@@ -277,7 +278,7 @@ test "@() combined with regular wildcards" {
 test "complex pattern with multiple extglobs" {
     const files = [_][]const u8{ "src/main.c", "lib/util.c", "src/main.h", "test/test.c" };
 
-    try zlobIsomorphicTest(&files, "@(src|lib)/*.@(c|h)", zlob.ZLOB_EXTGLOB, struct {
+    try zlobIsomorphicTest(&files, "@(src|lib)/*.@(c|h)", zlob_flags.ZLOB_EXTGLOB, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(3, result.count);
             try testing.expect(!result.hasPathEndingWith("test/test.c"));
@@ -288,7 +289,7 @@ test "complex pattern with multiple extglobs" {
 test "extglob combined with brace expansion" {
     const files = [_][]const u8{ "src/main.c", "src/main.h", "lib/util.c", "lib/util.h" };
 
-    try zlobIsomorphicTest(&files, "{src,lib}/*.!(h)", zlob.ZLOB_EXTGLOB | zlob.ZLOB_BRACE, struct {
+    try zlobIsomorphicTest(&files, "{src,lib}/*.!(h)", zlob_flags.ZLOB_EXTGLOB | zlob_flags.ZLOB_BRACE, struct {
         fn assert(result: TestResult) !void {
             try testing.expectEqual(2, result.count);
             // Should only include .c files

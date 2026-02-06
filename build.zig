@@ -40,6 +40,14 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    // Flags module (canonical source of all ZLOB_* constants)
+    const flags_mod = b.addModule("zlob_flags", .{
+        .root_source_file = b.path("src/flags.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+    flags_mod.addIncludePath(b.path("include"));
+
     // zlob core module (for internal use - the actual implementation in zlob.zig)
     const zlob_core_mod = b.addModule("zlob_core", .{
         .root_source_file = b.path("src/zlob.zig"),
@@ -47,6 +55,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "walker", .module = walker_mod },
+            .{ .name = "zlob_flags", .module = flags_mod },
         },
     });
     // Add include path for C header imports (flags.zig uses @cImport)
@@ -67,6 +76,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "zlob", .module = zlob_core_mod },
+            .{ .name = "zlob_flags", .module = flags_mod },
         },
     });
 
@@ -77,6 +87,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "zlob", .module = zlob_core_mod },
+            .{ .name = "zlob_flags", .module = flags_mod },
         },
     });
 
@@ -102,6 +113,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "zlob", .module = zlob_core_mod },
+                .{ .name = "zlob_flags", .module = flags_mod },
             },
         }),
     });
@@ -120,6 +132,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "zlob", .module = zlob_core_mod },
+                .{ .name = "zlob_flags", .module = flags_mod },
             },
         }),
     });
@@ -228,6 +241,7 @@ pub fn build(b: *std.Build) void {
         "src/brace_optimizer.zig",
         "src/gitignore.zig",
         "src/fnmatch.zig",
+        "src/sorting.zig",
     };
 
     for (test_files) |test_file| {
@@ -242,6 +256,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "c_lib", .module = c_lib_mod },
                 .{ .name = "test_utils", .module = test_utils_mod },
                 .{ .name = "walker", .module = walker_mod },
+                .{ .name = "zlob_flags", .module = flags_mod },
             },
         });
         // Add include path for C header imports (flags.zig uses @cImport)
@@ -382,6 +397,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zlob", .module = mod },
                 .{ .name = "c_lib", .module = c_lib_mod },
+                .{ .name = "zlob_flags", .module = flags_mod },
             },
         }),
     });
@@ -402,6 +418,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zlob", .module = mod },
                 .{ .name = "c_lib", .module = c_lib_mod },
+                .{ .name = "zlob_flags", .module = flags_mod },
             },
         }),
     });

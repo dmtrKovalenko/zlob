@@ -1,7 +1,9 @@
 const std = @import("std");
 const zlob_impl = @import("zlob");
+const zlob_flags = @import("zlob_flags");
 
 const mem = std.mem;
+const ZlobFlags = zlob_flags.ZlobFlags;
 
 pub const zlob_t = zlob_impl.zlob_t;
 pub const zlob_dirent_t = zlob_impl.zlob_dirent_t;
@@ -18,37 +20,6 @@ pub const zlob_slice_t = extern struct {
     len: usize,
 };
 
-// Re-export flags from zlob module
-pub const ZlobFlags = zlob_impl.ZlobFlags;
-
-// Standard POSIX glob flags
-pub const ZLOB_ERR = zlob_impl.ZLOB_ERR;
-pub const ZLOB_MARK = zlob_impl.ZLOB_MARK;
-pub const ZLOB_NOSORT = zlob_impl.ZLOB_NOSORT;
-pub const ZLOB_DOOFFS = zlob_impl.ZLOB_DOOFFS;
-pub const ZLOB_NOCHECK = zlob_impl.ZLOB_NOCHECK;
-pub const ZLOB_APPEND = zlob_impl.ZLOB_APPEND;
-pub const ZLOB_NOESCAPE = zlob_impl.ZLOB_NOESCAPE;
-pub const ZLOB_PERIOD = zlob_impl.ZLOB_PERIOD;
-
-pub const ZLOB_MAGCHAR = zlob_impl.ZLOB_MAGCHAR;
-pub const ZLOB_ALTDIRFUNC = zlob_impl.ZLOB_ALTDIRFUNC;
-pub const ZLOB_BRACE = zlob_impl.ZLOB_BRACE;
-pub const ZLOB_NOMAGIC = zlob_impl.ZLOB_NOMAGIC;
-pub const ZLOB_TILDE = zlob_impl.ZLOB_TILDE;
-pub const ZLOB_ONLYDIR = zlob_impl.ZLOB_ONLYDIR;
-pub const ZLOB_TILDE_CHECK = zlob_impl.ZLOB_TILDE_CHECK;
-
-pub const ZLOB_GITIGNORE = zlob_impl.ZLOB_GITIGNORE;
-pub const ZLOB_DOUBLESTAR_RECURSIVE = zlob_impl.ZLOB_DOUBLESTAR_RECURSIVE;
-pub const ZLOB_EXTGLOB = zlob_impl.ZLOB_EXTGLOB;
-pub const ZLOB_RECOMMENDED = zlob_impl.ZLOB_RECOMMENDED;
-
-pub const ZLOB_NOSPACE = zlob_impl.ZLOB_NOSPACE;
-pub const ZLOB_ABORTED = zlob_impl.ZLOB_ABORTED;
-pub const ZLOB_NOMATCH = zlob_impl.ZLOB_NOMATCH;
-
-const ZLOB_FLAGS_SHARED_STRINGS = zlob_impl.ZLOB_FLAGS_SHARED_STRINGS;
 
 pub fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) callconv(.c) c_int {
     const allocator = std.heap.c_allocator;
@@ -57,12 +28,12 @@ pub fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfun
         if (opt_result) |_| {
             return 0; // Success with matches
         } else {
-            return ZLOB_NOMATCH; // No matches
+            return zlob_flags.ZLOB_NOMATCH; // No matches
         }
     } else |err| {
         return switch (err) {
-            error.OutOfMemory => ZLOB_NOSPACE,
-            error.Aborted => ZLOB_ABORTED,
+            error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
+            error.Aborted => zlob_flags.ZLOB_ABORTED,
         };
     }
 }
@@ -78,7 +49,7 @@ comptime {
 }
 
 /// Glob within a specific base directory.
-/// base_path must be an absolute path (starts with '/'), otherwise returns ZLOB_ABORTED.
+/// base_path must be an absolute path (starts with '/'), otherwise returns zlob_flags.ZLOB_ABORTED.
 /// This is the C-compatible version of globAt().
 pub fn zlob_at(
     base_path: [*:0]const u8,
@@ -94,12 +65,12 @@ pub fn zlob_at(
         if (opt_result) |_| {
             return 0; // Success with matches
         } else {
-            return ZLOB_NOMATCH; // No matches
+            return zlob_flags.ZLOB_NOMATCH; // No matches
         }
     } else |err| {
         return switch (err) {
-            error.OutOfMemory => ZLOB_NOSPACE,
-            error.Aborted => ZLOB_ABORTED,
+            error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
+            error.Aborted => zlob_flags.ZLOB_ABORTED,
         };
     }
 }
@@ -127,7 +98,7 @@ pub export fn zlob_match_paths(
     const zig_paths_storage = if (path_count <= STACK_LIMIT)
         stack_buf[0..path_count]
     else
-        allocator.alloc([]const u8, path_count) catch return ZLOB_NOSPACE;
+        allocator.alloc([]const u8, path_count) catch return zlob_flags.ZLOB_NOSPACE;
     defer if (path_count > STACK_LIMIT) allocator.free(zig_paths_storage);
 
     for (0..path_count) |i| {
@@ -136,21 +107,21 @@ pub export fn zlob_match_paths(
 
     var results = zlob_impl.path_matcher.matchPaths(allocator, pattern_slice, zig_paths_storage, ZlobFlags.fromInt(flags)) catch |err| {
         return switch (err) {
-            error.OutOfMemory => ZLOB_NOSPACE,
+            error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
         };
     };
     defer results.deinit();
 
     if (results.match_count == 0) {
-        return ZLOB_NOMATCH;
+        return zlob_flags.ZLOB_NOMATCH;
     }
 
-    const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return ZLOB_NOSPACE;
+    const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return zlob_flags.ZLOB_NOSPACE;
     errdefer allocator.free(pathv_buf);
 
     const pathlen_buf = allocator.alloc(usize, results.match_count) catch {
         allocator.free(pathv_buf);
-        return ZLOB_NOSPACE;
+        return zlob_flags.ZLOB_NOSPACE;
     };
 
     for (results.paths, 0..) |path, i| {
@@ -163,7 +134,7 @@ pub export fn zlob_match_paths(
     pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
     pzlob.zlo_offs = 0;
     pzlob.zlo_pathlen = pathlen_buf.ptr;
-    pzlob.zlo_flags = ZLOB_FLAGS_SHARED_STRINGS;
+    pzlob.zlo_flags = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
 
     return 0;
 }
@@ -185,21 +156,21 @@ pub export fn zlob_match_paths_slice(
 
     var results = zlob_impl.path_matcher.matchPaths(allocator, pattern_slice, zig_paths, ZlobFlags.fromInt(flags)) catch |err| {
         return switch (err) {
-            error.OutOfMemory => ZLOB_NOSPACE,
+            error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
         };
     };
     defer results.deinit();
 
     if (results.match_count == 0) {
-        return ZLOB_NOMATCH;
+        return zlob_flags.ZLOB_NOMATCH;
     }
 
-    const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return ZLOB_NOSPACE;
+    const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return zlob_flags.ZLOB_NOSPACE;
     errdefer allocator.free(pathv_buf);
 
     const pathlen_buf = allocator.alloc(usize, results.match_count) catch {
         allocator.free(pathv_buf);
-        return ZLOB_NOSPACE;
+        return zlob_flags.ZLOB_NOSPACE;
     };
 
     for (results.paths, 0..) |path, i| {
@@ -212,7 +183,7 @@ pub export fn zlob_match_paths_slice(
     pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
     pzlob.zlo_offs = 0;
     pzlob.zlo_pathlen = pathlen_buf.ptr;
-    pzlob.zlo_flags = ZLOB_FLAGS_SHARED_STRINGS;
+    pzlob.zlo_flags = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
 
     return 0;
 }

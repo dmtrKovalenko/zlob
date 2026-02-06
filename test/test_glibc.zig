@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const glob = @import("zlob"); // For direct zlob types
+const zlob_flags = @import("zlob_flags");
 const c_lib = @import("c_lib");
 const c = std.c;
 
@@ -106,7 +107,7 @@ test "recursive glob - **/*.c finds all C files" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -139,7 +140,7 @@ test "recursive glob - dir1/**/*.c finds C files in dir1" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -170,7 +171,7 @@ test "recursive glob - **/*.h finds all header files" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -201,7 +202,7 @@ test "recursive glob - dir2/**/*.c finds files in dir2 subdirectories" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -232,7 +233,7 @@ test "recursive glob - **/*.txt finds all text files" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result);
@@ -263,10 +264,10 @@ test "recursive glob - no matches returns ZLOB_NOMATCH" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
 
     // Recursive glob returns ZLOB_NOMATCH when no matches found (consistent with glibc)
-    try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
+    try testing.expectEqual(@as(c_int, zlob_flags.ZLOB_NOMATCH), result);
 }
 
 test "recursive glob - ZLOB_APPEND correctly accumulates results" {
@@ -293,7 +294,7 @@ test "recursive glob - ZLOB_APPEND correctly accumulates results" {
     // First glob for .c files
     const pattern1 = try allocator.dupeZ(u8, "**/*.c");
     defer allocator.free(pattern1);
-    const result1 = c_lib.zlob(pattern1.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result1 = c_lib.zlob(pattern1.ptr, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     try testing.expectEqual(0, result1);
     const first_count = pzlob.zlo_pathc;
     try testing.expectEqual(8, first_count);
@@ -301,7 +302,7 @@ test "recursive glob - ZLOB_APPEND correctly accumulates results" {
     // Second glob for .h files with ZLOB_APPEND
     const pattern2 = try allocator.dupeZ(u8, "**/*.h");
     defer allocator.free(pattern2);
-    const result2 = c_lib.zlob(pattern2.ptr, glob.ZLOB_APPEND | glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result2 = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_APPEND | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer c_lib.zlobfree(&pzlob);
 
     try testing.expectEqual(0, result2);
@@ -332,11 +333,11 @@ test "recursive glob - empty pattern component" {
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
-    const result = c_lib.zlob(pattern.ptr, glob.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer if (result == 0) c_lib.zlobfree(&pzlob);
 
     // Should handle gracefully, either finding directories or returning NOMATCH
-    try testing.expect(result == 0 or result == glob.ZLOB_NOMATCH);
+    try testing.expect(result == 0 or result == zlob_flags.ZLOB_NOMATCH);
 }
 
 test "glibc compatible - ** treated as * without ZLOB_DOUBLESTAR_RECURSIVE" {
@@ -501,7 +502,7 @@ test "zlob_match_paths - no matches returns ZLOB_NOMATCH" {
     var pzlob: glob.zlob_t = undefined;
     const result = c_lib.zlob_match_paths("*.c", &paths, paths.len, 0, &pzlob);
 
-    try testing.expectEqual(@as(c_int, glob.ZLOB_NOMATCH), result);
+    try testing.expectEqual(@as(c_int, zlob_flags.ZLOB_NOMATCH), result);
 }
 
 test "zlob_match_paths - complex pattern" {

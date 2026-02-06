@@ -1,5 +1,6 @@
 const std = @import("std");
 const c_lib = @import("c_lib");
+const zlob_flags = @import("zlob_flags");
 const zlob_t = c_lib.zlob_t;
 
 const TestCase = struct {
@@ -62,7 +63,7 @@ pub fn main() !void {
         // Warmup run to avoid cold cache
         {
             var pzlob: zlob_t = undefined;
-            const result = c_lib.zlob(tc.pattern.ptr, c_lib.ZLOB_RECOMMENDED, null, &pzlob);
+            const result = c_lib.zlob(tc.pattern.ptr, zlob_flags.ZLOB_RECOMMENDED, null, &pzlob);
             if (result == 0) {
                 std.debug.print("  Matches: {d}\n", .{pzlob.zlo_pathc});
                 c_lib.zlobfree(&pzlob);
@@ -79,7 +80,7 @@ pub fn main() !void {
         var matches_this_test: usize = 0;
         while (i < tc.iterations) : (i += 1) {
             var pzlob: zlob_t = undefined;
-            const result = c_lib.zlob(tc.pattern.ptr, c_lib.ZLOB_RECOMMENDED, null, &pzlob);
+            const result = c_lib.zlob(tc.pattern.ptr, zlob_flags.ZLOB_RECOMMENDED, null, &pzlob);
             if (result == 0) {
                 matches_this_test = pzlob.zlo_pathc;
                 c_lib.zlobfree(&pzlob);

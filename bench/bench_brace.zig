@@ -1,5 +1,6 @@
 const std = @import("std");
 const c_lib = @import("c_lib");
+const zlob_flags = @import("zlob_flags");
 const zlob_t = c_lib.zlob_t;
 
 const Timer = std.time.Timer;
@@ -53,7 +54,7 @@ fn getRepoPath(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 fn runBenchmark(tc: TestCase, warmup_iterations: usize) !BenchmarkResult {
-    const flags: c_int = c_lib.ZLOB_RECOMMENDED | c_lib.ZLOB_GITIGNORE;
+    const flags: c_int = zlob_flags.ZLOB_RECOMMENDED | zlob_flags.ZLOB_GITIGNORE;
     var matches: usize = 0;
     for (0..warmup_iterations) |_| {
         var pzlob: zlob_t = undefined;
