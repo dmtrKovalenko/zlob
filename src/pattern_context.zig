@@ -67,11 +67,8 @@ pub const PatternContext = struct {
         else
             .{ null, null };
 
-        // Extract required last character for early rejection
         const required_last_char = extractRequiredLastChar(pattern);
-
-        // Detect pattern template and pre-compile bracket if applicable
-        const template_info = detectPatternTemplate(pattern);
+        const template_info = detectPatternTemplate(pattern, has_wildcards);
 
         return PatternContext{
             .pattern = pattern,
@@ -154,13 +151,17 @@ fn findClosingBracket(pattern: []const u8, bracket_start: usize) ?usize {
     return null; // No closing bracket found
 }
 
-/// Detect the pattern template for fast-path matching
-fn detectPatternTemplate(pattern: []const u8) struct { template: PatternTemplate, prefix: []const u8, suffix: []const u8, bracket_bitmap: ?BracketBitmap } {
+/// Detect the pattern template for fast-path matching.
+/// Accepts pre-computed has_wildcards to avoid redundant SIMD scan.
+fn detectPatternTemplate(pattern: []const u8, has_wildcards: bool) struct { template: PatternTemplate, prefix: []const u8, suffix: []const u8, bracket_bitmap: ?BracketBitmap } {
+    // Check for escape sequences once - used by both branches
+    const has_escapes = mem.indexOfScalar(u8, pattern, '\\') != null;
+
     // Check for literal (no wildcards)
-    if (!hasWildcardsSIMD(pattern)) {
+    if (!has_wildcards) {
         // Also check for escape sequences - if present, we can't use literal fast path
         // because the pattern needs escape processing
-        if (mem.indexOfScalar(u8, pattern, '\\') != null) {
+        if (has_escapes) {
             return .{ .template = .none, .prefix = "", .suffix = "", .bracket_bitmap = null };
         }
         return .{ .template = .literal, .prefix = pattern, .suffix = "", .bracket_bitmap = null };
@@ -168,7 +169,7 @@ fn detectPatternTemplate(pattern: []const u8) struct { template: PatternTemplate
 
     // If pattern contains escape sequences, don't use template optimization
     // because templates don't handle POSIX escape processing
-    if (mem.indexOfScalar(u8, pattern, '\\') != null) {
+    if (has_escapes) {
         return .{ .template = .none, .prefix = "", .suffix = "", .bracket_bitmap = null };
     }
 
@@ -331,13 +332,16 @@ fn extractRequiredLastChar(pattern: []const u8) ?u8 {
 }
 
 pub fn indexOfCharSIMD(s: []const u8, needle: u8) ?usize {
-    if (s.len >= 32) {
-        const Vec32 = @Vector(32, u8);
-        const needle_vec: Vec32 = @splat(needle);
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
+
+    if (s.len >= vec_len) {
+        const Vec = @Vector(vec_len, u8);
+        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const needle_vec: Vec = @splat(needle);
         var i: usize = 0;
-        while (i + 32 <= s.len) : (i += 32) {
-            const chunk: Vec32 = s[i..][0..32].*;
-            const mask = @as(u32, @bitCast(chunk == needle_vec));
+        while (i + vec_len <= s.len) : (i += vec_len) {
+            const chunk: Vec = s[i..][0..vec_len].*;
+            const mask = @as(MaskInt, @bitCast(chunk == needle_vec));
             if (mask != 0) return i + @ctz(mask);
         }
 
@@ -351,18 +355,21 @@ pub fn indexOfCharSIMD(s: []const u8, needle: u8) ?usize {
 
 /// SIMD-accelerated lastIndexOf for a single byte. Returns the index of last occurrence.
 pub fn lastIndexOfCharSIMD(s: []const u8, needle: u8) ?usize {
-    if (s.len >= 32) {
-        const Vec32 = @Vector(32, u8);
-        const needle_vec: Vec32 = @splat(needle);
-        // Start from the end, processing 32 bytes at a time
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
+    const MaskInt = std.meta.Int(.unsigned, vec_len);
+
+    if (s.len >= vec_len) {
+        const Vec = @Vector(vec_len, u8);
+        const needle_vec: Vec = @splat(needle);
+        // Start from the end, processing vec_len bytes at a time
         var i: usize = s.len;
-        while (i >= 32) {
-            i -= 32;
-            const chunk: Vec32 = s[i..][0..32].*;
-            const mask = @as(u32, @bitCast(chunk == needle_vec));
+        while (i >= vec_len) {
+            i -= vec_len;
+            const chunk: Vec = s[i..][0..vec_len].*;
+            const mask = @as(MaskInt, @bitCast(chunk == needle_vec));
             if (mask != 0) {
-                // Find highest set bit (31 - leading zeros)
-                return i + 31 - @clz(mask);
+                // Find highest set bit
+                return i + vec_len - 1 - @clz(mask);
             }
         }
         // Handle remainder at start (scan backwards)
@@ -379,20 +386,23 @@ pub fn lastIndexOfCharSIMD(s: []const u8, needle: u8) ?usize {
 }
 
 pub fn hasWildcardsSIMD(s: []const u8) bool {
-    if (s.len >= 32) {
-        const Vec32 = @Vector(32, u8);
-        const star_vec: Vec32 = @splat('*');
-        const question_vec: Vec32 = @splat('?');
-        const bracket_vec: Vec32 = @splat('[');
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
+
+    if (s.len >= vec_len) {
+        const Vec = @Vector(vec_len, u8);
+        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const star_vec: Vec = @splat('*');
+        const question_vec: Vec = @splat('?');
+        const bracket_vec: Vec = @splat('[');
 
         var i: usize = 0;
-        while (i + 32 <= s.len) : (i += 32) {
-            const chunk: Vec32 = s[i..][0..32].*;
+        while (i + vec_len <= s.len) : (i += vec_len) {
+            const chunk: Vec = s[i..][0..vec_len].*;
             const has_star = chunk == star_vec;
             const has_question = chunk == question_vec;
             const has_bracket = chunk == bracket_vec;
             const combined = has_star | has_question | has_bracket;
-            const mask = @as(u32, @bitCast(combined));
+            const mask = @as(MaskInt, @bitCast(combined));
             if (mask != 0) return true;
         }
         for (s[i..]) |ch| {
@@ -408,9 +418,52 @@ pub fn hasWildcardsSIMD(s: []const u8) bool {
 
 /// Check if pattern contains extglob sequences: ?( *( +( @( !(
 /// These are two-character sequences where the second char is '('
+/// Uses SIMD to quickly scan for '(' characters, then checks preceding byte.
 pub fn containsExtglob(s: []const u8) bool {
     if (s.len < 2) return false;
 
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
+
+    if (s.len >= vec_len + 1) {
+        const Vec = @Vector(vec_len, u8);
+        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const paren_vec: Vec = @splat('(');
+
+        // Start from index 1 since we need to check s[i-1]
+        var i: usize = 1;
+        while (i + vec_len <= s.len) : (i += vec_len) {
+            const chunk: Vec = s[i..][0..vec_len].*;
+            const mask = @as(MaskInt, @bitCast(chunk == paren_vec));
+            if (mask != 0) {
+                // Found '(' in this chunk - check preceding bytes
+                var remaining_mask = mask;
+                while (remaining_mask != 0) {
+                    const bit_pos = @ctz(remaining_mask);
+                    const paren_idx = i + bit_pos;
+                    // Check if preceding character is an extglob prefix
+                    switch (s[paren_idx - 1]) {
+                        '?', '*', '+', '@', '!' => return true,
+                        else => {},
+                    }
+                    // Clear this bit
+                    remaining_mask &= remaining_mask - 1;
+                }
+            }
+        }
+
+        // Handle remainder
+        while (i < s.len) : (i += 1) {
+            if (s[i] == '(') {
+                switch (s[i - 1]) {
+                    '?', '*', '+', '@', '!' => return true,
+                    else => {},
+                }
+            }
+        }
+        return false;
+    }
+
+    // Fallback for short strings
     var i: usize = 0;
     while (i + 1 < s.len) : (i += 1) {
         if (s[i + 1] == '(') {
@@ -423,9 +476,75 @@ pub fn containsExtglob(s: []const u8) bool {
     return false;
 }
 
-/// Check if pattern has wildcards or extglob patterns (when extglob is enabled)
+/// Check if pattern has wildcards or extglob patterns (when extglob is enabled).
+/// When check_extglob is true, performs a single SIMD pass checking for all
+/// special characters (*, ?, [, and extglob prefix+() simultaneously.
 pub fn hasWildcardsOrExtglob(s: []const u8, check_extglob: bool) bool {
-    if (hasWildcardsSIMD(s)) return true;
-    if (check_extglob and containsExtglob(s)) return true;
+    if (!check_extglob) return hasWildcardsSIMD(s);
+
+    // Combined single-pass check for wildcards AND extglob patterns
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
+
+    if (s.len >= vec_len) {
+        const Vec = @Vector(vec_len, u8);
+        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const star_vec: Vec = @splat('*');
+        const question_vec: Vec = @splat('?');
+        const bracket_vec: Vec = @splat('[');
+        const paren_vec: Vec = @splat('(');
+
+        var i: usize = 0;
+        while (i + vec_len <= s.len) : (i += vec_len) {
+            const chunk: Vec = s[i..][0..vec_len].*;
+
+            // Check wildcards
+            const has_star = chunk == star_vec;
+            const has_question = chunk == question_vec;
+            const has_bracket = chunk == bracket_vec;
+            const wildcard_mask = @as(MaskInt, @bitCast(has_star | has_question | has_bracket));
+            if (wildcard_mask != 0) return true;
+
+            // Check for '(' which could be extglob
+            const paren_mask = @as(MaskInt, @bitCast(chunk == paren_vec));
+            if (paren_mask != 0) {
+                // Check if any '(' is preceded by an extglob prefix
+                var remaining = paren_mask;
+                while (remaining != 0) {
+                    const bit_pos = @ctz(remaining);
+                    const paren_idx = i + bit_pos;
+                    if (paren_idx > 0) {
+                        switch (s[paren_idx - 1]) {
+                            '?', '*', '+', '@', '!' => return true,
+                            else => {},
+                        }
+                    }
+                    remaining &= remaining - 1;
+                }
+            }
+        }
+
+        // Handle remainder
+        for (s[i..], i..) |ch, idx| {
+            if (ch == '*' or ch == '?' or ch == '[') return true;
+            if (ch == '(' and idx > 0) {
+                switch (s[idx - 1]) {
+                    '?', '*', '+', '@', '!' => return true,
+                    else => {},
+                }
+            }
+        }
+        return false;
+    }
+
+    // Fallback for short strings
+    for (s, 0..) |ch, idx| {
+        if (ch == '*' or ch == '?' or ch == '[') return true;
+        if (ch == '(' and idx > 0) {
+            switch (s[idx - 1]) {
+                '?', '*', '+', '@', '!' => return true,
+                else => {},
+            }
+        }
+    }
     return false;
 }

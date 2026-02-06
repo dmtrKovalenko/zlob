@@ -96,17 +96,20 @@ fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8) !PatternS
 }
 
 fn splitPathComponentsFast(path: []const u8, buffer: [][]const u8) [][]const u8 {
-    if (path.len >= 32) {
-        const Vec32 = @Vector(32, u8);
-        const slash_vec: Vec32 = @splat('/');
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
+
+    if (path.len >= vec_len) {
+        const Vec = @Vector(vec_len, u8);
+        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const slash_vec: Vec = @splat('/');
         var idx: usize = 0;
         var start: usize = 0;
         var i: usize = 0;
 
-        // process 32 bytes at a time
-        while (i + 32 <= path.len) : (i += 32) {
-            const chunk: Vec32 = path[i..][0..32].*;
-            var mask = @as(u32, @bitCast(chunk == slash_vec));
+        // process vec_len bytes at a time
+        while (i + vec_len <= path.len) : (i += vec_len) {
+            const chunk: Vec = path[i..][0..vec_len].*;
+            var mask = @as(MaskInt, @bitCast(chunk == slash_vec));
             while (mask != 0) {
                 const offset = @ctz(mask);
                 const pos = i + offset;

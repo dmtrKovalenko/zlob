@@ -227,7 +227,7 @@ pub fn build(b: *std.Build) void {
         // files with inline tests
         "src/brace_optimizer.zig",
         "src/gitignore.zig",
-        "src/extglob.zig",
+        "src/fnmatch.zig",
     };
 
     for (test_files) |test_file| {
@@ -294,6 +294,24 @@ pub fn build(b: *std.Build) void {
     bench_matchpaths_cmd.step.dependOn(b.getInstallStep());
     const bench_matchpaths_step = b.step("bench-matchpaths", "Benchmark matchPaths() performance");
     bench_matchpaths_step.dependOn(&bench_matchpaths_cmd.step);
+
+    const bench_fnmatch = b.addExecutable(.{
+        .name = "bench_fnmatch",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench_fnmatch.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "zlob", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(bench_fnmatch);
+
+    const bench_fnmatch_cmd = b.addRunArtifact(bench_fnmatch);
+    bench_fnmatch_cmd.step.dependOn(b.getInstallStep());
+    const bench_fnmatch_step = b.step("bench-fnmatch", "Benchmark fnmatch pattern matching");
+    bench_fnmatch_step.dependOn(&bench_fnmatch_cmd.step);
 
     // Recursive pattern benchmark for perf profiling
     const bench_recursive = b.addExecutable(.{

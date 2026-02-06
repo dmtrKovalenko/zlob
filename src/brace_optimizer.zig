@@ -82,14 +82,16 @@ fn recursivelyExpandBraces(allocator: Allocator, pattern: []const u8, results: *
 }
 
 pub fn containsBraces(pattern: []const u8) bool {
-    // SIMD optimization for longer patterns
-    if (pattern.len >= 32) {
-        const Vec32 = @Vector(32, u8);
-        const brace_vec: Vec32 = @splat('{');
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
+
+    if (pattern.len >= vec_len) {
+        const Vec = @Vector(vec_len, u8);
+        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const brace_vec: Vec = @splat('{');
         var i: usize = 0;
-        while (i + 32 <= pattern.len) : (i += 32) {
-            const chunk: Vec32 = pattern[i..][0..32].*;
-            const mask = @as(u32, @bitCast(chunk == brace_vec));
+        while (i + vec_len <= pattern.len) : (i += vec_len) {
+            const chunk: Vec = pattern[i..][0..vec_len].*;
+            const mask = @as(MaskInt, @bitCast(chunk == brace_vec));
             if (mask != 0) return true;
         }
         // Handle remainder

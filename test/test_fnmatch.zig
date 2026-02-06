@@ -6,6 +6,9 @@
 //! - Empty patterns and strings
 //! - Bracket expression edge cases
 //! - Consecutive wildcards
+//! - Extended glob patterns (?(), *(), +(), @(), !())
+//! - POSIX character classes ([[:alpha:]], [[:digit:]], etc.)
+//! - ZlobFlags-based API (noescape, extglob)
 
 const std = @import("std");
 const testing = std.testing;
@@ -402,4 +405,174 @@ test "lastIndexOfCharSIMD - finds last occurrence" {
     try testing.expectEqual(@as(?usize, 5), pattern_context.lastIndexOfCharSIMD("a/b/c/d", '/'));
     try testing.expectEqual(@as(?usize, 0), pattern_context.lastIndexOfCharSIMD("/single", '/'));
     try testing.expectEqual(@as(?usize, null), pattern_context.lastIndexOfCharSIMD("no_slash", '/'));
+}
+
+// ============================================================================
+// Extglob unit tests (via fnmatch.match with .extglob = true)
+// ============================================================================
+
+const extglob_flags = zlob.ZlobFlags{ .extglob = true };
+
+fn matchExtglob(pattern: []const u8, string: []const u8) bool {
+    return fnmatch.match(pattern, string, extglob_flags);
+}
+
+test "fnmatch extglob - @() matches exactly one alternative" {
+    try testing.expect(matchExtglob("@(foo|bar)", "foo"));
+    try testing.expect(matchExtglob("@(foo|bar)", "bar"));
+    try testing.expect(!matchExtglob("@(foo|bar)", "baz"));
+    try testing.expect(!matchExtglob("@(foo|bar)", "foobar"));
+    try testing.expect(!matchExtglob("@(foo|bar)", ""));
+}
+
+test "fnmatch extglob - @() with prefix and suffix" {
+    try testing.expect(matchExtglob("test.@(c|h|cpp)", "test.c"));
+    try testing.expect(matchExtglob("test.@(c|h|cpp)", "test.h"));
+    try testing.expect(matchExtglob("test.@(c|h|cpp)", "test.cpp"));
+    try testing.expect(!matchExtglob("test.@(c|h|cpp)", "test.txt"));
+}
+
+test "fnmatch extglob - ?(pattern) zero or one" {
+    try testing.expect(matchExtglob("file?(.bak).txt", "file.txt"));
+    try testing.expect(matchExtglob("file?(.bak).txt", "file.bak.txt"));
+    try testing.expect(!matchExtglob("file?(.bak).txt", "file.bak.bak.txt"));
+}
+
+test "fnmatch extglob - *(pattern) zero or more" {
+    try testing.expect(matchExtglob("a*(X)b", "ab"));
+    try testing.expect(matchExtglob("a*(X)b", "aXb"));
+    try testing.expect(matchExtglob("a*(X)b", "aXXb"));
+    try testing.expect(matchExtglob("a*(X)b", "aXXXb"));
+    try testing.expect(!matchExtglob("a*(X)b", "aYb"));
+}
+
+test "fnmatch extglob - +(pattern) one or more" {
+    try testing.expect(!matchExtglob("a+(X)b", "ab"));
+    try testing.expect(matchExtglob("a+(X)b", "aXb"));
+    try testing.expect(matchExtglob("a+(X)b", "aXXb"));
+    try testing.expect(matchExtglob("a+(X)b", "aXXXb"));
+}
+
+test "fnmatch extglob - !(pattern) negation" {
+    try testing.expect(matchExtglob("*.!(js)", "file.txt"));
+    try testing.expect(matchExtglob("*.!(js)", "file.ts"));
+    try testing.expect(!matchExtglob("*.!(js)", "file.js"));
+}
+
+test "fnmatch extglob - !(pattern) with multiple alternatives" {
+    try testing.expect(!matchExtglob("*.!(js|ts)", "app.js"));
+    try testing.expect(!matchExtglob("*.!(js|ts)", "app.ts"));
+    try testing.expect(matchExtglob("*.!(js|ts)", "app.zig"));
+    try testing.expect(matchExtglob("*.!(js|ts)", "app.html"));
+}
+
+test "fnmatch extglob - combined with regular wildcards" {
+    try testing.expect(matchExtglob("test_@(foo|bar).*", "test_foo.c"));
+    try testing.expect(matchExtglob("test_@(foo|bar).*", "test_bar.h"));
+    try testing.expect(!matchExtglob("test_@(foo|bar).*", "test_baz.c"));
+}
+
+test "fnmatch extglob - single alternative" {
+    try testing.expect(matchExtglob("@(foo).txt", "foo.txt"));
+    try testing.expect(!matchExtglob("@(foo).txt", "bar.txt"));
+}
+
+test "fnmatch extglob - multiple extglobs in pattern" {
+    try testing.expect(matchExtglob("@(src|lib)/*.@(c|h)", "src/main.c"));
+    try testing.expect(matchExtglob("@(src|lib)/*.@(c|h)", "lib/util.h"));
+    try testing.expect(!matchExtglob("@(src|lib)/*.@(c|h)", "test/test.c"));
+}
+
+test "fnmatch extglob - disabled by default" {
+    // Without extglob flag, these should NOT match as extglob patterns
+    // @(foo|bar) should be treated as literal characters
+    try testing.expect(!fnmatchFull("@(foo|bar)", "foo"));
+    try testing.expect(!fnmatchFull("+(X)", "X"));
+}
+
+test "fnmatch extglob - malformed extglob treated as literal" {
+    // Missing closing paren - should fall back to literal matching
+    try testing.expect(!matchExtglob("@(foo", "foo"));
+}
+
+test "fnmatch extglob - +(a|b) with mixed alternatives" {
+    try testing.expect(matchExtglob("+(a|b)", "a"));
+    try testing.expect(matchExtglob("+(a|b)", "b"));
+    try testing.expect(matchExtglob("+(a|b)", "ab"));
+    try testing.expect(matchExtglob("+(a|b)", "ba"));
+    try testing.expect(matchExtglob("+(a|b)", "aaa"));
+    try testing.expect(!matchExtglob("+(a|b)", ""));
+    try testing.expect(!matchExtglob("+(a|b)", "c"));
+}
+
+test "fnmatch extglob - empty alternatives" {
+    // @(|foo) means empty string or "foo"
+    try testing.expect(matchExtglob("@(|foo)bar", "bar"));
+    try testing.expect(matchExtglob("@(|foo)bar", "foobar"));
+}
+
+// ============================================================================
+// POSIX bracket expression tests
+// ============================================================================
+
+test "fnmatch - POSIX character class [[:alpha:]]" {
+    try testing.expect(fnmatchFull("[[:alpha:]]", "a"));
+    try testing.expect(fnmatchFull("[[:alpha:]]", "Z"));
+    try testing.expect(!fnmatchFull("[[:alpha:]]", "0"));
+    try testing.expect(!fnmatchFull("[[:alpha:]]", " "));
+}
+
+test "fnmatch - POSIX character class [[:digit:]]" {
+    try testing.expect(fnmatchFull("[[:digit:]]", "0"));
+    try testing.expect(fnmatchFull("[[:digit:]]", "9"));
+    try testing.expect(!fnmatchFull("[[:digit:]]", "a"));
+}
+
+test "fnmatch - POSIX character class [[:alnum:]]" {
+    try testing.expect(fnmatchFull("[[:alnum:]]", "a"));
+    try testing.expect(fnmatchFull("[[:alnum:]]", "5"));
+    try testing.expect(!fnmatchFull("[[:alnum:]]", "-"));
+}
+
+test "fnmatch - POSIX [[:lower:]] and [[:upper:]]" {
+    try testing.expect(fnmatchFull("[[:lower:]]", "a"));
+    try testing.expect(!fnmatchFull("[[:lower:]]", "A"));
+    try testing.expect(fnmatchFull("[[:upper:]]", "A"));
+    try testing.expect(!fnmatchFull("[[:upper:]]", "a"));
+}
+
+test "fnmatch - POSIX [[:space:]]" {
+    try testing.expect(fnmatchFull("[[:space:]]", " "));
+    try testing.expect(fnmatchFull("[[:space:]]", "\t"));
+    try testing.expect(fnmatchFull("[[:space:]]", "\n"));
+    try testing.expect(!fnmatchFull("[[:space:]]", "a"));
+}
+
+test "fnmatch - POSIX [[:xdigit:]]" {
+    try testing.expect(fnmatchFull("[[:xdigit:]]", "a"));
+    try testing.expect(fnmatchFull("[[:xdigit:]]", "F"));
+    try testing.expect(fnmatchFull("[[:xdigit:]]", "9"));
+    try testing.expect(!fnmatchFull("[[:xdigit:]]", "g"));
+}
+
+test "fnmatch - POSIX negated character class" {
+    try testing.expect(!fnmatchFull("[![:digit:]]", "5"));
+    try testing.expect(fnmatchFull("[![:digit:]]", "a"));
+}
+
+test "fnmatch - POSIX class in pattern with prefix and suffix" {
+    try testing.expect(fnmatchFull("file[[:digit:]].txt", "file0.txt"));
+    try testing.expect(fnmatchFull("file[[:digit:]].txt", "file9.txt"));
+    try testing.expect(!fnmatchFull("file[[:digit:]].txt", "filea.txt"));
+}
+
+// ============================================================================
+// noescape flag tests
+// ============================================================================
+
+test "fnmatch - noescape flag treats backslash as literal" {
+    const noescape = zlob.ZlobFlags{ .noescape = true };
+    // With noescape, \* should match literal backslash followed by anything
+    try testing.expect(!fnmatch.match("\\*", "*", noescape));
+    try testing.expect(fnmatch.match("\\*", "\\anything", noescape));
 }

@@ -1019,7 +1019,6 @@ pub const DirIterator = struct {
         },
     },
     hidden: HiddenConfig,
-    path_z: [4096:0]u8,
 
     pub const IterEntry = struct {
         name: []const u8,
@@ -1051,44 +1050,45 @@ pub const DirIterator = struct {
     /// hidden_config controls filtering of ".", "..", and hidden files.
     /// fs_provider allows using ALTDIRFUNC callbacks for virtual filesystem support.
     pub fn openWithProvider(path: []const u8, base_dir: ?std.fs.Dir, hidden_config: HiddenConfig, fs_provider: FsProvider) !DirIterator {
-        var self = DirIterator{
-            .mode = undefined,
-            .hidden = hidden_config,
-            .path_z = undefined,
-        };
-
         if (path.len >= 4096) return error.NameTooLong;
-        @memcpy(self.path_z[0..path.len], path);
-        self.path_z[path.len] = 0;
 
         if (fs_provider.isAltDirFunc()) {
             // Use ALTDIRFUNC callbacks
-            const handle = fs_provider.opendir.?(&self.path_z);
+            var path_z: [4096:0]u8 = undefined;
+            @memcpy(path_z[0..path.len], path);
+            path_z[path.len] = 0;
+
+            const handle = fs_provider.opendir.?(&path_z);
             if (handle == null) return error.FileNotFound;
 
-            self.mode = .{ .alt_dirfunc = .{
-                .handle = handle,
-                .readdir = fs_provider.readdir.?,
-                .closedir = fs_provider.closedir.?,
-            } };
-        } else {
-            // Use real filesystem
-            if (base_dir) |bd| {
-                // For relative paths with base_dir, we need to use openat + fdopendir
-                // But C doesn't have a portable way to do this, so fall back to building full path
-                // For now, just open relative to cwd (base_dir support requires platform-specific code)
-                _ = bd;
-                self.mode = .{ .real_fs = .{ .dir = c.opendir(&self.path_z) } };
-            } else {
-                self.mode = .{ .real_fs = .{ .dir = c.opendir(&self.path_z) } };
-            }
-
-            if (self.mode.real_fs.dir == null) {
-                return error.AccessDenied;
-            }
+            return DirIterator{
+                .mode = .{ .alt_dirfunc = .{
+                    .handle = handle,
+                    .readdir = fs_provider.readdir.?,
+                    .closedir = fs_provider.closedir.?,
+                } },
+                .hidden = hidden_config,
+            };
         }
 
-        return self;
+        // Real filesystem: use C's optimized opendir/readdir
+        var path_z: [4096:0]u8 = undefined;
+        @memcpy(path_z[0..path.len], path);
+        path_z[path.len] = 0;
+
+        const dir = if (base_dir) |_|
+            c.opendir(&path_z)
+        else
+            c.opendir(&path_z);
+
+        if (dir == null) {
+            return error.AccessDenied;
+        }
+
+        return DirIterator{
+            .mode = .{ .real_fs = .{ .dir = dir } },
+            .hidden = hidden_config,
+        };
     }
 
     /// Open a directory for single-level iteration (backward compatible).

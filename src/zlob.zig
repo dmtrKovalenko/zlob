@@ -4,7 +4,6 @@ const suffix_match = @import("suffix_match.zig");
 const brace_optimizer = @import("brace_optimizer.zig");
 const pattern_context_internal = @import("pattern_context.zig");
 const flags_mod = @import("flags.zig");
-const extglob = @import("extglob.zig");
 const walker_mod = @import("walker");
 const fnmatch_internal = @import("fnmatch.zig");
 const c = std.c;
@@ -24,7 +23,8 @@ pub const PatternTemplate = pattern_context_internal.PatternTemplate;
 pub const hasWildcardsSIMD = pattern_context_internal.hasWildcardsSIMD;
 pub const indexOfCharSIMD = pattern_context_internal.indexOfCharSIMD;
 pub const lastIndexOfCharSIMD = pattern_context_internal.lastIndexOfCharSIMD;
-pub const containsExtglob = extglob.containsExtglob;
+pub const containsExtglob = fnmatch_internal.containsExtglob;
+pub const simdFindChar = fnmatch_internal.simdFindChar;
 pub const gitignore = @import("gitignore.zig");
 pub const GitIgnore = gitignore.GitIgnore;
 
@@ -420,9 +420,8 @@ inline fn matchWithAlternatives(name: []const u8, alternatives: []const []const 
 /// Match a name against a pattern with extglob support
 /// Uses extglob matching if enable_extglob is true and pattern contains extglob syntax
 inline fn matchWithExtglobSupport(name: []const u8, pattern: []const u8, ctx: *const PatternContext, enable_extglob: bool) bool {
-    if (enable_extglob and extglob.containsExtglob(pattern)) {
-        initExtglob();
-        return extglob.fnmatchExtglob(pattern, name);
+    if (enable_extglob and fnmatch_internal.containsExtglob(pattern)) {
+        return fnmatch_internal.matchExtglob(pattern, name);
     }
     if (ctx.simd_batched_suffix_match) |batched| {
         return batched.matchSuffix(name);
@@ -433,9 +432,8 @@ inline fn matchWithExtglobSupport(name: []const u8, pattern: []const u8, ctx: *c
 /// Match a name against multiple alternative patterns with extglob support
 inline fn matchWithAlternativesExtglob(name: []const u8, alternatives: []const []const u8, enable_extglob: bool) bool {
     for (alternatives) |alt| {
-        if (enable_extglob and extglob.containsExtglob(alt)) {
-            initExtglob();
-            if (extglob.fnmatchExtglob(alt, name)) return true;
+        if (enable_extglob and fnmatch_internal.containsExtglob(alt)) {
+            if (fnmatch_internal.matchExtglob(alt, name)) return true;
         } else {
             const ctx = PatternContext.init(alt);
             if (ctx.simd_batched_suffix_match) |batched| {
@@ -451,9 +449,8 @@ inline fn matchWithAlternativesExtglob(name: []const u8, alternatives: []const [
 /// Match with precomputed contexts, with extglob support
 inline fn matchWithAlternativesPrecomputedExtglob(name: []const u8, patterns: []const []const u8, contexts: []const PatternContext, enable_extglob: bool) bool {
     for (patterns, contexts) |pat, *ctx| {
-        if (enable_extglob and extglob.containsExtglob(pat)) {
-            initExtglob();
-            if (extglob.fnmatchExtglob(pat, name)) return true;
+        if (enable_extglob and fnmatch_internal.containsExtglob(pat)) {
+            if (fnmatch_internal.matchExtglob(pat, name)) return true;
         } else {
             if (ctx.simd_batched_suffix_match) |*batched| {
                 if (batched.matchSuffix(name)) return true;
@@ -735,7 +732,7 @@ fn expandWildcardComponents(
 
     const component_ctx = PatternContext.init(component);
     const enable_extglob = flags.extglob;
-    const has_extglob_pattern = enable_extglob and extglob.containsExtglob(component);
+    const has_extglob_pattern = enable_extglob and fnmatch_internal.containsExtglob(component);
     const needs_wildcard_matching = component_ctx.has_wildcards or has_extglob_pattern;
 
     if (needs_wildcard_matching) {
@@ -765,8 +762,7 @@ fn expandWildcardComponents(
             if (!is_final and entry.kind != .directory) continue;
 
             const matches = if (has_extglob_pattern) blk: {
-                initExtglob();
-                break :blk extglob.fnmatchExtglob(component, name);
+                break :blk fnmatch_internal.matchExtglob(component, name);
             } else if (is_final and component_ctx.simd_batched_suffix_match != null)
                 component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
             else
@@ -789,11 +785,17 @@ fn expandWildcardComponents(
 
         if (new_path.len >= 4096) return;
 
-        const root = base_dir orelse std.fs.cwd();
-        const stat = root.statFile(new_path) catch return;
-        if (!is_final and stat.kind != .directory) return;
-        if (is_final and directories_only and stat.kind != .directory) return;
-        try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir, fs_provider);
+        if (!is_final) {
+            // For non-final literal components, skip the stat() syscall entirely.
+            // Just try to recurse - if the path doesn't exist, the next opendir will fail gracefully.
+            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir, fs_provider);
+        } else {
+            // For final component, we need stat to check existence and directory-ness
+            const root = base_dir orelse std.fs.cwd();
+            const stat = root.statFile(new_path) catch return;
+            if (directories_only and stat.kind != .directory) return;
+            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir, fs_provider);
+        }
     }
 }
 
@@ -817,7 +819,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     // NOTE: Skip if extglob is enabled and pattern contains extglob syntax
     const needs_tilde_expansion = effective_pattern.len > 0 and effective_pattern[0] == '~';
     const has_brace_alternatives = brace_parsed != null;
-    const has_extglob_pattern = flags.extglob and extglob.containsExtglob(effective_pattern);
+    const has_extglob_pattern = flags.extglob and fnmatch_internal.containsExtglob(effective_pattern);
     if (!hasWildcardsSIMD(effective_pattern) and !needs_tilde_expansion and !has_brace_alternatives and !has_extglob_pattern) {
         // Check gitignore for literal path
         if (gitignore_filter) |gi| {
@@ -949,7 +951,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
             }
         }
         // Also check for extglob patterns when extglob is enabled
-        if (!has_wildcard_in_dir and flags.extglob and extglob.containsExtglob(dir_part)) {
+        if (!has_wildcard_in_dir and flags.extglob and fnmatch_internal.containsExtglob(dir_part)) {
             has_wildcard_in_dir = true;
         }
     }
@@ -1498,7 +1500,7 @@ fn globWithBracedComponents(
             }
         }
         // Also check for extglob patterns if extglob is enabled
-        if (flags.extglob and extglob.containsExtglob(comp.text)) {
+        if (flags.extglob and fnmatch_internal.containsExtglob(comp.text)) {
             has_wildcard = true;
         }
         if (has_wildcard) break;
@@ -1611,9 +1613,8 @@ const BracedComponentMatcher = struct {
             return matchWithAlternativesExtglob(name, alts, enable_extglob);
         }
         // Check for extglob pattern
-        if (enable_extglob and extglob.containsExtglob(self.text)) {
-            initExtglob();
-            return extglob.fnmatchExtglob(self.text, name);
+        if (enable_extglob and fnmatch_internal.containsExtglob(self.text)) {
+            return fnmatch_internal.matchExtglob(self.text, name);
         }
         const ctx = PatternContext.init(self.text);
         return fnmatchWithContext(&ctx, name);
@@ -1994,9 +1995,8 @@ inline fn globRecursiveWalkImpl(
             break :blk matchWithAlternativesPrecomputed(entry.basename, contexts);
         } else if (rec_pattern.file_alternatives) |alts|
             matchWithAlternativesExtglob(entry.basename, alts, enable_extglob)
-        else if (enable_extglob and extglob.containsExtglob(rec_pattern.file_pattern)) blk: {
-            initExtglob();
-            break :blk extglob.fnmatchExtglob(rec_pattern.file_pattern, entry.basename);
+        else if (enable_extglob and fnmatch_internal.containsExtglob(rec_pattern.file_pattern)) blk: {
+            break :blk fnmatch_internal.matchExtglob(rec_pattern.file_pattern, entry.basename);
         } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
             batched_suffix_match.matchSuffix(entry.basename)
         else
@@ -2079,9 +2079,8 @@ fn matchDirComponents(
         }
 
         // Check extglob
-        if (enable_extglob and extglob.containsExtglob(dir_comp)) {
-            initExtglob();
-            if (!extglob.fnmatchExtglob(dir_comp, path_comp)) return false;
+        if (enable_extglob and fnmatch_internal.containsExtglob(dir_comp)) {
+            if (!fnmatch_internal.matchExtglob(dir_comp, path_comp)) return false;
             continue;
         }
 
@@ -2207,9 +2206,8 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
             // Check if we should use extglob matching
             if (enable_extglob and file_pattern_alts != null) {
                 for (file_pattern_alts.?, alts) |raw_pat, alt_ctx| {
-                    if (extglob.containsExtglob(raw_pat)) {
-                        initExtglob();
-                        if (extglob.fnmatchExtglob(raw_pat, name)) break :blk true;
+                    if (fnmatch_internal.containsExtglob(raw_pat)) {
+                        if (fnmatch_internal.matchExtglob(raw_pat, name)) break :blk true;
                     } else if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
                         if (batched_suffix_match.matchSuffix(name)) break :blk true;
                     } else if (fnmatchWithContext(&alt_ctx, name)) {
@@ -2226,9 +2224,8 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
                 }
             }
             break :blk false;
-        } else if (enable_extglob and extglob.containsExtglob(pattern)) blk: {
-            initExtglob();
-            break :blk extglob.fnmatchExtglob(pattern, name);
+        } else if (enable_extglob and fnmatch_internal.containsExtglob(pattern)) blk: {
+            break :blk fnmatch_internal.matchExtglob(pattern, name);
         } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
             batched_suffix_match.matchSuffix(name)
         else
@@ -2283,415 +2280,23 @@ fn globInDirFiltered(allocator: std.mem.Allocator, pattern: []const u8, dirname:
     return finalizeResults(allocator, &names, flags, pzlob);
 }
 
-// SIMD character search - find all positions of a character
-pub fn simdFindChar(haystack: []const u8, needle: u8) ?usize {
-    if (haystack.len >= 32) {
-        const Vec32 = @Vector(32, u8);
-        const needle_vec: Vec32 = @splat(needle);
-
-        var i: usize = 0;
-        while (i + 32 <= haystack.len) : (i += 32) {
-            const chunk: Vec32 = haystack[i..][0..32].*;
-            const matches = chunk == needle_vec;
-            const mask = @as(u32, @bitCast(matches));
-            if (mask != 0) {
-                // Found a match, find first set bit
-                const first_bit = @ctz(mask);
-                return i + first_bit;
-            }
-        }
-        for (haystack[i..], i..) |ch, idx| {
-            if (ch == needle) return idx;
-        }
-        return null;
-    }
-    // Fallback for short strings
-    for (haystack, 0..) |ch, idx| {
-        if (ch == needle) return idx;
-    }
-    return null;
-}
+// All fnmatch functionality is now in fnmatch.zig — these are thin wrappers for internal use
 
 pub inline fn fnmatchWithContext(ctx: *const PatternContext, string: []const u8) bool {
-    // Early rejection: if we know the required last character and it doesn't match, reject immediately
-    // This is a very cheap check that can avoid expensive pattern matching
-    if (ctx.required_last_char) |required_last| {
-        if (string.len == 0 or string[string.len - 1] != required_last) {
-            return false;
-        }
-    }
-
-    // Try template-based fast path first
-    if (ctx.matchTemplate(string)) |result| {
-        return result;
-    }
-
-    // Fast path: exact match with SIMD for long strings (only if no wildcards)
-    if (ctx.pattern.len == string.len and !ctx.has_wildcards) {
-        if (ctx.pattern.len >= 32) {
-            const Vec32 = @Vector(32, u8);
-            var i: usize = 0;
-            while (i + 32 <= ctx.pattern.len) : (i += 32) {
-                const p_vec: Vec32 = ctx.pattern[i..][0..32].*;
-                const s_vec: Vec32 = string[i..][0..32].*;
-                const eq = p_vec == s_vec;
-                const mask = @as(u32, @bitCast(eq));
-                if (mask != 0xFFFFFFFF) return false;
-            }
-            return mem.eql(u8, ctx.pattern[i..], string[i..]);
-        }
-        return mem.eql(u8, ctx.pattern, string);
-    }
-
-    if (ctx.only_suffix_match) |suffix_matcher| {
-        return suffix_matcher.match(string);
-    }
-
-    return fnmatchFull(ctx.pattern, string);
+    return fnmatch_internal.matchWithContext(ctx, string, .{});
 }
 
-/// Full fnmatch implementation - exposed for gitignore module
-/// Note: This treats ** as regular * (no special directory handling)
-/// For ** directory matching, use the gitignore module's matchGlob
-/// By default, processes POSIX escape sequences (backslash escapes next char)
 pub fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
-    return fnmatchWithFlags(pattern, string, true);
+    return fnmatch_internal.fnmatch_dumb(pattern, string, true);
 }
 
-/// fnmatch implementation with configurable escape handling
-/// enable_escapes: if true, backslash escapes the next character (POSIX default)
-///                 if false, backslash is treated as literal (NOESCAPE mode)
 pub fn fnmatchWithFlags(pattern: []const u8, string: []const u8, enable_escapes: bool) bool {
-    var pi: usize = 0;
-    var si: usize = 0;
-
-    // Fast path: check literal prefix before first wildcard or escape
-    // This avoids entering the slow recursive path for non-matching strings
-    while (pi < pattern.len) {
-        const p = pattern[pi];
-        if (p == '*' or p == '?' or p == '[') break;
-        if (enable_escapes and p == '\\') break;
-
-        if (si >= string.len or string[si] != p) return false;
-        pi += 1;
-        si += 1;
-    }
-
-    // If pattern exhausted, check if string also exhausted
-    if (pi >= pattern.len) return si == string.len;
-
-    // Continue with wildcard matching from current position
-    while (pi < pattern.len) {
-        const p = pattern[pi];
-
-        if (enable_escapes and p == '\\') {
-            // POSIX escape: backslash quotes the next character
-            pi += 1;
-            if (pi >= pattern.len) {
-                // Trailing backslash matches literal backslash
-                if (si >= string.len or string[si] != '\\') return false;
-                si += 1;
-            } else {
-                // Match the escaped character literally
-                const escaped = pattern[pi];
-                pi += 1;
-                if (si >= string.len or string[si] != escaped) return false;
-                si += 1;
-            }
-            continue;
-        }
-
-        switch (p) {
-            '*' => {
-                pi += 1;
-                while (pi < pattern.len and pattern[pi] == '*') pi += 1;
-                if (pi >= pattern.len) return true;
-
-                // If next pattern char is a literal (not wildcard/bracket/escape), use SIMD
-                const next = pattern[pi];
-                const is_special = next == '*' or next == '?' or next == '[' or (enable_escapes and next == '\\');
-                if (!is_special) {
-                    // SIMD search for next literal character
-                    var search_start = si;
-                    while (search_start <= string.len) {
-                        if (simdFindChar(string[search_start..], next)) |offset| {
-                            const pos = search_start + offset;
-                            if (fnmatchWithFlags(pattern[pi..], string[pos..], enable_escapes)) {
-                                return true;
-                            }
-                            search_start = pos + 1;
-                        } else {
-                            return false;
-                        }
-                    }
-                    return false;
-                } else {
-                    // Fallback for wildcards/brackets/escapes
-                    while (si <= string.len) : (si += 1) {
-                        if (fnmatchWithFlags(pattern[pi..], string[si..], enable_escapes)) {
-                            return true;
-                        }
-                    }
-                    return false;
-                }
-            },
-            '?' => {
-                if (si >= string.len) return false;
-                si += 1;
-                pi += 1;
-            },
-            '[' => {
-                if (si >= string.len) return false;
-                pi += 1;
-
-                const ch = string[si];
-                si += 1;
-
-                var negate = false;
-                // POSIX allows both ! and ^ for negation
-                if (pi < pattern.len and (pattern[pi] == '!' or pattern[pi] == '^')) {
-                    negate = true;
-                    pi += 1;
-                }
-
-                // Use branchless bitmap matching for bracket expressions
-                const result = matchBracketExpressionFast(pattern, pi, ch);
-                pi = result.new_pi;
-                var matched = result.matched;
-
-                if (negate) matched = !matched;
-                if (!matched) return false;
-            },
-            else => {
-                if (si >= string.len or string[si] != p) return false;
-                si += 1;
-                pi += 1;
-            },
-        }
-    }
-
-    return si == string.len;
+    return fnmatch_internal.fnmatch_dumb(pattern, string, enable_escapes);
 }
 
-/// Initialize extglob module with fnmatchFull function pointer
-/// This must be called before using extglob functionality
-fn initExtglob() void {
-    extglob.initFnmatch(&fnmatchFull);
-}
-
-/// fnmatch with extglob support - use this when ZLOB_EXTGLOB flag is set
-/// If extglob is disabled or pattern doesn't contain extglob syntax, falls back to fnmatchFull
 pub fn fnmatchWithExtglob(pattern: []const u8, string: []const u8, enable_extglob: bool) bool {
-    if (enable_extglob and extglob.containsExtglob(pattern)) {
-        // Ensure extglob module is initialized
-        initExtglob();
-        return extglob.fnmatchExtglob(pattern, string);
-    }
-    return fnmatchFull(pattern, string);
-}
-
-/// Fast bracket expression matching using branchless techniques
-/// Returns the match result and the new pattern index after the closing ']'
-/// Supports POSIX character classes like [[:alpha:]], [[:digit:]], etc.
-inline fn matchBracketExpressionFast(pattern: []const u8, start_pi: usize, ch: u8) struct { matched: bool, new_pi: usize } {
-    var pi = start_pi;
-    const bracket_start = pi;
-
-    // Build a 256-bit bitmap for the character set
-    // Each bit represents whether that byte value is in the set
-    var bitmap: [32]u8 = [_]u8{0} ** 32;
-
-    while (pi < pattern.len) {
-        const set_c = pattern[pi];
-
-        // First character is always part of set (even if it's ']')
-        // Only subsequent ']' closes the bracket expression
-        if (set_c == ']' and pi > bracket_start) break;
-
-        // Check for POSIX character class [[:class:]]
-        if (set_c == '[' and pi + 2 < pattern.len and pattern[pi + 1] == ':') {
-            // Find the closing :]]
-            const class_result = parsePosixCharClass(pattern, pi);
-            if (class_result.valid) {
-                // Add all characters matching this class to the bitmap
-                addPosixClassToBitmap(&bitmap, class_result.class_type);
-                pi = class_result.end_pi;
-                continue;
-            }
-        }
-
-        pi += 1;
-
-        if (pi + 1 < pattern.len and pattern[pi] == '-' and pattern[pi + 1] != ']') {
-            // Range like [a-z]
-            pi += 1;
-            const range_end = pattern[pi];
-            pi += 1;
-
-            // Fill bitmap for range - unroll for common small ranges
-            const start_byte = set_c;
-            const end_byte = range_end;
-            if (start_byte <= end_byte) {
-                var range_c = start_byte;
-                while (range_c <= end_byte) : (range_c += 1) {
-                    bitmap[range_c >> 3] |= @as(u8, 1) << @as(u3, @truncate(range_c & 7));
-                    if (range_c == 255) break; // Prevent overflow
-                }
-            }
-        } else {
-            // Single character
-            bitmap[set_c >> 3] |= @as(u8, 1) << @as(u3, @truncate(set_c & 7));
-        }
-    }
-
-    // Skip the closing ']'
-    if (pi < pattern.len and pattern[pi] == ']') pi += 1;
-
-    // Branchless bitmap lookup
-    const matched = (bitmap[ch >> 3] & (@as(u8, 1) << @as(u3, @truncate(ch & 7)))) != 0;
-
-    return .{ .matched = matched, .new_pi = pi };
-}
-
-/// POSIX character class types
-const PosixCharClass = enum {
-    alpha, // [[:alpha:]] - alphabetic
-    digit, // [[:digit:]] - digits
-    alnum, // [[:alnum:]] - alphanumeric
-    space, // [[:space:]] - whitespace
-    blank, // [[:blank:]] - space and tab
-    lower, // [[:lower:]] - lowercase
-    upper, // [[:upper:]] - uppercase
-    punct, // [[:punct:]] - punctuation
-    xdigit, // [[:xdigit:]] - hex digits
-    cntrl, // [[:cntrl:]] - control characters
-    graph, // [[:graph:]] - visible characters
-    print, // [[:print:]] - printable characters
-    invalid,
-};
-
-/// Parse a POSIX character class starting at pattern[pi] which should be '['
-/// Returns the class type and the index after the closing ']]'
-fn parsePosixCharClass(pattern: []const u8, start_pi: usize) struct { valid: bool, class_type: PosixCharClass, end_pi: usize } {
-    // Pattern should be [[:classname:]]
-    // start_pi points to the first '['
-    if (start_pi + 2 >= pattern.len) return .{ .valid = false, .class_type = .invalid, .end_pi = start_pi };
-    if (pattern[start_pi] != '[' or pattern[start_pi + 1] != ':') {
-        return .{ .valid = false, .class_type = .invalid, .end_pi = start_pi };
-    }
-
-    // Find the closing :]]
-    var pi = start_pi + 2;
-    const class_start = pi;
-
-    while (pi + 1 < pattern.len) {
-        if (pattern[pi] == ':' and pattern[pi + 1] == ']') {
-            const class_name = pattern[class_start..pi];
-            const class_type = getPosixClassType(class_name);
-            if (class_type != .invalid) {
-                return .{ .valid = true, .class_type = class_type, .end_pi = pi + 2 };
-            }
-            return .{ .valid = false, .class_type = .invalid, .end_pi = start_pi };
-        }
-        pi += 1;
-    }
-
-    return .{ .valid = false, .class_type = .invalid, .end_pi = start_pi };
-}
-
-/// Get POSIX class type from class name
-fn getPosixClassType(name: []const u8) PosixCharClass {
-    if (mem.eql(u8, name, "alpha")) return .alpha;
-    if (mem.eql(u8, name, "digit")) return .digit;
-    if (mem.eql(u8, name, "alnum")) return .alnum;
-    if (mem.eql(u8, name, "space")) return .space;
-    if (mem.eql(u8, name, "blank")) return .blank;
-    if (mem.eql(u8, name, "lower")) return .lower;
-    if (mem.eql(u8, name, "upper")) return .upper;
-    if (mem.eql(u8, name, "punct")) return .punct;
-    if (mem.eql(u8, name, "xdigit")) return .xdigit;
-    if (mem.eql(u8, name, "cntrl")) return .cntrl;
-    if (mem.eql(u8, name, "graph")) return .graph;
-    if (mem.eql(u8, name, "print")) return .print;
-    return .invalid;
-}
-
-/// Add all characters matching a POSIX class to the bitmap
-fn addPosixClassToBitmap(bitmap: *[32]u8, class_type: PosixCharClass) void {
-    switch (class_type) {
-        .alpha => {
-            // A-Z
-            addRangeToBitmap(bitmap, 'A', 'Z');
-            // a-z
-            addRangeToBitmap(bitmap, 'a', 'z');
-        },
-        .digit => {
-            // 0-9
-            addRangeToBitmap(bitmap, '0', '9');
-        },
-        .alnum => {
-            // A-Z, a-z, 0-9
-            addRangeToBitmap(bitmap, 'A', 'Z');
-            addRangeToBitmap(bitmap, 'a', 'z');
-            addRangeToBitmap(bitmap, '0', '9');
-        },
-        .space => {
-            // space, \t, \n, \r, \f, \v
-            const space_chars = [_]u8{ ' ', '\t', '\n', '\r', 0x0C, 0x0B };
-            for (space_chars) |sc| {
-                bitmap[sc >> 3] |= @as(u8, 1) << @as(u3, @truncate(sc & 7));
-            }
-        },
-        .blank => {
-            // space and tab only
-            bitmap[' ' >> 3] |= @as(u8, 1) << @as(u3, @truncate(' ' & 7));
-            bitmap['\t' >> 3] |= @as(u8, 1) << @as(u3, @truncate('\t' & 7));
-        },
-        .lower => {
-            // a-z
-            addRangeToBitmap(bitmap, 'a', 'z');
-        },
-        .upper => {
-            // A-Z
-            addRangeToBitmap(bitmap, 'A', 'Z');
-        },
-        .punct => {
-            // Punctuation: !"#$%&'()*+,-./:;<=>?@[\]^_`{|}~
-            const punct_chars = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-            for (punct_chars) |pc| {
-                bitmap[pc >> 3] |= @as(u8, 1) << @as(u3, @truncate(pc & 7));
-            }
-        },
-        .xdigit => {
-            // 0-9, A-F, a-f
-            addRangeToBitmap(bitmap, '0', '9');
-            addRangeToBitmap(bitmap, 'A', 'F');
-            addRangeToBitmap(bitmap, 'a', 'f');
-        },
-        .cntrl => {
-            // Control characters: 0x00-0x1F and 0x7F
-            addRangeToBitmap(bitmap, 0x00, 0x1F);
-            bitmap[0x7F >> 3] |= @as(u8, 1) << @as(u3, @truncate(0x7F & 7));
-        },
-        .graph => {
-            // Visible characters: 0x21-0x7E (printable except space)
-            addRangeToBitmap(bitmap, 0x21, 0x7E);
-        },
-        .print => {
-            // Printable characters: 0x20-0x7E
-            addRangeToBitmap(bitmap, 0x20, 0x7E);
-        },
-        .invalid => {},
-    }
-}
-
-/// Helper to add a range of characters to the bitmap
-inline fn addRangeToBitmap(bitmap: *[32]u8, start: u8, end: u8) void {
-    var ch: u8 = start;
-    while (ch <= end) : (ch += 1) {
-        bitmap[ch >> 3] |= @as(u8, 1) << @as(u3, @truncate(ch & 7));
-        if (ch == 255) break; // Prevent overflow
-    }
+    const flags = if (enable_extglob) flags_mod.ZlobFlags{ .extglob = true } else flags_mod.ZlobFlags{};
+    return fnmatch_internal.match(pattern, string, flags);
 }
 
 /// Internal globfree function - frees zlob_t structure
