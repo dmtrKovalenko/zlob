@@ -20,7 +20,6 @@ pub const zlob_slice_t = extern struct {
     len: usize,
 };
 
-
 pub fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) callconv(.c) c_int {
     const allocator = std.heap.c_allocator;
 
@@ -155,6 +154,118 @@ pub export fn zlob_match_paths_slice(
     const zig_paths: []const []const u8 = @ptrCast(paths[0..path_count]);
 
     var results = zlob_impl.path_matcher.matchPaths(allocator, pattern_slice, zig_paths, ZlobFlags.fromInt(flags)) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
+        };
+    };
+    defer results.deinit();
+
+    if (results.match_count == 0) {
+        return zlob_flags.ZLOB_NOMATCH;
+    }
+
+    const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return zlob_flags.ZLOB_NOSPACE;
+    errdefer allocator.free(pathv_buf);
+
+    const pathlen_buf = allocator.alloc(usize, results.match_count) catch {
+        allocator.free(pathv_buf);
+        return zlob_flags.ZLOB_NOSPACE;
+    };
+
+    for (results.paths, 0..) |path, i| {
+        pathv_buf[i] = @ptrCast(@constCast(path.ptr));
+        pathlen_buf[i] = path.len;
+    }
+    pathv_buf[results.match_count] = null;
+
+    pzlob.zlo_pathc = results.match_count;
+    pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
+    pzlob.zlo_offs = 0;
+    pzlob.zlo_pathlen = pathlen_buf.ptr;
+    pzlob.zlo_flags = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
+
+    return 0;
+}
+
+/// Match paths against a glob pattern relative to a base directory (C string version).
+/// The base_path may or may not end with '/'.
+pub export fn zlob_match_paths_at(
+    base_path: [*:0]const u8,
+    pattern: [*:0]const u8,
+    paths: [*]const [*:0]const u8,
+    path_count: usize,
+    flags: c_int,
+    pzlob: *zlob_t,
+) c_int {
+    const allocator = std.heap.c_allocator;
+
+    const base_slice = mem.sliceTo(base_path, 0);
+    const pattern_slice = mem.sliceTo(pattern, 0);
+
+    const STACK_LIMIT = 256;
+    var stack_buf: [STACK_LIMIT][]const u8 = undefined;
+    const zig_paths_storage = if (path_count <= STACK_LIMIT)
+        stack_buf[0..path_count]
+    else
+        allocator.alloc([]const u8, path_count) catch return zlob_flags.ZLOB_NOSPACE;
+    defer if (path_count > STACK_LIMIT) allocator.free(zig_paths_storage);
+
+    for (0..path_count) |i| {
+        zig_paths_storage[i] = mem.sliceTo(paths[i], 0);
+    }
+
+    var results = zlob_impl.path_matcher.matchPathsAt(allocator, base_slice, pattern_slice, zig_paths_storage, ZlobFlags.fromInt(flags)) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
+        };
+    };
+    defer results.deinit();
+
+    if (results.match_count == 0) {
+        return zlob_flags.ZLOB_NOMATCH;
+    }
+
+    const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return zlob_flags.ZLOB_NOSPACE;
+    errdefer allocator.free(pathv_buf);
+
+    const pathlen_buf = allocator.alloc(usize, results.match_count) catch {
+        allocator.free(pathv_buf);
+        return zlob_flags.ZLOB_NOSPACE;
+    };
+
+    for (results.paths, 0..) |path, i| {
+        pathv_buf[i] = @ptrCast(@constCast(path.ptr));
+        pathlen_buf[i] = path.len;
+    }
+    pathv_buf[results.match_count] = null;
+
+    pzlob.zlo_pathc = results.match_count;
+    pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
+    pzlob.zlo_offs = 0;
+    pzlob.zlo_pathlen = pathlen_buf.ptr;
+    pzlob.zlo_flags = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
+
+    return 0;
+}
+
+/// Match paths against a glob pattern relative to a base directory (slice version).
+/// Zero-copy FFI variant for Rust/Zig interop.
+pub export fn zlob_match_paths_at_slice(
+    base_path: *const zlob_slice_t,
+    pattern: *const zlob_slice_t,
+    paths: [*]const zlob_slice_t,
+    path_count: usize,
+    flags: c_int,
+    pzlob: *zlob_t,
+) c_int {
+    const allocator = std.heap.c_allocator;
+    const base_slice = base_path.ptr[0..base_path.len];
+    const pattern_slice = pattern.ptr[0..pattern.len];
+
+    // UNSAFE: Relies on Zig ABI compatibility
+    const zig_paths: []const []const u8 = @ptrCast(paths[0..path_count]);
+
+    var results = zlob_impl.path_matcher.matchPathsAt(allocator, base_slice, pattern_slice, zig_paths, ZlobFlags.fromInt(flags)) catch |err| {
         return switch (err) {
             error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
         };

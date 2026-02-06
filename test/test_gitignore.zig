@@ -215,15 +215,15 @@ test "gitignore - common patterns" {
 
 // Test zlob matching helpers
 test "zlob fnmatchFull - basic patterns" {
-    try testing.expect(fnmatch.match("*.txt", "file.txt", .{}));
-    try testing.expect(!fnmatch.match("*.txt", "file.log", .{}));
-    try testing.expect(fnmatch.match("test?", "test1", .{}));
-    try testing.expect(!fnmatch.match("test?", "test12", .{}));
-    try testing.expect(fnmatch.match("[abc]", "a", .{}));
-    try testing.expect(fnmatch.match("[abc]", "b", .{}));
-    try testing.expect(!fnmatch.match("[abc]", "d", .{}));
-    try testing.expect(fnmatch.match("[a-z]", "m", .{}));
-    try testing.expect(!fnmatch.match("[a-z]", "5", .{}));
+    try testing.expect(fnmatch.fnmatch("*.txt", "file.txt", .{}));
+    try testing.expect(!fnmatch.fnmatch("*.txt", "file.log", .{}));
+    try testing.expect(fnmatch.fnmatch("test?", "test1", .{}));
+    try testing.expect(!fnmatch.fnmatch("test?", "test12", .{}));
+    try testing.expect(fnmatch.fnmatch("[abc]", "a", .{}));
+    try testing.expect(fnmatch.fnmatch("[abc]", "b", .{}));
+    try testing.expect(!fnmatch.fnmatch("[abc]", "d", .{}));
+    try testing.expect(fnmatch.fnmatch("[a-z]", "m", .{}));
+    try testing.expect(!fnmatch.fnmatch("[a-z]", "5", .{}));
 }
 
 // Note: GitIgnore.matchGlob is internal (not pub), so we test ** patterns

@@ -18,7 +18,7 @@ const TestResult = test_utils.TestResult;
 
 /// Helper to call fnmatch with default options
 fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
-    return fnmatch.match(pattern, string, .{});
+    return fnmatch.fnmatch(pattern, string, .{});
 }
 
 test "fnmatch - reversed range is skipped (empty)" {

@@ -414,7 +414,7 @@ pub const GitIgnore = struct {
                 return mem.eql(u8, text, basename);
             }
             // Complex wildcard patterns (*.o.*, .*,  etc)
-            return glob.fnmatchFull(text, basename);
+            return glob.fnmatch.fnmatch(text, basename, .{});
         }
 
         // Non-anchored patterns with / - match full path

@@ -5,6 +5,7 @@ const zlob_flags = @import("zlob_flags");
 
 // Create alias for easier access
 const matchPaths = zlob.matchPaths;
+const matchPathsAt = zlob.matchPathsAt;
 const ZLOB_NOSORT = zlob_flags.ZLOB_NOSORT;
 const ZLOB_NOCHECK = zlob_flags.ZLOB_NOCHECK;
 const ZLOB_PERIOD = zlob_flags.ZLOB_PERIOD;
@@ -24,18 +25,128 @@ test "matchPaths - ** matches zero directories" {
     try testing.expectEqual(3, result.match_count);
 }
 
-test "matchPaths - ** matches multiple directories" {
+// Tests for matchPathsAt
+
+test "matchPathsAt - basic base_path strips directory prefix" {
     const paths = [_][]const u8{
-        "a/b/c/file.c",
-        "a/b/file.c",
-        "a/file.c",
-        "file.c",
+        "/home/user/project/src/main.c",
+        "/home/user/project/src/test/unit.c",
+        "/home/user/project/lib/utils.c",
+        "/home/user/project/docs/readme.md",
     };
 
-    var result = try matchPaths(testing.allocator, "**/file.c", &paths, 0);
+    var result = try matchPathsAt(testing.allocator, "/home/user/project/", "**/*.c", &paths, ZLOB_PERIOD);
     defer result.deinit();
 
-    try testing.expectEqual(4, result.match_count);
+    try testing.expectEqual(3, result.match_count);
+}
+
+test "matchPathsAt - base_path without trailing slash" {
+    const paths = [_][]const u8{
+        "/home/user/project/src/main.c",
+        "/home/user/project/src/test/unit.c",
+        "/home/user/project/lib/utils.c",
+        "/home/user/project/docs/readme.md",
+    };
+
+    var result = try matchPathsAt(testing.allocator, "/home/user/project", "**/*.c", &paths, ZLOB_PERIOD);
+    defer result.deinit();
+
+    try testing.expectEqual(3, result.match_count);
+}
+
+test "matchPathsAt - results contain original full paths" {
+    const paths = [_][]const u8{
+        "/home/user/project/src/main.c",
+        "/home/user/project/lib/utils.c",
+    };
+
+    var result = try matchPathsAt(testing.allocator, "/home/user/project/", "src/*.c", &paths, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(1, result.match_count);
+    try testing.expectEqualStrings("/home/user/project/src/main.c", result.paths[0]);
+}
+
+test "matchPathsAt - empty base_path behaves like matchPaths" {
+    const paths = [_][]const u8{
+        "src/main.c",
+        "src/test/unit.c",
+        "lib/utils.c",
+        "docs/readme.md",
+    };
+
+    var result_at = try matchPathsAt(testing.allocator, "", "**/*.c", &paths, ZLOB_PERIOD);
+    defer result_at.deinit();
+
+    var result = try matchPaths(testing.allocator, "**/*.c", &paths, ZLOB_PERIOD);
+    defer result.deinit();
+
+    try testing.expectEqual(result.match_count, result_at.match_count);
+}
+
+test "matchPathsAt - literal pattern with base_path" {
+    const paths = [_][]const u8{
+        "/srv/data/config.json",
+        "/srv/data/readme.md",
+    };
+
+    var result = try matchPathsAt(testing.allocator, "/srv/data", "config.json", &paths, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(1, result.match_count);
+    try testing.expectEqualStrings("/srv/data/config.json", result.paths[0]);
+}
+
+test "matchPathsAt - doublestar with base_path" {
+    const paths = [_][]const u8{
+        "/opt/app/src/main.zig",
+        "/opt/app/src/utils/helpers.zig",
+        "/opt/app/test/test_main.zig",
+        "/opt/app/README.md",
+    };
+
+    var result = try matchPathsAt(testing.allocator, "/opt/app/", "src/**/*.zig", &paths, ZLOB_PERIOD);
+    defer result.deinit();
+
+    try testing.expectEqual(2, result.match_count);
+}
+
+test "matchPathsAt - paths shorter than base are skipped" {
+    const paths = [_][]const u8{
+        "/short",
+        "/very/long/base/path/file.txt",
+    };
+
+    var result = try matchPathsAt(testing.allocator, "/very/long/base/path", "*.txt", &paths, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(1, result.match_count);
+    try testing.expectEqualStrings("/very/long/base/path/file.txt", result.paths[0]);
+}
+
+test "matchPathsAt - ./ prefix means relative to base_path" {
+    const paths = [_][]const u8{
+        "/home/user/project/src/main.c",
+        "/home/user/project/lib/utils.c",
+    };
+
+    var result = try matchPathsAt(testing.allocator, "/home/user/project", "./**/*.c", &paths, ZLOB_PERIOD);
+    defer result.deinit();
+
+    try testing.expectEqual(2, result.match_count);
+}
+
+test "matchPathsAt - no matches returns zero" {
+    const paths = [_][]const u8{
+        "/home/user/project/src/main.c",
+        "/home/user/project/lib/utils.c",
+    };
+
+    var result = try matchPathsAt(testing.allocator, "/home/user/project/", "**/*.zig", &paths, 0);
+    defer result.deinit();
+
+    try testing.expectEqual(0, result.match_count);
 }
 
 test "matchPaths - prefix before **" {
@@ -501,4 +612,23 @@ test "matchPaths - ZLOB_PERIOD matches hidden files with flag" {
 
     try testing.expect(hidden_count >= 1); // Should match hidden .txt files
     try testing.expectEqual(4, result.match_count); // All 4 .txt files including hidden
+}
+
+test "matchPaths - allows ./ prefix for the pattern" {
+    const paths = [_][]const u8{
+        "src/main.c",
+        "src/test/unit.c",
+        "lib/utils.c",
+        "docs/readme.md",
+    };
+
+    var result_abs = try matchPaths(testing.allocator, "**/*.c", &paths, ZLOB_PERIOD);
+    defer result_abs.deinit();
+
+    try testing.expectEqual(3, result_abs.match_count);
+
+    var result = try matchPaths(testing.allocator, "./**/*.c", &paths, ZLOB_PERIOD);
+    defer result.deinit();
+
+    try testing.expectEqual(3, result.match_count);
 }

@@ -41,37 +41,37 @@ pub fn main() !void {
 
     benchmark("*.txt vs file.txt (match)", struct {
         fn f() bool {
-            return fnmatch.match("*.txt", "file.txt", .{});
+            return fnmatch.fnmatch("*.txt", "file.txt", .{});
         }
     }.f);
 
     benchmark("*.txt vs file.log (no match)", struct {
         fn f() bool {
-            return fnmatch.match("*.txt", "file.log", .{});
+            return fnmatch.fnmatch("*.txt", "file.log", .{});
         }
     }.f);
 
     benchmark("test_*.zig vs test_foo.zig", struct {
         fn f() bool {
-            return fnmatch.match("test_*.zig", "test_foo.zig", .{});
+            return fnmatch.fnmatch("test_*.zig", "test_foo.zig", .{});
         }
     }.f);
 
     benchmark("a*b*c*d vs aXXXbYYYcZZZd", struct {
         fn f() bool {
-            return fnmatch.match("a*b*c*d", "aXXXbYYYcZZZd", .{});
+            return fnmatch.fnmatch("a*b*c*d", "aXXXbYYYcZZZd", .{});
         }
     }.f);
 
     benchmark("??? vs abc", struct {
         fn f() bool {
-            return fnmatch.match("???", "abc", .{});
+            return fnmatch.fnmatch("???", "abc", .{});
         }
     }.f);
 
     benchmark("exact_match vs exact_match (literal)", struct {
         fn f() bool {
-            return fnmatch.match("exact_match.txt", "exact_match.txt", .{});
+            return fnmatch.fnmatch("exact_match.txt", "exact_match.txt", .{});
         }
     }.f);
 
@@ -80,37 +80,37 @@ pub fn main() !void {
 
     benchmark("[abc] vs a", struct {
         fn f() bool {
-            return fnmatch.match("[abc]", "a", .{});
+            return fnmatch.fnmatch("[abc]", "a", .{});
         }
     }.f);
 
     benchmark("[a-z] vs m", struct {
         fn f() bool {
-            return fnmatch.match("[a-z]", "m", .{});
+            return fnmatch.fnmatch("[a-z]", "m", .{});
         }
     }.f);
 
     benchmark("[a-zA-Z0-9] vs X", struct {
         fn f() bool {
-            return fnmatch.match("[a-zA-Z0-9]", "X", .{});
+            return fnmatch.fnmatch("[a-zA-Z0-9]", "X", .{});
         }
     }.f);
 
     benchmark("[!0-9] vs a (negated)", struct {
         fn f() bool {
-            return fnmatch.match("[!0-9]", "a", .{});
+            return fnmatch.fnmatch("[!0-9]", "a", .{});
         }
     }.f);
 
     benchmark("file[[:digit:]].txt vs file5.txt (POSIX)", struct {
         fn f() bool {
-            return fnmatch.match("file[[:digit:]].txt", "file5.txt", .{});
+            return fnmatch.fnmatch("file[[:digit:]].txt", "file5.txt", .{});
         }
     }.f);
 
     benchmark("[[:alpha:]][[:digit:]] vs a5 (POSIX combo)", struct {
         fn f() bool {
-            return fnmatch.match("[[:alpha:]][[:digit:]]", "a5", .{});
+            return fnmatch.fnmatch("[[:alpha:]][[:digit:]]", "a5", .{});
         }
     }.f);
 
@@ -119,43 +119,43 @@ pub fn main() !void {
 
     benchmark("@(foo|bar) vs foo", struct {
         fn f() bool {
-            return fnmatch.match("@(foo|bar)", "foo", .{ .extglob = true });
+            return fnmatch.fnmatch("@(foo|bar)", "foo", .{ .extglob = true });
         }
     }.f);
 
     benchmark("*.@(js|ts) vs app.ts", struct {
         fn f() bool {
-            return fnmatch.match("*.@(js|ts)", "app.ts", .{ .extglob = true });
+            return fnmatch.fnmatch("*.@(js|ts)", "app.ts", .{ .extglob = true });
         }
     }.f);
 
     benchmark("*.!(js) vs file.txt", struct {
         fn f() bool {
-            return fnmatch.match("*.!(js)", "file.txt", .{ .extglob = true });
+            return fnmatch.fnmatch("*.!(js)", "file.txt", .{ .extglob = true });
         }
     }.f);
 
     benchmark("a+(X)b vs aXXXb", struct {
         fn f() bool {
-            return fnmatch.match("a+(X)b", "aXXXb", .{ .extglob = true });
+            return fnmatch.fnmatch("a+(X)b", "aXXXb", .{ .extglob = true });
         }
     }.f);
 
     benchmark("a*(X)b vs ab (zero match)", struct {
         fn f() bool {
-            return fnmatch.match("a*(X)b", "ab", .{ .extglob = true });
+            return fnmatch.fnmatch("a*(X)b", "ab", .{ .extglob = true });
         }
     }.f);
 
     benchmark("?(prefix_)main.c vs main.c", struct {
         fn f() bool {
-            return fnmatch.match("?(prefix_)main.c", "main.c", .{ .extglob = true });
+            return fnmatch.fnmatch("?(prefix_)main.c", "main.c", .{ .extglob = true });
         }
     }.f);
 
     benchmark("@(src|lib)/*.@(c|h) vs src/main.c", struct {
         fn f() bool {
-            return fnmatch.match("@(src|lib)/*.@(c|h)", "src/main.c", .{ .extglob = true });
+            return fnmatch.fnmatch("@(src|lib)/*.@(c|h)", "src/main.c", .{ .extglob = true });
         }
     }.f);
 
@@ -165,28 +165,28 @@ pub fn main() !void {
     benchmark("PatternCtx *.zig vs main.zig (template)", struct {
         const ctx = PatternContext.init("*.zig");
         fn f() bool {
-            return fnmatch.matchWithContext(&ctx, "main.zig", .{});
+            return fnmatch.fnmatchWithContext(&ctx, "main.zig", .{});
         }
     }.f);
 
     benchmark("PatternCtx test_* vs test_foo (template)", struct {
         const ctx = PatternContext.init("test_*");
         fn f() bool {
-            return fnmatch.matchWithContext(&ctx, "test_foo", .{});
+            return fnmatch.fnmatchWithContext(&ctx, "test_foo", .{});
         }
     }.f);
 
     benchmark("PatternCtx exact.txt vs exact.txt (literal)", struct {
         const ctx = PatternContext.init("exact.txt");
         fn f() bool {
-            return fnmatch.matchWithContext(&ctx, "exact.txt", .{});
+            return fnmatch.fnmatchWithContext(&ctx, "exact.txt", .{});
         }
     }.f);
 
     benchmark("PatternCtx file[0-9].txt vs file5.txt", struct {
         const ctx = PatternContext.init("file[0-9].txt");
         fn f() bool {
-            return fnmatch.matchWithContext(&ctx, "file5.txt", .{});
+            return fnmatch.fnmatchWithContext(&ctx, "file5.txt", .{});
         }
     }.f);
 

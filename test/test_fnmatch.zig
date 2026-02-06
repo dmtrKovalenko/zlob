@@ -25,7 +25,7 @@ const TestResult = test_utils.TestResult;
 
 /// Helper to call fnmatch with default options
 fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
-    return fnmatch.match(pattern, string, .{});
+    return fnmatch.fnmatch(pattern, string, .{});
 }
 
 // Empty string and empty pattern tests
@@ -409,13 +409,13 @@ test "lastIndexOfCharSIMD - finds last occurrence" {
 }
 
 // ============================================================================
-// Extglob unit tests (via fnmatch.match with .extglob = true)
+// Extglob unit tests (via fnmatch.fnmatch with .extglob = true)
 // ============================================================================
 
 const extglob_flags = zlob.ZlobFlags{ .extglob = true };
 
 fn matchExtglob(pattern: []const u8, string: []const u8) bool {
-    return fnmatch.match(pattern, string, extglob_flags);
+    return fnmatch.fnmatch(pattern, string, extglob_flags);
 }
 
 test "fnmatch extglob - @() matches exactly one alternative" {
@@ -574,6 +574,6 @@ test "fnmatch - POSIX class in pattern with prefix and suffix" {
 test "fnmatch - noescape flag treats backslash as literal" {
     const noescape = zlob.ZlobFlags{ .noescape = true };
     // With noescape, \* should match literal backslash followed by anything
-    try testing.expect(!fnmatch.match("\\*", "*", noescape));
-    try testing.expect(fnmatch.match("\\*", "\\anything", noescape));
+    try testing.expect(!fnmatch.fnmatch("\\*", "*", noescape));
+    try testing.expect(fnmatch.fnmatch("\\*", "\\anything", noescape));
 }

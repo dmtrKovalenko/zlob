@@ -21,45 +21,32 @@ pub const PatternContext = pattern_context_mod.PatternContext;
 pub const hasWildcards = pattern_context_mod.hasWildcardsSIMD;
 pub const containsExtglob = pattern_context_mod.containsExtglob;
 
-// ============================================================================
-// Public API
-// ============================================================================
-
 /// Match a string against a pattern with flags.
-/// This is the top-level entry point for flag-based matching.
-pub inline fn match(pattern: []const u8, string: []const u8, flags: ZlobFlags) bool {
+pub inline fn fnmatch(pattern: []const u8, string: []const u8, flags: ZlobFlags) bool {
     if (flags.extglob and containsExtglob(pattern)) {
         return matchExtglob(pattern, string);
     }
-    return fnmatch(pattern, string, !flags.noescape);
+    return fnmatchCore(pattern, string, !flags.noescape);
 }
 
 /// Match using a pre-computed PatternContext for repeated matching against the same pattern.
 /// Applies all fast-path optimizations (template, suffix, SIMD exact) before falling back
 /// to the full iterative matcher.
-pub inline fn matchWithContext(ctx: *const PatternContext, string: []const u8, flags: ZlobFlags) bool {
+pub inline fn fnmatchWithContext(ctx: *const PatternContext, string: []const u8, flags: ZlobFlags) bool {
     if (flags.extglob and containsExtglob(ctx.pattern)) {
         return matchExtglob(ctx.pattern, string);
     }
-    return matchWithContextNoExtglob(ctx, string, !flags.noescape);
-}
 
-/// Match using a pre-computed PatternContext without extglob checks.
-/// Used internally by zlob.zig where extglob has already been ruled out.
-pub inline fn matchWithContextNoExtglob(ctx: *const PatternContext, string: []const u8, enable_escapes: bool) bool {
-    // Early rejection: if we know the required last character and it doesn't match
     if (ctx.required_last_char) |required_last| {
         if (string.len == 0 or string[string.len - 1] != required_last) {
             return false;
         }
     }
 
-    // Try template-based fast path (*.ext, prefix*, literal, etc.)
     if (ctx.matchTemplate(string)) |result| {
         return result;
     }
 
-    // Fast path: exact match with SIMD for long strings (only if no wildcards)
     if (ctx.pattern.len == string.len and !ctx.has_wildcards) {
         return simdEqual(ctx.pattern, string);
     }
@@ -68,44 +55,27 @@ pub inline fn matchWithContextNoExtglob(ctx: *const PatternContext, string: []co
         return suffix_matcher.match(string);
     }
 
-    return fnmatch(ctx.pattern, string, enable_escapes);
+    return fnmatchCore(ctx.pattern, string, !flags.noescape);
 }
 
-/// Core fnmatch with POSIX escapes enabled (the common default).
-pub inline fn fnmatchFull(pattern: []const u8, string: []const u8) bool {
-    return fnmatch(pattern, string, true);
-}
-
-/// fnmatch with configurable escape handling.
-/// enable_escapes: true = backslash escapes next char (POSIX default)
-///                 false = backslash is literal (NOESCAPE mode)
-pub inline fn fnmatchWithFlags(pattern: []const u8, string: []const u8, enable_escapes: bool) bool {
-    return fnmatch(pattern, string, enable_escapes);
-}
-
-/// fnmatch with extglob support.
-/// If extglob is disabled or pattern doesn't contain extglob syntax, falls back to fnmatch.
-pub inline fn fnmatchWithExtglob(pattern: []const u8, string: []const u8, enable_extglob: bool) bool {
-    if (enable_extglob and containsExtglob(pattern)) {
-        return matchExtglob(pattern, string);
-    }
-    return fnmatch(pattern, string, true);
-}
-
-// ============================================================================
-// Core iterative fnmatch — zero recursion, O(1) stack
-//
-// Uses the standard star-tracking algorithm: on encountering `*`, we save
-// the pattern/string positions and advance. On a later mismatch we backtrack
-// to the saved positions, advancing the string by one character.
-//
-// Bracket expressions are matched inline using a 256-bit bitmap (32 bytes on
-// the stack), supporting POSIX character classes.
-// ============================================================================
-
-pub fn fnmatch(pattern: []const u8, string: []const u8, enable_escapes: bool) bool {
+fn fnmatchCore(pattern: []const u8, string: []const u8, enable_escapes: bool) bool {
     var pi: usize = 0;
     var si: usize = 0;
+
+    // Fast path: scan literal prefix before first wildcard or escape.
+    // This avoids per-character switch overhead for the common case of
+    // patterns like "src/foo/bar*.zig" where most chars are literal.
+    while (pi < pattern.len) {
+        const p = pattern[pi];
+        if (p == '*' or p == '?' or p == '[') break;
+        if (enable_escapes and p == '\\') break;
+        if (si >= string.len or string[si] != p) return false;
+        pi += 1;
+        si += 1;
+    }
+
+    // If pattern exhausted after literal prefix, check if string also exhausted
+    if (pi >= pattern.len) return si == string.len;
 
     // Saved positions for star backtracking (only one star needs to be active
     // at a time — a new star supersedes the previous one)
@@ -149,10 +119,33 @@ pub fn fnmatch(pattern: []const u8, string: []const u8, enable_escapes: bool) bo
                     // Skip consecutive stars (** treated same as * here)
                     pi += 1;
                     while (pi < pattern.len and pattern[pi] == '*') pi += 1;
-                    // Save position for backtracking
-                    star_pi = pi;
-                    star_si = si;
-                    have_star = true;
+
+                    // If star is at end of pattern, it matches everything
+                    if (pi >= pattern.len) return true;
+
+                    // SIMD optimization: if the next pattern char after * is a literal,
+                    // use simdFindChar to jump directly to candidate positions in the
+                    // string instead of advancing one char at a time on each backtrack.
+                    const next_pc = pattern[pi];
+                    const next_is_literal = next_pc != '*' and next_pc != '?' and next_pc != '[' and
+                        !(enable_escapes and next_pc == '\\');
+                    if (next_is_literal) {
+                        // Find next occurrence of the literal char starting from si
+                        if (simdFindChar(string[si..], next_pc)) |offset| {
+                            star_pi = pi;
+                            star_si = si + offset; // will be incremented on backtrack
+                            si = si + offset;
+                            have_star = true;
+                        } else {
+                            // Literal char not found anywhere — no match possible
+                            return false;
+                        }
+                    } else {
+                        // Save position for backtracking
+                        star_pi = pi;
+                        star_si = si;
+                        have_star = true;
+                    }
                     continue;
                 },
                 '?' => {
@@ -187,8 +180,22 @@ pub fn fnmatch(pattern: []const u8, string: []const u8, enable_escapes: bool) bo
 
         // Mismatch — try to backtrack to last star
         if (have_star and star_si < string.len) {
-            pi = star_pi;
             star_si += 1;
+            // SIMD-accelerated backtrack: if the char after * is a literal,
+            // jump to its next occurrence instead of trying every position
+            if (star_pi < pattern.len) {
+                const next_pc = pattern[star_pi];
+                const next_is_literal = next_pc != '*' and next_pc != '?' and next_pc != '[' and
+                    !(enable_escapes and next_pc == '\\');
+                if (next_is_literal) {
+                    if (simdFindChar(string[star_si..], next_pc)) |offset| {
+                        star_si += offset;
+                    } else {
+                        return false;
+                    }
+                }
+            }
+            pi = star_pi;
             si = star_si;
             continue;
         }
@@ -198,9 +205,6 @@ pub fn fnmatch(pattern: []const u8, string: []const u8, enable_escapes: bool) bo
 
     return true;
 }
-
-// Keep old name as an alias for any straggling references
-pub const fnmatch_dumb = fnmatch;
 
 // ============================================================================
 // SIMD utilities
@@ -747,7 +751,7 @@ fn matchPlusInner(alternatives: []const []const u8, rest_pattern: []const u8, st
         var end_pos = str_pos;
         while (end_pos <= string.len) : (end_pos += 1) {
             const candidate = string[str_pos..end_pos];
-            if (fnmatch(alt, candidate, true)) {
+            if (fnmatchCore(alt, candidate, true)) {
                 if (matchExtglobImpl(rest_pattern, string, 0, end_pos)) return true;
                 if (end_pos > str_pos) {
                     if (matchPlusInner(alternatives, rest_pattern, string, end_pos, visited)) return true;
@@ -766,7 +770,7 @@ fn matchNot(alternatives: []const []const u8, rest_pattern: []const u8, string: 
 
         var matches_any = false;
         for (alternatives) |alt| {
-            if (fnmatch(alt, candidate, true)) {
+            if (fnmatchCore(alt, candidate, true)) {
                 matches_any = true;
                 break;
             }
@@ -784,7 +788,7 @@ fn tryMatchAlternative(alt: []const u8, rest_pattern: []const u8, string: []cons
     var end_pos = str_pos;
     while (end_pos <= string.len) : (end_pos += 1) {
         const candidate = string[str_pos..end_pos];
-        if (fnmatch(alt, candidate, true)) {
+        if (fnmatchCore(alt, candidate, true)) {
             if (matchExtglobImpl(rest_pattern, string, 0, end_pos)) return true;
         }
     }
@@ -795,41 +799,39 @@ fn tryMatchAlternative(alt: []const u8, rest_pattern: []const u8, string: []cons
 // Tests
 // ============================================================================
 
-test "match - basic patterns" {
-    try std.testing.expect(match("*.txt", "file.txt", .{}));
-    try std.testing.expect(!match("*.txt", "file.log", .{}));
-    try std.testing.expect(match("test?", "test1", .{}));
-    try std.testing.expect(!match("test?", "test12", .{}));
+test "fnmatch - basic patterns" {
+    try std.testing.expect(fnmatch("*.txt", "file.txt", .{}));
+    try std.testing.expect(!fnmatch("*.txt", "file.log", .{}));
+    try std.testing.expect(fnmatch("test?", "test1", .{}));
+    try std.testing.expect(!fnmatch("test?", "test12", .{}));
 }
 
-test "match - bracket expressions" {
-    try std.testing.expect(match("[abc]", "a", .{}));
-    try std.testing.expect(match("[abc]", "b", .{}));
-    try std.testing.expect(!match("[abc]", "d", .{}));
-    try std.testing.expect(match("[a-z]", "m", .{}));
-    try std.testing.expect(!match("[a-z]", "5", .{}));
+test "fnmatch - bracket expressions" {
+    try std.testing.expect(fnmatch("[abc]", "a", .{}));
+    try std.testing.expect(fnmatch("[abc]", "b", .{}));
+    try std.testing.expect(!fnmatch("[abc]", "d", .{}));
+    try std.testing.expect(fnmatch("[a-z]", "m", .{}));
+    try std.testing.expect(!fnmatch("[a-z]", "5", .{}));
 }
 
-test "match - escape sequences" {
-    try std.testing.expect(match("\\*", "*", .{}));
-    try std.testing.expect(!match("\\*", "a", .{}));
-    try std.testing.expect(match("\\?", "?", .{}));
+test "fnmatch - escape sequences" {
+    try std.testing.expect(fnmatch("\\*", "*", .{}));
+    try std.testing.expect(!fnmatch("\\*", "a", .{}));
+    try std.testing.expect(fnmatch("\\?", "?", .{}));
 }
 
-test "match - empty patterns" {
-    try std.testing.expect(match("", "", .{}));
-    try std.testing.expect(!match("", "a", .{}));
-    try std.testing.expect(match("*", "", .{}));
-    try std.testing.expect(match("*", "anything", .{}));
+test "fnmatch - empty patterns" {
+    try std.testing.expect(fnmatch("", "", .{}));
+    try std.testing.expect(!fnmatch("", "a", .{}));
+    try std.testing.expect(fnmatch("*", "", .{}));
+    try std.testing.expect(fnmatch("*", "anything", .{}));
 }
 
-test "fnmatch - iterative star does not overflow stack" {
-    // This pattern would cause stack overflow with recursive implementation
-    // because * tries every position. With iterative approach it's O(n).
-    try std.testing.expect(fnmatch("*.rs", "hello.rs", true));
-    try std.testing.expect(!fnmatch("*.rs", "hello.txt", true));
-    try std.testing.expect(fnmatch("a*b*c*d", "aXbYcZd", true));
-    try std.testing.expect(!fnmatch("a*b*c*d", "aXbYcZ", true));
+test "fnmatchCore - iterative star does not overflow stack" {
+    try std.testing.expect(fnmatchCore("*.rs", "hello.rs", true));
+    try std.testing.expect(!fnmatchCore("*.rs", "hello.txt", true));
+    try std.testing.expect(fnmatchCore("a*b*c*d", "aXbYcZd", true));
+    try std.testing.expect(!fnmatchCore("a*b*c*d", "aXbYcZ", true));
 }
 
 test "detectExtglobAt - basic detection" {

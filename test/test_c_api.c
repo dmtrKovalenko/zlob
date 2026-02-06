@@ -83,12 +83,13 @@ int main(void) {
   TEST("Filter paths with *.c pattern");
   {
     const char *paths[] = {
-        "main.c", "utils.c", "test.h", "readme.md", "lib.c",
+        "src/main.c", "src/utils.c", "src/tests/test.h",
+        "readme.md",  "src/lib.c",
     };
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
     zlob_t pzlob;
-    int result = zlob_match_paths("*.c", paths, path_count, 0, &pzlob);
+    int result = zlob_match_paths("**/*.c", paths, path_count, ZLOB_RECOMMENDED, &pzlob);
 
     if (result != 0)
       FAIL("zlob_match_paths() failed");
@@ -156,7 +157,8 @@ int main(void) {
 
     printf("    Found %zu matches (expected 3)\n", pzlob.zlo_pathc);
     for (size_t i = 0; i < pzlob.zlo_pathc; i++) {
-      printf("      - %s (len=%zu)\n", pzlob.zlo_pathv[i], pzlob.zlo_pathlen[i]);
+      printf("      - %s (len=%zu)\n", pzlob.zlo_pathv[i],
+             pzlob.zlo_pathlen[i]);
     }
 
     zlobfree(&pzlob);
@@ -197,7 +199,8 @@ int main(void) {
 
     zlob_t pzlob;
     // Note: no space after comma in brace pattern
-    int result = zlob_match_paths("{short,long}.c", paths, path_count, ZLOB_BRACE, &pzlob);
+    int result = zlob_match_paths("{short,long}.c", paths, path_count,
+                                  ZLOB_BRACE, &pzlob);
 
     if (result != 0)
       FAIL("zlob_match_paths() failed");
@@ -207,6 +210,120 @@ int main(void) {
 
     printf("    All lengths correct (avoiding strlen overhead)\n");
     zlobfree(&pzlob);
+    PASS();
+  }
+
+  // zlob_match_paths_at() - Path filtering with base directory
+  printf("\nzlob_match_paths_at() - Path Filtering with Base Directory\n");
+  TEST("Filter absolute paths relative to base directory");
+  {
+    const char *paths[] = {
+        "/home/user/project/src/main.c",
+        "/home/user/project/src/test/unit.c",
+        "/home/user/project/lib/utils.c",
+        "/home/user/project/docs/readme.md",
+    };
+    const size_t path_count = sizeof(paths) / sizeof(paths[0]);
+
+    zlob_t pzlob;
+    int result = zlob_match_paths_at("/home/user/project", "**/*.c", paths,
+                                     path_count, 0, &pzlob);
+
+    if (result != 0)
+      FAIL("zlob_match_paths_at() failed");
+    if (pzlob.zlo_pathc != 3)
+      FAIL("Expected 3 matches");
+    if (pzlob.zlo_pathv == NULL)
+      FAIL("pathv is NULL");
+    if (pzlob.zlo_pathlen == NULL)
+      FAIL("pathlen is NULL");
+
+    printf("    Found %zu matches (expected 3)\n", pzlob.zlo_pathc);
+
+    // Verify zero-copy: result pointers should reference original array
+    int found_original = 0;
+    for (size_t i = 0; i < pzlob.zlo_pathc; i++) {
+      for (size_t j = 0; j < path_count; j++) {
+        if (pzlob.zlo_pathv[i] == paths[j]) {
+          found_original++;
+          break;
+        }
+      }
+    }
+    if (found_original != 3)
+      FAIL("Zero-copy failed: pointers don't reference original memory");
+
+    // Verify pathlen matches strlen for all results
+    for (size_t i = 0; i < pzlob.zlo_pathc; i++) {
+      if (pzlob.zlo_pathlen[i] != strlen(pzlob.zlo_pathv[i]))
+        FAIL("pathlen doesn't match strlen");
+    }
+
+    zlobfree(&pzlob);
+    PASS();
+  }
+
+  TEST("zlob_match_paths_at with trailing slash on base_path");
+  {
+    const char *paths[] = {
+        "/opt/app/src/main.zig",
+        "/opt/app/src/utils/helpers.zig",
+        "/opt/app/test/test_main.zig",
+        "/opt/app/README.md",
+    };
+    const size_t path_count = sizeof(paths) / sizeof(paths[0]);
+
+    zlob_t pzlob;
+    int result = zlob_match_paths_at("/opt/app/", "src/**/*.zig", paths,
+                                     path_count, 0, &pzlob);
+
+    if (result != 0)
+      FAIL("zlob_match_paths_at() failed");
+    if (pzlob.zlo_pathc != 2)
+      FAIL("Expected 2 matches");
+
+    printf("    Found %zu matches (expected 2)\n", pzlob.zlo_pathc);
+    zlobfree(&pzlob);
+    PASS();
+  }
+
+  TEST("zlob_match_paths_at with ./ prefix pattern");
+  {
+    const char *paths[] = {
+        "/home/user/project/src/main.c",
+        "/home/user/project/lib/utils.c",
+    };
+    const size_t path_count = sizeof(paths) / sizeof(paths[0]);
+
+    zlob_t pzlob;
+    int result = zlob_match_paths_at("/home/user/project", "./**/*.c", paths,
+                                     path_count, 0, &pzlob);
+
+    if (result != 0)
+      FAIL("zlob_match_paths_at() with ./ prefix failed");
+    if (pzlob.zlo_pathc != 2)
+      FAIL("Expected 2 matches");
+
+    printf("    Found %zu matches (expected 2)\n", pzlob.zlo_pathc);
+    zlobfree(&pzlob);
+    PASS();
+  }
+
+  TEST("zlob_match_paths_at with no matches");
+  {
+    const char *paths[] = {
+        "/home/user/project/src/main.c",
+        "/home/user/project/lib/utils.c",
+    };
+    const size_t path_count = sizeof(paths) / sizeof(paths[0]);
+
+    zlob_t pzlob;
+    int result = zlob_match_paths_at("/home/user/project", "**/*.zig", paths,
+                                     path_count, 0, &pzlob);
+
+    if (result != ZLOB_NOMATCH)
+      FAIL("Expected ZLOB_NOMATCH");
+    printf("    Correctly returned ZLOB_NOMATCH\n");
     PASS();
   }
 

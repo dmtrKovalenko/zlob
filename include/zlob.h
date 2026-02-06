@@ -285,6 +285,61 @@ int zlob_match_paths_slice(const zlob_slice_t *pattern,
 int zlob_match_paths(const char *pattern, const char *const *paths,
                      size_t path_count, int flags, zlob_t *pzlob);
 
+/**
+ * zlob_match_paths_at - Filter paths with glob pattern relative to a base
+ * directory (zero-copy, C string version)
+ *
+ * @return 0 on success, ZLOB_NOMATCH if no matches, ZLOB_NOSPACE on OOM
+ *
+ * This function filters an array of absolute paths using a glob pattern
+ * relative to a base directory, WITHOUT copying the path strings. The result
+ * pointers in pzlob->pathv point directly to the caller's original memory.
+ *
+ * If the pattern starts with "./", it is treated as relative to base_path
+ * (the prefix is stripped).
+ *
+ * Example:
+ *   const char *paths[] = {
+ *       "/home/user/project/src/main.c",
+ *       "/home/user/project/lib/utils.c",
+ *       "/home/user/project/docs/readme.md",
+ *   };
+ *   zlob_t pzlob;
+ *   int result = zlob_match_paths_at("/home/user/project", "src/*.c",
+ *       paths, 3, 0, &pzlob);
+ *
+ * IMPORTANT:
+ * - Caller must keep the original paths alive until zlobfree() is called
+ * - Use zlobfree() to clean up results
+ */
+int zlob_match_paths_at(const char *base_path, const char *pattern,
+                        const char *const *paths, size_t path_count, int flags,
+                        zlob_t *pzlob);
+
+/**
+ * zlob_match_paths_at_slice - Filter paths with glob pattern relative to a
+ * base directory (zero-copy, slice version)
+ *
+ * @param base_path     Pointer to zlob_slice_t containing the base directory
+ * @param pattern       Pointer to zlob_slice_t containing the pattern
+ * @param paths         Array of zlob_slice_t (one per path)
+ * @param path_count    Number of paths in the array
+ * @param flags         Bitwise OR of ZLOB_* flags
+ * @param pzlob         Pointer to zlob_t structure to receive results
+ * @return 0 on success, ZLOB_NOMATCH if no matches, ZLOB_NOSPACE on OOM
+ *
+ * Same as zlob_match_paths_at but using slice types for zero-copy FFI with
+ * languages like Rust and Zig.
+ *
+ * IMPORTANT:
+ * - Caller must keep the original paths alive until zlobfree() is called
+ * - Use zlobfree() to clean up results
+ */
+int zlob_match_paths_at_slice(const zlob_slice_t *base_path,
+                              const zlob_slice_t *pattern,
+                              const zlob_slice_t *paths, size_t path_count,
+                              int flags, zlob_t *pzlob);
+
 #ifdef __cplusplus
 }
 #endif

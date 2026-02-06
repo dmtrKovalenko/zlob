@@ -30,6 +30,15 @@ pub struct ZlobMatch<'a> {
     _marker: PhantomData<&'a str>,
 }
 
+impl std::fmt::Debug for ZlobMatch<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZlobMatch")
+            .field("len", &self.len())
+            .field("paths", &self.as_strs())
+            .finish()
+    }
+}
+
 impl<'a> ZlobMatch<'a> {
     /// Returns the number of matched paths.
     #[inline]
@@ -194,19 +203,13 @@ impl std::iter::FusedIterator for ZlobMatchIter<'_, '_> {}
 /// any allocation or copying, thanks to the identical memory layout of
 /// Rust's `&str` and zlob's `zlob_slice_t`.
 ///
-/// # Arguments
-///
-/// * `pattern` - The glob pattern to match against
-/// * `paths` - A slice of paths to filter
-/// * `flags` - Flags controlling the matching behavior
-///
-/// # Returns
+/// ## Returns
 ///
 /// * `Ok(Some(ZlobMatch))` - Contains references to the paths that matched
 /// * `Ok(None)` - No paths matched the pattern
 /// * `Err(ZlobError)` - An error occurred (out of memory, etc.)
 ///
-/// # Example
+/// ## Example
 ///
 /// ```
 /// use zlob::{zlob_match_paths, ZlobFlags};
@@ -264,6 +267,82 @@ pub fn zlob_match_paths<'a>(
             _marker: PhantomData,
         })),
         Ok(false) => Ok(None), // No matches
+        Err(err) => Err(err),
+    }
+}
+
+/// Match paths against a glob pattern relative to a base directory, without filesystem access (zero-copy).
+///
+/// This is the "at" variant of [`zlob_match_paths`] for use when input paths are absolute
+/// but the pattern is relative to a known base directory. The `base_path` may or may not
+/// end with a trailing `/` — the offset is computed automatically.
+///
+/// If the pattern starts with `./`, it is interpreted as relative to `base_path`
+/// (the prefix is stripped).
+///
+/// **Zero-copy**: Same as `zlob_match_paths` — no allocation or copying of path strings.
+///
+/// ## Arguments
+///
+/// * `base_path` - The base directory that the paths are rooted under
+/// * `pattern` - The glob pattern to match against (relative to `base_path`)
+/// * `paths` - A slice of absolute paths to filter
+/// * `flags` - Flags controlling the matching behavior
+///
+/// ## Returns
+///
+/// * `Ok(Some(ZlobMatch))` - Contains references to the paths that matched
+/// * `Ok(None)` - No paths matched the pattern
+/// * `Err(ZlobError)` - An error occurred (out of memory, etc.)
+///
+/// ## Example
+///
+/// ```
+/// use zlob::{zlob_match_paths_at, ZlobFlags};
+///
+/// let paths = [
+///     "/home/user/project/src/lib.rs",
+///     "/home/user/project/src/main.rs",
+///     "/home/user/project/README.md",
+/// ];
+///
+/// if let Some(matches) = zlob_match_paths_at("/home/user/project", "**/*.rs", &paths, ZlobFlags::empty())? {
+///     assert_eq!(matches.len(), 2);
+///     // Results contain the original full paths
+///     assert_eq!(&matches[0], "/home/user/project/src/lib.rs");
+/// }
+/// # Ok::<(), zlob::ZlobError>(())
+/// ```
+pub fn zlob_match_paths_at<'a>(
+    base_path: &str,
+    pattern: &str,
+    paths: &'a [&str],
+    flags: ZlobFlags,
+) -> Result<Option<ZlobMatch<'a>>, ZlobError> {
+    // SAFETY: zlob_slice_t and &str have identical memory layout.
+    let base_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&base_path) };
+    let pattern_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&pattern) };
+    let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+
+    let mut inner = ffi::zlob_t::default();
+
+    let result = unsafe {
+        ffi::zlob_match_paths_at_slice(
+            base_slice,
+            pattern_slice,
+            path_slices.as_ptr(),
+            path_slices.len(),
+            flags.bits(),
+            &mut inner,
+        )
+    };
+
+    match ZlobError::from_code(result) {
+        Ok(true) => Ok(Some(ZlobMatch {
+            inner,
+            _marker: PhantomData,
+        })),
+        Ok(false) => Ok(None),
         Err(err) => Err(err),
     }
 }
@@ -430,5 +509,170 @@ mod tests {
         assert!(results.contains(&"foo.txt"));
         assert!(results.contains(&"bar.txt"));
         assert!(!results.contains(&"baz.txt"));
+    }
+
+    #[test]
+    fn test_match_paths_at_200_random_rs_paths() {
+        let base_path = "/workspace/my-project";
+
+        let dirs = [
+            "src",
+            "src/core",
+            "src/utils",
+            "src/models",
+            "src/handlers",
+            "src/services",
+            "src/middleware",
+            "src/config",
+            "src/db",
+            "src/api",
+            "tests",
+            "tests/integration",
+            "tests/unit",
+            "benches",
+            "examples",
+            "lib",
+            "lib/helpers",
+            "lib/macros",
+            "tools",
+            "tools/codegen",
+        ];
+
+        let rs_names = [
+            "main",
+            "lib",
+            "mod",
+            "config",
+            "utils",
+            "helpers",
+            "errors",
+            "types",
+            "schema",
+            "handler",
+            "service",
+            "middleware",
+            "router",
+            "client",
+            "server",
+            "auth",
+            "db",
+            "cache",
+            "logger",
+            "parser",
+        ];
+        let non_rs_names = [
+            "README.md",
+            "Cargo.toml",
+            "Cargo.lock",
+            ".gitignore",
+            "LICENSE",
+            "config.toml",
+            "setup.py",
+            "index.js",
+            "style.css",
+            "data.json",
+        ];
+
+        let mut all_paths_owned: Vec<String> = Vec::with_capacity(200);
+
+        // Generate 160 .rs files across various directories
+        let mut count = 0;
+        for (i, dir) in dirs.iter().enumerate() {
+            for (j, name) in rs_names.iter().enumerate() {
+                if count >= 160 {
+                    break;
+                }
+                // Add some variety with numbered suffixes
+                let suffix = if (i + j) % 3 == 0 {
+                    format!("_{}", (i * 7 + j) % 100)
+                } else {
+                    String::new()
+                };
+                all_paths_owned.push(format!("{}/{}/{}{}.rs", base_path, dir, name, suffix));
+                count += 1;
+            }
+            if count >= 160 {
+                break;
+            }
+        }
+
+        // Fill remaining slots with non-.rs files to reach 200
+        while all_paths_owned.len() < 200 {
+            let idx = all_paths_owned.len() - 160;
+            let dir = dirs[idx % dirs.len()];
+            let name = non_rs_names[idx % non_rs_names.len()];
+            all_paths_owned.push(format!("{}/{}/{}", base_path, dir, name));
+        }
+
+        assert_eq!(all_paths_owned.len(), 200);
+
+        let all_paths: Vec<&str> = all_paths_owned.iter().map(|s| s.as_str()).collect();
+        let expected_rs_count = all_paths.iter().filter(|p| p.ends_with(".rs")).count();
+        assert!(expected_rs_count == 160,);
+
+        let matches = zlob_match_paths_at(base_path, "**/*.rs", &all_paths, ZlobFlags::empty())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            matches.len(),
+            expected_rs_count,
+            "Expected {} .rs matches, got {}",
+            expected_rs_count,
+            matches.len()
+        );
+
+        // Verify every matched path ends with .rs and starts with base_path
+        for path in &matches {
+            assert!(
+                path.ends_with(".rs"),
+                "Matched path should end with .rs: {}",
+                path
+            );
+            assert!(
+                path.starts_with(base_path),
+                "Matched path should start with base_path: {}",
+                path
+            );
+        }
+
+        let non_rs_in_results = matches.iter().filter(|p| !p.ends_with(".rs")).count();
+        assert_eq!(non_rs_in_results, 0, "Should not match non-.rs files");
+
+        let matches_dot =
+            zlob_match_paths_at(base_path, "./**/*.rs", &all_paths, ZlobFlags::empty())
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(
+            matches.len(),
+            matches_dot.len(),
+            "./ prefix should give same results"
+        );
+
+        let no_match = zlob_match_paths_at(
+            base_path,
+            "nonexistent_dir/*.rs",
+            &all_paths,
+            ZlobFlags::empty(),
+        )
+        .unwrap();
+        assert!(
+            no_match.is_none(),
+            "Non-existent dir pattern should return no matches"
+        );
+
+        let first_rs = all_paths.iter().find(|p| p.ends_with(".rs")).unwrap();
+        let rel_first = &first_rs[base_path.len() + 1..];
+        let literal_match =
+            zlob_match_paths_at(base_path, rel_first, &all_paths, ZlobFlags::empty())
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            literal_match.len(),
+            1,
+            "Literal pattern should match exactly one path"
+        );
+        assert_eq!(&literal_match[0], *first_rs);
     }
 }

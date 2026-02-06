@@ -128,6 +128,39 @@ pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []co
     return glob.path_matcher.matchPaths(allocator, pattern, paths, zflags);
 }
 
+/// Match glob pattern against an array of absolute paths, treating each path as relative
+/// to the given base directory.
+///
+/// This is the "at" variant of `matchPaths` for use when input paths are absolute but the
+/// pattern is relative to a known base directory. The `base_path` may or may not end with
+/// a trailing `/` — the offset is computed automatically.
+///
+/// If the pattern starts with `./`, it is interpreted as relative to `base_path` and the
+/// prefix is replaced accordingly (i.e. stripped, since matching already operates relative
+/// to the base).
+///
+/// Matched results contain the **original full paths** as submitted by the caller.
+///
+/// Example:
+/// ```zig
+/// const paths = [_][]const u8{
+///     "/home/user/project/src/main.c",
+///     "/home/user/project/src/test/unit.c",
+///     "/home/user/project/lib/utils.c",
+///     "/home/user/project/docs/readme.md",
+/// };
+///
+/// const result = try zlob.matchPathsAt(allocator, "/home/user/project", "**/*.c", &paths, .{});
+/// defer result.deinit();
+/// // result.paths → the 3 original absolute paths that end in .c
+/// ```
+///
+/// Supported flags: same as `matchPaths`.
+pub fn matchPathsAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !GlobResults {
+    const zflags = flagsToZlobFlags(flags_param);
+    return glob.path_matcher.matchPathsAt(allocator, base_path, pattern, paths, zflags);
+}
+
 /// Perform file system walking within a specified base directory and collect matching results.
 ///
 /// This is similar to `match()` but operates relative to the given `base_path` instead of

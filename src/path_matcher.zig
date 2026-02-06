@@ -13,9 +13,8 @@ const hasWildcardsSIMD = glob.hasWildcardsSIMD;
 const indexOfCharSIMD = glob.indexOfCharSIMD;
 const lastIndexOfCharSIMD = glob.lastIndexOfCharSIMD;
 const PatternContext = glob.PatternContext;
-const fnmatchWithContext = glob.fnmatchWithContext;
-const fnmatchWithExtglob = glob.fnmatchWithExtglob;
 const containsExtglob = glob.containsExtglob;
+const fnmatch_mod = glob.fnmatch;
 
 const GlobResults = glob.GlobResults;
 const ZlobFlags = glob.ZlobFlags;
@@ -169,7 +168,7 @@ fn splitPathComponentsFast(path: []const u8, buffer: [][]const u8) [][]const u8 
 pub fn matchGlobSimple(pattern: []const u8, path: []const u8) bool {
     // Fast path: no ** in pattern
     if (mem.indexOf(u8, pattern, "**") == null) {
-        return glob.fnmatchFull(pattern, path);
+        return fnmatch_mod.fnmatch(pattern, path, .{});
     }
 
     // Split pattern and path into segments using stack buffers
@@ -229,7 +228,7 @@ fn matchSegmentsSimple(
         }
 
         // Use fnmatchFull to match the segment
-        if (!glob.fnmatchFull(current_pattern, path_segments[path_idx])) {
+        if (!fnmatch_mod.fnmatch(current_pattern, path_segments[path_idx], .{})) {
             return false;
         }
 
@@ -283,9 +282,9 @@ fn shouldSkipHidden(path_component: []const u8, pattern: []const u8, flags: Zlob
 /// Uses extglob-aware matching when enable_extglob is true
 inline fn matchSegment(pat_seg: []const u8, path_comp: []const u8, ctx: *const PatternContext, enable_extglob: bool) bool {
     if (enable_extglob and containsExtglob(pat_seg)) {
-        return fnmatchWithExtglob(pat_seg, path_comp, true);
+        return fnmatch_mod.fnmatch(pat_seg, path_comp, .{ .extglob = true });
     }
-    return fnmatchWithContext(ctx, path_comp);
+    return fnmatch_mod.fnmatchWithContext(ctx, path_comp, .{});
 }
 
 /// Optimized iterative segment matching using a single-row DP approach
@@ -380,10 +379,9 @@ fn matchSinglePath(
 
     if (!pattern_segments.has_doublestar) {
         if (enable_extglob and containsExtglob(pattern_segments.original_pattern)) {
-            return fnmatchWithExtglob(pattern_segments.original_pattern, path, true);
+            return fnmatch_mod.fnmatch(pattern_segments.original_pattern, path, .{ .extglob = true });
         }
-        // Use fnmatchWithFlags to properly handle escape sequences based on NOESCAPE flag
-        return glob.fnmatchWithFlags(pattern_segments.original_pattern, path, enable_escapes);
+        return fnmatch_mod.fnmatch(pattern_segments.original_pattern, path, .{ .noescape = !enable_escapes });
     }
 
     var component_buffer: [64][]const u8 = undefined;
@@ -442,8 +440,65 @@ fn matchSinglePath(
 /// - Uses SIMD-optimized fnmatch() for component matching
 pub fn matchPaths(
     allocator: Allocator,
+    raw_pattern: []const u8,
+    paths: []const []const u8,
+    flags: ZlobFlags,
+) !GlobResults {
+    // Strip leading "./" from pattern - paths are relative to the current directory by default
+    const pattern = if (raw_pattern.len >= 2 and raw_pattern[0] == '.' and raw_pattern[1] == '/')
+        raw_pattern[2..]
+    else
+        raw_pattern;
+    return matchPathsImpl(allocator, pattern, paths, 0, flags);
+}
+
+/// Match glob pattern against an array of absolute paths, treating each path as relative
+/// to the given base directory.
+///
+/// The `base_path` may or may not end with a trailing `/` — the offset into each path
+/// is computed automatically. If the pattern starts with `./`, it is interpreted as
+/// relative to `base_path` (i.e. stripped, since matching already operates relative to
+/// the base).
+///
+/// Matched results contain the **original full paths** as submitted by the caller.
+///
+/// Example:
+///   base_path: "/home/user/project"
+///   Paths:  ["/home/user/project/src/main.c", "/home/user/project/lib/utils.c"]
+///   Pattern: "src/*.c"
+///   → matches ["/home/user/project/src/main.c"]
+pub fn matchPathsAt(
+    allocator: Allocator,
+    base_path: []const u8,
+    raw_pattern: []const u8,
+    paths: []const []const u8,
+    flags: ZlobFlags,
+) !GlobResults {
+    // Compute offset: for empty base_path, offset is 0.
+    // Otherwise, base_path length plus 1 for the separator if it doesn't already
+    // end with '/'.
+    const path_offset = if (base_path.len == 0)
+        0
+    else if (base_path[base_path.len - 1] == '/')
+        base_path.len
+    else
+        base_path.len + 1;
+
+    // we can afely strip the path becuase if the path_offset passed to the impl function would be
+    // larger than the provided path it won't be matched anyway
+    const pattern = if (raw_pattern.len >= 2 and raw_pattern[0] == '.' and raw_pattern[1] == '/')
+        raw_pattern[2..]
+    else
+        raw_pattern;
+
+    return matchPathsImpl(allocator, pattern, paths, path_offset, flags);
+}
+
+fn matchPathsImpl(
+    allocator: Allocator,
     pattern: []const u8,
     paths: []const []const u8,
+    path_offset: usize,
     flags: ZlobFlags,
 ) !GlobResults {
     // Handle ZLOB_BRACE - expand pattern and match against any alternative
@@ -458,7 +513,7 @@ pub fn matchPaths(
 
         // If only one pattern after expansion (no actual braces), just match it directly
         if (expanded_patterns.len == 1) {
-            return matchPaths(allocator, expanded_patterns[0], paths, flags.without(.{ .brace = true }));
+            return matchPathsImpl(allocator, expanded_patterns[0], paths, path_offset, flags.without(.{ .brace = true }));
         }
 
         // Pre-compute pattern segments for each alternative
@@ -478,8 +533,11 @@ pub fn matchPaths(
 
         // Single pass through paths - check if ANY alternative matches
         for (paths) |path| {
+            if (path.len < path_offset) continue;
+
+            const rel_path = path[path_offset..];
             for (pattern_segments_list) |*ps| {
-                if (try matchSinglePath(ps, path, inner_flags)) {
+                if (try matchSinglePath(ps, rel_path, inner_flags)) {
                     try matches.append(path);
                     break; // Path matched, no need to check other alternatives
                 }
@@ -578,7 +636,10 @@ pub fn matchPaths(
         defer matches.deinit();
 
         for (paths) |path| {
-            if (mem.eql(u8, path, norm_pattern)) {
+            if (path.len < path_offset) continue;
+
+            const rel_path = path[path_offset..];
+            if (mem.eql(u8, rel_path, norm_pattern)) {
                 try matches.append(path);
             }
         }
@@ -648,21 +709,27 @@ pub fn matchPaths(
             try suffix_match.SimdBatchedSuffixMatch.init(suffix).matchPathsBatchedSIMD(paths, &pre_filtered);
 
             for (pre_filtered.items) |path| {
-                if (try matchSinglePath(&pattern_segments, path, flags)) {
+                if (path.len < path_offset) continue;
+                const rel_path = path[path_offset..];
+                if (try matchSinglePath(&pattern_segments, rel_path, flags)) {
                     try matches.append(path);
                 }
             }
         } else {
             const suffix_matcher = suffix_match.SuffixMatch.new(suffix);
             for (paths) |path| {
-                if (suffix_matcher.match(path) and try matchSinglePath(&pattern_segments, path, flags)) {
+                if (path.len < path_offset) continue;
+                const rel_path = path[path_offset..];
+                if (suffix_matcher.match(path) and try matchSinglePath(&pattern_segments, rel_path, flags)) {
                     try matches.append(path);
                 }
             }
         }
     } else {
         for (paths) |path| {
-            if (try matchSinglePath(&pattern_segments, path, flags)) {
+            if (path.len < path_offset) continue;
+            const rel_path = path[path_offset..];
+            if (try matchSinglePath(&pattern_segments, rel_path, flags)) {
                 try matches.append(path);
             }
         }

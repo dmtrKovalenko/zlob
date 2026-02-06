@@ -89,6 +89,7 @@ pub const PatternContext = struct {
     /// Returns null if no fast path available, otherwise returns match result
     pub inline fn matchTemplate(self: *const PatternContext, string: []const u8) ?bool {
         return switch (self.template) {
+            .none => null, // No fast path — most common case, check first
             .literal => mem.eql(u8, self.pattern, string),
             .star_only => true, // * matches anything
             .star_dot_ext => {
@@ -121,7 +122,6 @@ pub const PatternContext = struct {
                 }
                 return null;
             },
-            .none => null, // No fast path
         };
     }
 };
