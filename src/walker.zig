@@ -111,7 +111,7 @@ pub const HiddenConfig = struct {
 
 pub const WalkerConfig = struct {
     /// Buffer size for getdents64 (Linux only)
-    getdents_buffer_size: usize = 65536,
+    getdents_buffer_size: usize = 16384,
 
     // left for convenience should not be used for getdents64
     max_depth: usize = 128,
@@ -230,9 +230,7 @@ const RecursiveGetdents64Walker = struct {
         const buffer = try allocator.alignedAlloc(u8, .@"8", buffer_size);
         errdefer allocator.free(buffer);
 
-        // Directory stack: starts with capacity 64 (covers typical trees),
-        // grows dynamically for directories with many siblings.
-        const dir_stack = std.ArrayList(DirEntry).initCapacity(allocator, 64) catch
+        const dir_stack = std.ArrayList(DirEntry).initCapacity(allocator, 16) catch
             std.ArrayList(DirEntry){ .items = &.{}, .capacity = 0 };
 
         const start_fd = if (config.base_dir) |bd| open: {

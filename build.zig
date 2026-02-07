@@ -507,6 +507,27 @@ pub fn build(b: *std.Build) void {
     perf_recursive.linkLibC();
     b.installArtifact(perf_recursive);
 
+    // Tree-size scaling benchmark (small/medium/large trees vs libc)
+    const bench_tree_sizes = b.addExecutable(.{
+        .name = "bench_tree_sizes",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench_tree_sizes.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "c_lib", .module = c_lib_mod },
+                .{ .name = "zlob_flags", .module = flags_mod },
+            },
+        }),
+    });
+    bench_tree_sizes.linkLibC();
+    b.installArtifact(bench_tree_sizes);
+
+    const bench_tree_sizes_cmd = b.addRunArtifact(bench_tree_sizes);
+    bench_tree_sizes_cmd.step.dependOn(b.getInstallStep());
+    const bench_tree_sizes_step = b.step("bench-tree-sizes", "Benchmark zlob vs libc across small/medium/large directory trees");
+    bench_tree_sizes_step.dependOn(&bench_tree_sizes_cmd.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

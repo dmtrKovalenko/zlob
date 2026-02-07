@@ -183,67 +183,155 @@ pub const DT_UNKNOWN = std.c.DT.UNKNOWN;
 pub const DT_DIR = std.c.DT.DIR;
 
 /// Parallel arrays of paths and their lengths for zlob_t output.
+/// Uses inline stack buffers for small result sets (up to 32 entries) to avoid
+/// heap allocation entirely for common small-tree glob operations.
+/// Falls back to heap-allocated arrays when the inline capacity is exceeded.
 pub const ResultsList = struct {
-    paths: std.ArrayList([*c]u8),
-    lengths: std.ArrayList(usize),
-    allocator: Allocator,
+    const INLINE_CAP = 32;
 
-    /// Initialize with zero capacity
+    /// Heap-allocated buffers (null when using inline)
+    heap_paths: ?[*][*c]u8 = null,
+    heap_lengths: ?[*]usize = null,
+
+    count: usize = 0,
+    capacity: usize = INLINE_CAP,
+    allocator: Allocator,
+    // Inline buffers for small result sets - avoids heap allocation for <=32 results
+    inline_paths: [INLINE_CAP][*c]u8 = undefined,
+    inline_lengths: [INLINE_CAP]usize = undefined,
+
+    /// Initialize with inline (stack) capacity - zero heap allocations.
     pub fn init(allocator: Allocator) ResultsList {
+        return .{ .allocator = allocator };
+    }
+
+    /// Initialize with pre-allocated capacity.
+    /// If requested capacity <= INLINE_CAP, uses the inline buffer (no heap alloc).
+    /// Otherwise allocates on the heap.
+    pub fn initWithCapacity(allocator: Allocator, capacity: usize) Allocator.Error!ResultsList {
+        if (capacity <= INLINE_CAP) {
+            return init(allocator);
+        }
+        const hp = try allocator.alloc([*c]u8, capacity);
+        const hl = try allocator.alloc(usize, capacity);
         return .{
-            .paths = .{},
-            .lengths = .{},
+            .heap_paths = hp.ptr,
+            .heap_lengths = hl.ptr,
+            .capacity = capacity,
             .allocator = allocator,
         };
     }
 
-    /// Initialize with pre-allocated capacity to avoid reallocations
-    pub fn initWithCapacity(allocator: Allocator, capacity: usize) Allocator.Error!ResultsList {
-        var paths = std.ArrayList([*c]u8){};
-        var lengths = std.ArrayList(usize){};
-        try paths.ensureTotalCapacity(allocator, capacity);
-        try lengths.ensureTotalCapacity(allocator, capacity);
-        return .{
-            .paths = paths,
-            .lengths = lengths,
-            .allocator = allocator,
-        };
+    inline fn isInline(self: *const ResultsList) bool {
+        return self.heap_paths == null;
+    }
+
+    /// Get pointer to current paths storage
+    inline fn pathsPtr(self: *ResultsList) [*][*c]u8 {
+        return self.heap_paths orelse @as([*][*c]u8, @ptrCast(&self.inline_paths));
+    }
+
+    /// Get pointer to current lengths storage
+    inline fn lengthsPtr(self: *ResultsList) [*]usize {
+        return self.heap_lengths orelse @as([*]usize, @ptrCast(&self.inline_lengths));
     }
 
     pub fn deinit(self: *ResultsList) void {
-        self.paths.deinit(self.allocator);
-        self.lengths.deinit(self.allocator);
+        if (!self.isInline()) {
+            self.allocator.free(self.heap_paths.?[0..self.capacity]);
+            self.allocator.free(self.heap_lengths.?[0..self.capacity]);
+        }
     }
 
     pub fn ensureTotalCapacity(self: *ResultsList, capacity: usize) Allocator.Error!void {
-        try self.paths.ensureTotalCapacity(self.allocator, capacity);
-        try self.lengths.ensureTotalCapacity(self.allocator, capacity);
+        if (capacity <= self.capacity) return;
+        try self.grow(capacity);
     }
 
-    /// Add a path with its known length - O(1), no scanning
+    /// Grow to at least the given capacity, spilling from inline to heap if needed.
+    fn grow(self: *ResultsList, min_capacity: usize) Allocator.Error!void {
+        const new_cap = @max(min_capacity, self.capacity * 2);
+        const new_paths = try self.allocator.alloc([*c]u8, new_cap);
+        const new_lengths = try self.allocator.alloc(usize, new_cap);
+        // Copy existing data
+        if (self.count > 0) {
+            const src_p = self.pathsPtr();
+            const src_l = self.lengthsPtr();
+            @memcpy(new_paths[0..self.count], src_p[0..self.count]);
+            @memcpy(new_lengths[0..self.count], src_l[0..self.count]);
+        }
+        // Free old heap buffers (inline buffers are part of the struct, nothing to free)
+        if (!self.isInline()) {
+            self.allocator.free(self.heap_paths.?[0..self.capacity]);
+            self.allocator.free(self.heap_lengths.?[0..self.capacity]);
+        }
+        self.heap_paths = new_paths.ptr;
+        self.heap_lengths = new_lengths.ptr;
+        self.capacity = new_cap;
+    }
+
+    /// Add a path with its known length - O(1) amortized
     pub fn append(self: *ResultsList, ptr: [*c]u8, path_len: usize) Allocator.Error!void {
-        try self.paths.append(self.allocator, ptr);
-        try self.lengths.append(self.allocator, path_len);
+        if (self.count >= self.capacity) {
+            try self.grow(self.capacity + 1);
+        }
+        const p = self.pathsPtr();
+        const l = self.lengthsPtr();
+        p[self.count] = ptr;
+        l[self.count] = path_len;
+        self.count += 1;
     }
 
     pub fn len(self: *const ResultsList) usize {
-        return self.paths.items.len;
+        return self.count;
+    }
+
+    /// Get the current paths as a slice
+    pub inline fn pathSlice(self: *ResultsList) [][*c]u8 {
+        return self.pathsPtr()[0..self.count];
+    }
+
+    /// Get the current lengths as a slice
+    pub inline fn lengthSlice(self: *ResultsList) []usize {
+        return self.lengthsPtr()[0..self.count];
     }
 
     /// Transfer ownership of the paths array, adding a null terminator.
-    /// Returns the buffer with null terminator appended (exact-sized allocation).
-    /// After calling this, the ResultsList paths array is invalidated.
+    /// Returns a heap-allocated buffer with null terminator appended.
+    /// Note: count is NOT reset here so toOwnedLengths can still read it.
     pub fn toOwnedPathv(self: *ResultsList) Allocator.Error![][*c]u8 {
-        // Append null terminator - this may realloc if needed
-        try self.paths.append(self.allocator, null);
-        // Transfer ownership with exact-sized reallocation
-        return self.paths.toOwnedSlice(self.allocator);
+        const count = self.count;
+        // Always allocate exact-sized buffer and copy (simple + correct)
+        const buf = try self.allocator.alloc([*c]u8, count + 1);
+        if (count > 0) {
+            const src = self.pathsPtr();
+            @memcpy(buf[0..count], src[0..count]);
+        }
+        buf[count] = null;
+        // Free heap paths buffer if any (but preserve count for toOwnedLengths)
+        if (!self.isInline()) {
+            self.allocator.free(self.heap_paths.?[0..self.capacity]);
+            self.heap_paths = null;
+        }
+        return buf;
     }
 
     /// Transfer ownership of the lengths array (exact-sized allocation).
-    /// After calling this, the ResultsList lengths array is invalidated.
+    /// Note: count is NOT reset here; call deinit() when done with both arrays.
     pub fn toOwnedLengths(self: *ResultsList) Allocator.Error![]usize {
-        return self.lengths.toOwnedSlice(self.allocator);
+        const count = self.count;
+        // Always allocate exact-sized buffer and copy (simple + correct)
+        const buf = try self.allocator.alloc(usize, count);
+        if (count > 0) {
+            const src = self.lengthsPtr();
+            @memcpy(buf[0..count], src[0..count]);
+        }
+        // Free heap lengths buffer if any
+        if (self.heap_lengths) |hl| {
+            self.allocator.free(hl[0..self.capacity]);
+            self.heap_lengths = null;
+        }
+        return buf;
     }
 };
 
@@ -448,7 +536,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     var result_paths = ResultsList.initWithCapacity(allocator, estimated_capacity) catch ResultsList.init(allocator);
     defer result_paths.deinit();
     errdefer {
-        for (result_paths.paths.items, result_paths.lengths.items) |path, path_len| {
+        for (result_paths.pathSlice(), result_paths.lengthSlice()) |path, path_len| {
             const path_slice = @as([*]u8, @ptrCast(path))[0 .. path_len + 1];
             allocator.free(path_slice);
         }
@@ -1559,8 +1647,8 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
         const old_pathv = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[offs..][0..old_count];
         @memcpy(pathv_buf[offs..][0..old_count], old_pathv);
         @memcpy(pathlen_buf[0..old_count], pzlob.zlo_pathlen[0..old_count]);
-        @memcpy(pathv_buf[offs + old_count ..][0..new_count], results.paths.items);
-        @memcpy(pathlen_buf[old_count..][0..new_count], results.lengths.items);
+        @memcpy(pathv_buf[offs + old_count ..][0..new_count], results.pathSlice());
+        @memcpy(pathlen_buf[old_count..][0..new_count], results.lengthSlice());
 
         pathv_buf[offs + total_count] = null;
         const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
@@ -1599,8 +1687,8 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
         const pathlen_buf = allocator.alloc(usize, new_count) catch return error.OutOfMemory;
 
         @memset(pathv_buf[0..offs], null);
-        @memcpy(pathv_buf[offs..][0..new_count], results.paths.items);
-        @memcpy(pathlen_buf, results.lengths.items);
+        @memcpy(pathv_buf[offs..][0..new_count], results.pathSlice());
+        @memcpy(pathlen_buf, results.lengthSlice());
 
         pathv_buf[offs + new_count] = null;
         const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
