@@ -33,7 +33,7 @@ One of my favourite optimizations for this project is patterns like `./**/*.{c,r
 - gitignore implemenation allows use to optionally skip large subdirectories out of the box
 - and the actual `*.{c,rs,zig}` pattern is precompiled down the the SIMD bitmask matching that allows to match 3 extension at once
 
-## Copmatibility
+## Compatibility
 
 As much as I could I converted all the tests that I found from the glibc test suite, rust's `glob` crate and nodejs's `fs.glob` function. It passes 100% of test suite for both file system and string paths matching. As long as that it compares over 450 glob patterns with glibc for the same results count and the same outpu.
 
