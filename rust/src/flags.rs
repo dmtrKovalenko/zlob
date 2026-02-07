@@ -43,9 +43,6 @@ bitflags! {
         /// Leading `.` can be matched by wildcards.
         const PERIOD = ffi::ZLOB_PERIOD;
 
-        /// GNU: Set in flags if any metacharacters were seen (output only).
-        const MAGCHAR = ffi::ZLOB_MAGCHAR;
-
         /// GNU: Use custom directory functions.
         const ALTDIRFUNC = ffi::ZLOB_ALTDIRFUNC;
 

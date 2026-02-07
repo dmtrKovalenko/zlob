@@ -1,12 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const suffix_match = @import("suffix_match.zig");
+pub const suffix_match = @import("suffix_match.zig");
 const brace_optimizer = @import("brace_optimizer.zig");
 const pattern_context_internal = @import("pattern_context.zig");
 const sorting = @import("sorting.zig");
 const zlob_flags = @import("zlob_flags");
 const walker = @import("walker");
 const fnmatch_impl = @import("fnmatch.zig");
+const utils = @import("utils.zig");
 const c = std.c;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
@@ -15,7 +16,6 @@ const c_zlob = @cImport({
     @cInclude("zlob.h");
 });
 
-// Re-export modules for public API
 pub const fnmatch = fnmatch_impl;
 pub const pattern_context = pattern_context_internal;
 
@@ -29,10 +29,6 @@ pub const containsExtglob = fnmatch_impl.containsExtglob;
 pub const simdFindChar = fnmatch_impl.simdFindChar;
 pub const gitignore = @import("gitignore.zig");
 pub const GitIgnore = gitignore.GitIgnore;
-
-const pwd = @cImport({
-    @cInclude("pwd.h");
-});
 
 pub const zlob_dirent_t = extern struct {
     d_name: [*:0]const u8, // Null-terminated entry name
@@ -59,8 +55,6 @@ pub const opendir_t = ?*const fn (path: [*:0]const u8) callconv(.c) ?*anyopaque;
 pub const readdir_t = ?*const fn (dir: ?*anyopaque) callconv(.c) ?*zlob_dirent_t;
 pub const closedir_t = ?*const fn (dir: ?*anyopaque) callconv(.c) void;
 
-// Internal glob result structure (C-style, used internally during refactoring)
-// TODO: Remove this entirely once refactoring to pure Zig slices is complete
 pub const zlob_t = extern struct {
     zlo_pathc: usize,
     zlo_pathv: [*c][*c]u8,
@@ -111,8 +105,6 @@ pub const zlob_t = extern struct {
         }
     }
 
-    /// Convert zlob_t's ALTDIRFUNC callbacks to a walker FsProvider.
-    /// This enables seamless integration with the walker module.
     pub fn toFsProvider(self: *const zlob_t, flags: c_int) walker.AltFs {
         const use_altdirfunc = (flags & ZLOB_ALTDIRFUNC) != 0 and
             self.zlo_opendir != null and
@@ -183,17 +175,14 @@ const ZLOB_FLAGS_SHARED_STRINGS = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
 
 pub const zlob_errfunc_t = ?*const fn (epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int;
 
-// Re-export path_matcher for consumers that need in-memory path matching
 pub const path_matcher = @import("path_matcher.zig");
 
-// Use Zig's cross-platform dirent structure (kept for API compatibility)
 pub const dirent = std.c.dirent;
 
 pub const DT_UNKNOWN = std.c.DT.UNKNOWN;
 pub const DT_DIR = std.c.DT.DIR;
 
-/// List of paths with their lengths tracked in parallel arrays.
-/// Maps directly to zlob_t's zlo_pathv and zlo_pathlen fields.
+/// Parallel arrays of paths and their lengths for zlob_t output.
 pub const ResultsList = struct {
     paths: std.ArrayListUnmanaged([*c]u8),
     lengths: std.ArrayListUnmanaged(usize),
@@ -379,12 +368,10 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
     return info;
 }
 
-/// Match a name against multiple alternative patterns (from brace expansion)
-/// Returns true if name matches ANY of the alternatives
 inline fn matchWithAlternatives(name: []const u8, alternatives: []const []const u8) bool {
     for (alternatives) |alt| {
         const ctx = PatternContext.init(alt);
-        if (ctx.simd_batched_suffix_match) |batched| {
+        if (ctx.single_suffix_matcher) |batched| {
             if (batched.matchSuffix(name)) return true;
         } else if (fnmatch_impl.fnmatchWithContext(&ctx, name, .{})) {
             return true;
@@ -393,14 +380,13 @@ inline fn matchWithAlternatives(name: []const u8, alternatives: []const []const 
     return false;
 }
 
-/// Match a name against multiple alternative patterns with extglob support
 inline fn matchWithAlternativesExtglob(name: []const u8, alternatives: []const []const u8, enable_extglob: bool) bool {
     for (alternatives) |alt| {
         if (enable_extglob and fnmatch_impl.containsExtglob(alt)) {
             if (fnmatch_impl.matchExtglob(alt, name)) return true;
         } else {
             const ctx = PatternContext.init(alt);
-            if (ctx.simd_batched_suffix_match) |batched| {
+            if (ctx.single_suffix_matcher) |batched| {
                 if (batched.matchSuffix(name)) return true;
             } else if (fnmatch_impl.fnmatchWithContext(&ctx, name, .{})) {
                 return true;
@@ -410,13 +396,12 @@ inline fn matchWithAlternativesExtglob(name: []const u8, alternatives: []const [
     return false;
 }
 
-/// Match with precomputed contexts, with extglob support
 inline fn matchWithAlternativesPrecomputedExtglob(name: []const u8, patterns: []const []const u8, contexts: []const PatternContext, enable_extglob: bool) bool {
     for (patterns, contexts) |pat, *ctx| {
         if (enable_extglob and fnmatch_impl.containsExtglob(pat)) {
             if (fnmatch_impl.matchExtglob(pat, name)) return true;
         } else {
-            if (ctx.simd_batched_suffix_match) |*batched| {
+            if (ctx.single_suffix_matcher) |*batched| {
                 if (batched.matchSuffix(name)) return true;
             } else if (fnmatch_impl.fnmatchWithContext(ctx, name, .{})) {
                 return true;
@@ -426,21 +411,7 @@ inline fn matchWithAlternativesPrecomputedExtglob(name: []const u8, patterns: []
     return false;
 }
 
-fn buildPathInBuffer(buf: []u8, dir: []const u8, name: []const u8) []const u8 {
-    var len: usize = 0;
-
-    if (dir.len > 0 and !mem.eql(u8, dir, ".")) {
-        @memcpy(buf[0..dir.len], dir);
-        len = dir.len;
-        buf[len] = '/';
-        len += 1;
-    }
-
-    @memcpy(buf[len..][0..name.len], name);
-    len += name.len;
-
-    return buf[0..len];
-}
+const buildPathInBuffer = utils.buildPathInBuffer;
 
 fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker.AltFs) !?void {
     // Note: gitignore filtering is not fully implemented in this path
@@ -572,8 +543,8 @@ fn expandWildcardComponents(
 
             const matches = if (has_extglob_pattern) blk: {
                 break :blk fnmatch_impl.matchExtglob(component, name);
-            } else if (is_final and component_ctx.simd_batched_suffix_match != null)
-                component_ctx.simd_batched_suffix_match.?.matchSuffix(name)
+            } else if (is_final and component_ctx.single_suffix_matcher != null)
+                component_ctx.single_suffix_matcher.?.matchSuffix(name)
             else
                 fnmatch_impl.fnmatchWithContext(&component_ctx, name, .{});
 
@@ -817,69 +788,7 @@ fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, pzlo
     return;
 }
 
-// Helper to expand tilde (~) in patterns
-//   - The expanded pattern (allocated if expanded, original if no tilde)
-//   - null if ZLOB_TILDE_CHECK is set and expansion fails (indicates no match)
-fn expandTilde(allocator: std.mem.Allocator, pattern: [:0]const u8, flags: ZlobFlags) !?[:0]const u8 {
-    if (pattern.len == 0 or pattern[0] != '~') {
-        return pattern; // No tilde, return as-is
-    }
-
-    var username_end: usize = 1;
-    while (username_end < pattern.len and pattern[username_end] != '/') : (username_end += 1) {}
-
-    const home_dir = if (username_end == 1) blk: {
-        // Just "~" or "~/..." - expand to $HOME
-        break :blk std.posix.getenv("HOME");
-    } else blk: {
-        // "~username" - use getpwnam to look up user's home directory
-        const username = pattern[1..username_end];
-
-        // Need null-terminated username for getpwnam
-        var username_z: [256]u8 = undefined;
-        if (username.len >= 256) {
-            if (flags.tilde_check) {
-                return null; // Indicate no match
-            }
-            break :blk null;
-        }
-        @memcpy(username_z[0..username.len], username);
-        username_z[username.len] = 0;
-
-        const pw_entry = pwd.getpwnam(&username_z);
-        if (pw_entry == null) {
-            if (flags.tilde_check) {
-                return null; // Indicate no match
-            }
-            break :blk null;
-        }
-
-        const home_cstr = pw_entry.*.pw_dir;
-        if (home_cstr == null) {
-            if (flags.tilde_check) {
-                return null; // Indicate no match
-            }
-            break :blk null;
-        }
-        break :blk mem.sliceTo(home_cstr, 0);
-    };
-
-    if (home_dir) |home| {
-        const rest = pattern[username_end..];
-        const new_pattern = try allocator.allocSentinel(u8, home.len + rest.len, 0);
-        @memcpy(new_pattern[0..home.len], home);
-        @memcpy(new_pattern[home.len..][0..rest.len], rest);
-        return new_pattern;
-    }
-
-    // No home directory found - return pattern as-is (literal ~)
-    return pattern;
-}
-
-/// This is the root logic function for globbing
-pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
-    return globInternal(allocator, pattern, flags, errfunc, pzlob, null);
-}
+const expandTilde = utils.expandTilde;
 
 /// Glob within a specific base directory.
 /// base_path must be an absolute path (starts with '/'), otherwise returns error.Aborted.
@@ -895,11 +804,19 @@ pub fn globAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: [*:0
     };
     defer base_dir.close();
 
-    return globInternal(allocator, pattern, flags, errfunc, pzlob, base_dir);
+    return globInternalZ(allocator, pattern, flags, errfunc, pzlob, base_dir);
 }
 
-/// Internal glob implementation that accepts an optional base directory
-fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !?void {
+pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
+    return globInternalZ(allocator, pattern, flags, errfunc, pzlob, null);
+}
+
+pub fn globSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
+    return globInternalSlice(allocator, pattern, flags, errfunc, pzlob, null);
+}
+
+/// Internal glob implementation that accepts a slice pattern
+fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !?void {
     const gf = ZlobFlags.fromInt(flags);
     if (!gf.append) {
         pzlob.zlo_pathc = 0;
@@ -909,56 +826,59 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
         }
     }
 
-    // Create FsProvider once for the entire glob operation
     const fs_provider = pzlob.toFsProvider(flags);
-
-    var pattern_slice = mem.sliceTo(pattern, 0);
-    const original_pattern_ptr = pattern_slice.ptr;
+    var pattern_slice = pattern;
 
     // Check if pattern has magic characters (for ZLOB_MAGCHAR output flag)
     const has_magic = hasWildcards(pattern_slice, gf);
 
+    // Handle tilde expansion (requires allocation for the expanded pattern)
     var expanded_pattern: ?[:0]const u8 = null;
     defer if (expanded_pattern) |exp| {
-        // Only free if we allocated a new pattern (not the original)
-        if (exp.ptr != original_pattern_ptr) {
-            const exp_mem = @as([*]const u8, exp.ptr)[0 .. exp.len + 1];
-            allocator.free(exp_mem);
-        }
+        allocator.free(exp[0 .. exp.len + 1]);
     };
+
+    if (gf.tilde and pattern.len > 0 and pattern[0] == '~') {
+        // Need null-terminated pattern for expandTilde
+        const pattern_z = try allocator.allocSentinel(u8, pattern.len, 0);
+        @memcpy(pattern_z, pattern);
+
+        const result = try expandTilde(allocator, pattern_z, gf);
+        if (result == null) {
+            allocator.free(pattern_z[0 .. pattern.len + 1]);
+            return null;
+        }
+
+        if (result.?.ptr == pattern_z.ptr) {
+            // No expansion happened, free the temp allocation
+            allocator.free(pattern_z[0 .. pattern.len + 1]);
+        } else {
+            // Expansion happened, free the temp and keep expanded
+            allocator.free(pattern_z[0 .. pattern.len + 1]);
+            expanded_pattern = result;
+            pattern_slice = expanded_pattern.?;
+        }
+    }
 
     // Load gitignore if ZLOB_GITIGNORE flag is set
     var gitignore_instance: ?GitIgnore = null;
     defer if (gitignore_instance) |*gi| gi.deinit();
 
     if (gf.gitignore) {
-        // TODO: For globAt, we should load .gitignore relative to base_dir
         gitignore_instance = GitIgnore.loadFromCwd(allocator) catch null;
     }
     const gitignore_ptr: ?*GitIgnore = if (gitignore_instance) |*gi| gi else null;
-
-    if (gf.tilde) {
-        expanded_pattern = try expandTilde(allocator, pattern_slice, gf);
-        if (expanded_pattern == null) {
-            // ZLOB_TILDE_CHECK is set and tilde expansion failed - no match
-            return null;
-        }
-        pattern_slice = expanded_pattern.?;
-    }
 
     // Perform the actual globbing
     const result = blk: {
         if (gf.brace and brace_optimizer.containsBraces(pattern_slice)) {
             var opt = brace_optimizer.analyzeBracedPattern(allocator, pattern_slice) catch {
-                // On error, fall back to standard brace expansion
                 break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
             };
             defer opt.deinit();
 
             switch (opt) {
                 .single_walk => |*brace_parsed| {
-                    // All single_walk patterns flow through globSingle
-                    // which handles braces in any position via globRecursive
                     break :blk try globSingle(
                         allocator,
                         pattern_slice,
@@ -983,7 +903,6 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
         break :blk try globSingle(allocator, pattern_slice, null, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
     };
 
-    // Set ZLOB_MAGCHAR output flag if pattern contained magic characters
     if (has_magic) {
         pzlob.zlo_flags |= ZLOB_MAGCHAR;
     }
@@ -991,7 +910,10 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
     return result;
 }
 
-// Expand brace patterns and glob each independently (no ZLOB_APPEND manipulation)
+fn globInternalZ(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !?void {
+    return globInternalSlice(allocator, mem.sliceTo(pattern, 0), flags, errfunc, pzlob, base_dir);
+}
+
 fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker.AltFs) !?void {
     // Use brace_optimizer.expandBraces for consistent nested brace handling
     const expanded = try brace_optimizer.expandBraces(allocator, pattern);
@@ -1084,16 +1006,40 @@ const RecursivePattern = struct {
     file_alternatives: ?[]const []const u8 = null,
     /// Pre-computed pattern contexts for file alternatives (key optimization!)
     file_pattern_contexts: ?[]const PatternContext = null,
+    /// Pre-compiled multi-suffix matcher for SIMD-parallel suffix matching
+    multi_suffix_matcher: ?suffix_match.PrecompiledMultiSuffix = null,
     /// Optional gitignore filter (for ZLOB_GITIGNORE flag)
     gitignore_filter: ?*GitIgnore = null,
 };
 
-inline fn matchWithAlternativesPrecomputed(name: []const u8, contexts: []const PatternContext) bool {
+inline fn matchWithAlternativesPrecomputed(name: []const u8, contexts: []const PatternContext, multi_suffix: ?*const suffix_match.PrecompiledMultiSuffix) bool {
+    // Fast path: use precompiled multi-suffix matcher for SIMD-parallel matching
+    if (multi_suffix) |ms| {
+        if (ms.all_simple_suffixes) {
+            // All patterns are simple suffixes, use fast SIMD path
+            return ms.matchAny(name);
+        }
+        // Try multi-suffix first, then fall through to complex patterns
+        if (ms.matchAny(name)) return true;
+        // Only check contexts that don't have single_suffix_matcher
+        for (contexts) |*ctx| {
+            if (ctx.single_suffix_matcher == null) {
+                if (fnmatch_impl.fnmatchWithContext(ctx, name, .{})) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Fallback: iterate over each pattern context individually
     for (contexts) |*ctx| {
-        if (ctx.simd_batched_suffix_match) |*batched| {
+        if (ctx.single_suffix_matcher) |*batched| {
             if (batched.matchSuffix(name)) return true;
-        } else if (fnmatch_impl.fnmatchWithContext(ctx, name, .{})) {
-            return true;
+        } else {
+            if (fnmatch_impl.fnmatchWithContext(ctx, name, .{})) {
+                return true;
+            }
         }
     }
     return false;
@@ -1236,12 +1182,18 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
         }
     }
 
-    // RecursivePattern only handles post-doublestar components
+    // OPTIMIZATION: if we have many alterantives suffixes precompile them to a single mask for SIMD
+    const multi_suffix = if (file_pattern_contexts) |contexts|
+        suffix_match.PrecompiledMultiSuffix.init(contexts)
+    else
+        null;
+
     const rec_pattern = RecursivePattern{
         .dir_components = post_ds_components_buf[0..post_ds_count],
         .file_pattern = file_pattern,
         .file_alternatives = file_alternatives,
         .file_pattern_contexts = file_pattern_contexts,
+        .multi_suffix_matcher = multi_suffix,
         .dir_component_alternatives = if (post_ds_count > 0) post_ds_alternatives_buf[0..post_ds_count] else null,
         .gitignore_filter = gitignore_filter,
     };
@@ -1447,9 +1399,6 @@ const BracedComponentMatcher = struct {
         return false;
     }
 };
-
-// Note: shouldSkipEntry has been removed - filtering is now done at the walker/iterator level
-// via HiddenConfig. This avoids code duplication and ensures POSIX compliance.
 
 fn walkBracedComponents(
     allocator: std.mem.Allocator,
@@ -1660,11 +1609,6 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
     }
 }
 
-// Use unified walker for recursive directory traversal with optional gitignore filtering
-// The walker now handles directory pruning via dir_filter, so we don't need separate
-// walkWithGitignore function anymore.
-// This function handles both simple (**/*.txt) and complex (**/foo/*.txt) patterns.
-// Uses comptime parameter to eliminate runtime branch for dir_components check.
 fn globRecursiveWalk(
     allocator: std.mem.Allocator,
     rec_pattern: *const RecursivePattern,
@@ -1676,32 +1620,11 @@ fn globRecursiveWalk(
     base_dir: ?std.fs.Dir,
     fs_provider: walker.AltFs,
 ) !void {
-    // Dispatch to the appropriate comptime-specialized version
-    if (rec_pattern.dir_components.len > 0) {
-        return globRecursiveWalkImpl(true, allocator, rec_pattern, start_dir, flags, results, info, errfunc, base_dir, fs_provider);
-    } else {
-        return globRecursiveWalkImpl(false, allocator, rec_pattern, start_dir, flags, results, info, errfunc, base_dir, fs_provider);
-    }
-}
+    const has_dir_components = rec_pattern.dir_components.len > 0;
 
-/// Implementation with comptime-known has_dir_components to eliminate runtime branching
-fn globRecursiveWalkImpl(
-    comptime has_dir_components: bool,
-    allocator: std.mem.Allocator,
-    rec_pattern: *const RecursivePattern,
-    start_dir: []const u8,
-    flags: ZlobFlags,
-    results: *ResultsList,
-    info: *const PatternInfo,
-    errfunc: zlob_errfunc_t,
-    base_dir: ?std.fs.Dir,
-    fs_provider: walker.AltFs,
-) !void {
-    // Pattern context for file matching
     const pattern_ctx = PatternContext.init(rec_pattern.file_pattern);
     const enable_extglob = flags.extglob;
 
-    // Precompute dir component contexts for faster matching (only if needed)
     var dir_component_contexts: [32]PatternContext = undefined;
     if (has_dir_components) {
         for (rec_pattern.dir_components, 0..) |comp, i| {
@@ -1723,8 +1646,6 @@ fn globRecursiveWalkImpl(
         }
     }
 
-    // Compute hidden config based on pattern and flags
-    // For recursive walks, we use include_hidden if pattern or dir components want hidden files
     const hidden_config = walker.HiddenConfig{
         // Never include "." and ".." in recursive walks - they don't make sense for **
         .include_dot_entries = false,
@@ -1732,16 +1653,14 @@ fn globRecursiveWalkImpl(
         .include_hidden = flags.period or pattern_wants_hidden,
     };
 
-    // Build walker config
     var walker_config = walker.WalkerConfig{
         .base_dir = base_dir,
         .err_callback = errfunc,
         .abort_on_error = flags.err,
         .hidden = hidden_config,
-        .fs_provider = fs_provider,
+        .fs = fs_provider,
     };
 
-    // Set up gitignore-based directory filter if present
     if (rec_pattern.gitignore_filter) |gi| {
         walker_config.dir_filter = .{
             .filterDirFn = struct {
@@ -1761,16 +1680,10 @@ fn globRecursiveWalkImpl(
 
     // Determine if we need to prepend start_dir to paths
     const use_dirname = start_dir.len > 0 and !mem.eql(u8, start_dir, ".");
-
-    // Walk the tree and match entries
-    // Note: Hidden file filtering is now done at the walker level via HiddenConfig
     while (dir_walker.next() catch null) |entry| {
         const is_dir = entry.kind == .directory;
-
-        // Skip directories unless ZLOB_ONLYDIR
         if (is_dir and !info.directories_only) continue;
 
-        // Gitignore filtering for files (directories are already filtered by dir_filter)
         if (rec_pattern.gitignore_filter) |gi| {
             if (gi.isIgnored(entry.path, is_dir)) continue;
         }
@@ -1792,13 +1705,14 @@ fn globRecursiveWalkImpl(
             if (enable_extglob and rec_pattern.file_alternatives != null) {
                 break :blk matchWithAlternativesPrecomputedExtglob(entry.basename, rec_pattern.file_alternatives.?, contexts, true);
             }
-            break :blk matchWithAlternativesPrecomputed(entry.basename, contexts);
+            const multi_suffix_ptr = if (rec_pattern.multi_suffix_matcher) |*ms| ms else null;
+            break :blk matchWithAlternativesPrecomputed(entry.basename, contexts, multi_suffix_ptr);
         } else if (rec_pattern.file_alternatives) |alts|
             matchWithAlternativesExtglob(entry.basename, alts, enable_extglob)
         else if (enable_extglob and fnmatch_impl.containsExtglob(rec_pattern.file_pattern)) blk: {
             break :blk fnmatch_impl.matchExtglob(rec_pattern.file_pattern, entry.basename);
-        } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
-            batched_suffix_match.matchSuffix(entry.basename)
+        } else if (pattern_ctx.single_suffix_matcher) |sufxi_matcher|
+            sufxi_matcher.matchSuffix(entry.basename)
         else
             fnmatch_impl.fnmatchWithContext(&pattern_ctx, entry.basename, .{});
 
@@ -1830,8 +1744,6 @@ fn globRecursiveWalkImpl(
     }
 }
 
-/// Check if dir_components match at the end of the given path.
-/// For pattern **/foo/bar/*.c and path "a/b/foo/bar", returns true.
 fn matchDirComponents(
     path: []const u8,
     dir_components: []const []const u8,
@@ -1893,55 +1805,8 @@ fn matchDirComponents(
     return true;
 }
 
-pub const PathBuildResult = struct {
-    ptr: [*c]u8,
-    len: usize,
-    buf: []u8, // For cleanup on error
-};
-
-/// Optimized path builder that pre-allocates space for trailing slash if ZLOB_MARK is set.
-/// This avoids a realloc when the entry is a directory.
-/// Returns the path pointer and final length (including trailing slash if added).
-pub inline fn buildFullPathWithMark(
-    allocator: std.mem.Allocator,
-    dirname: []const u8,
-    name: []const u8,
-    use_dirname: bool,
-    is_dir: bool,
-    flags: ZlobFlags,
-) !PathBuildResult {
-    const base_len = if (use_dirname)
-        dirname.len + 1 + name.len
-    else
-        name.len;
-
-    // Pre-allocate extra byte for trailing slash if MARK flag is set and it's a directory
-    const needs_mark = flags.mark and is_dir;
-    const alloc_len = if (needs_mark) base_len + 1 else base_len;
-
-    const path_buf_slice = try allocator.allocSentinel(u8, alloc_len, 0);
-
-    if (use_dirname) {
-        @memcpy(path_buf_slice[0..dirname.len], dirname);
-        path_buf_slice[dirname.len] = '/';
-        @memcpy(path_buf_slice[dirname.len + 1 ..][0..name.len], name);
-    } else {
-        @memcpy(path_buf_slice[0..name.len], name);
-    }
-
-    // Add trailing slash if needed (no realloc required - space already allocated)
-    const final_len = if (needs_mark) blk: {
-        path_buf_slice[base_len] = '/';
-        path_buf_slice[base_len + 1] = 0; // Update sentinel
-        break :blk base_len + 1;
-    } else base_len;
-
-    return .{
-        .ptr = @ptrCast(path_buf_slice.ptr),
-        .len = final_len,
-        .buf = path_buf_slice,
-    };
-}
+pub const PathBuildResult = utils.PathBuildResult;
+const buildFullPathWithMark = utils.buildFullPathWithMark;
 
 fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern, base_dir: ?std.fs.Dir, fs_provider: walker.AltFs) !?void {
     // If we have brace alternatives for the filename pattern, use them for matching
@@ -2000,7 +1865,7 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
                 for (file_pattern_alts.?, alts) |raw_pat, alt_ctx| {
                     if (fnmatch_impl.containsExtglob(raw_pat)) {
                         if (fnmatch_impl.matchExtglob(raw_pat, name)) break :blk true;
-                    } else if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
+                    } else if (alt_ctx.single_suffix_matcher) |batched_suffix_match| {
                         if (batched_suffix_match.matchSuffix(name)) break :blk true;
                     } else if (fnmatch_impl.fnmatchWithContext(&alt_ctx, name, .{})) {
                         break :blk true;
@@ -2009,7 +1874,7 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
                 break :blk false;
             }
             for (alts) |alt_ctx| {
-                if (alt_ctx.simd_batched_suffix_match) |batched_suffix_match| {
+                if (alt_ctx.single_suffix_matcher) |batched_suffix_match| {
                     if (batched_suffix_match.matchSuffix(name)) break :blk true;
                 } else if (fnmatch_impl.fnmatchWithContext(&alt_ctx, name, .{})) {
                     break :blk true;
@@ -2018,7 +1883,7 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
             break :blk false;
         } else if (enable_extglob and fnmatch_impl.containsExtglob(pattern)) blk: {
             break :blk fnmatch_impl.matchExtglob(pattern, name);
-        } else if (pattern_ctx.simd_batched_suffix_match) |batched_suffix_match|
+        } else if (pattern_ctx.single_suffix_matcher) |batched_suffix_match|
             batched_suffix_match.matchSuffix(name)
         else
             fnmatch_impl.fnmatchWithContext(&pattern_ctx, name, .{});
@@ -2072,39 +1937,6 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
     return finalizeResults(allocator, &names, flags, pzlob);
 }
 
-/// Internal globfree function - frees zlob_t structure
-/// Used by GlobResults.deinit() and C API (c_lib.zig)
-/// Exposed as public for C API compatibility
-pub fn globfreeInternal(allocator: std.mem.Allocator, pzlob: *zlob_t) void {
-    if (pzlob.zlo_pathv) |pathv| {
-        // offs might be uninitialized if ZLOB_DOOFFS wasn't used - treat as 0
-        const offs = pzlob.zlo_offs;
-
-        const owns_strings = (pzlob.zlo_flags & ZLOB_FLAGS_OWNS_STRINGS) != 0;
-
-        if (owns_strings) {
-            var i: usize = 0;
-            while (i < pzlob.zlo_pathc) : (i += 1) {
-                if (pathv[offs + i]) |path| {
-                    const path_len = pzlob.zlo_pathlen[i];
-                    const path_slice = @as([*]u8, @ptrCast(path))[0 .. path_len + 1];
-                    allocator.free(path_slice);
-                }
-            }
-        }
-        // Always free the pathv array including offset slots
-        const pathv_slice = @as([*][*c]u8, @ptrCast(pathv))[0 .. offs + pzlob.zlo_pathc + 1];
-        allocator.free(pathv_slice);
-
-        // Always free the pathlen array
-        const pathlen_slice = pzlob.zlo_pathlen[0..pzlob.zlo_pathc];
-        allocator.free(pathlen_slice);
-    }
-    pzlob.zlo_pathv = null;
-    pzlob.zlo_pathc = 0;
-    pzlob.zlo_flags = ZLOB_FLAGS_SHARED_STRINGS;
-}
-
 /// Result of a glob operation containing matched paths
 pub const GlobResults = struct {
     paths: [][]const u8,
@@ -2141,3 +1973,33 @@ pub const GlobResults = struct {
         return result;
     }
 };
+
+pub fn globfreeInternal(allocator: std.mem.Allocator, pzlob: *zlob_t) void {
+    if (pzlob.zlo_pathv) |pathv| {
+        // offs might be uninitialized if ZLOB_DOOFFS wasn't used - treat as 0
+        const offs = pzlob.zlo_offs;
+
+        const owns_strings = (pzlob.zlo_flags & ZLOB_FLAGS_OWNS_STRINGS) != 0;
+
+        if (owns_strings) {
+            var i: usize = 0;
+            while (i < pzlob.zlo_pathc) : (i += 1) {
+                if (pathv[offs + i]) |path| {
+                    const path_len = pzlob.zlo_pathlen[i];
+                    const path_slice = @as([*]u8, @ptrCast(path))[0 .. path_len + 1];
+                    allocator.free(path_slice);
+                }
+            }
+        }
+        // Always free the pathv array including offset slots
+        const pathv_slice = @as([*][*c]u8, @ptrCast(pathv))[0 .. offs + pzlob.zlo_pathc + 1];
+        allocator.free(pathv_slice);
+
+        // Always free the pathlen array
+        const pathlen_slice = pzlob.zlo_pathlen[0..pzlob.zlo_pathc];
+        allocator.free(pathlen_slice);
+    }
+    pzlob.zlo_pathv = null;
+    pzlob.zlo_pathc = 0;
+    pzlob.zlo_flags = ZLOB_FLAGS_SHARED_STRINGS;
+}

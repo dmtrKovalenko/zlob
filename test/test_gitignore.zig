@@ -163,6 +163,64 @@ test "gitignore shouldSkipDirectory" {
     try testing.expect(!gi.shouldSkipDirectory("build"));
 }
 
+test "gitignore shouldSkipDirectory - anchored patterns" {
+    var gi = try GitIgnore.parse(testing.allocator,
+        \\rust/target/
+    );
+    defer gi.deinit();
+
+    // rust/target should be skipped (anchored pattern)
+    try testing.expect(gi.shouldSkipDirectory("rust/target"));
+
+    // rust itself should not be skipped
+    try testing.expect(!gi.shouldSkipDirectory("rust"));
+
+    // other target dirs should not be skipped (pattern is anchored)
+    try testing.expect(!gi.shouldSkipDirectory("other/target"));
+    try testing.expect(!gi.shouldSkipDirectory("target"));
+}
+
+test "gitignore shouldSkipDirectory - anchored pattern with negated subdir" {
+    var gi = try GitIgnore.parse(testing.allocator,
+        \\rust/target/
+        \\!rust/target/rust-analyzer/
+    );
+    defer gi.deinit();
+
+    // rust/target should NOT be skipped because it has a negated child
+    try testing.expect(!gi.shouldSkipDirectory("rust/target"));
+
+    // rust-analyzer should not be skipped (it's negated)
+    try testing.expect(!gi.shouldSkipDirectory("rust/target/rust-analyzer"));
+
+    // debug should still be ignored via isIgnored (but shouldSkipDirectory is conservative)
+    // The walker will descend into rust/target, but isIgnored will filter debug files
+}
+
+test "gitignore isIgnored - anchored pattern with negated subdir" {
+    var gi = try GitIgnore.parse(testing.allocator,
+        \\rust/target/
+        \\!rust/target/rust-analyzer/
+    );
+    defer gi.deinit();
+
+    // rust/target dir is ignored
+    try testing.expect(gi.isIgnored("rust/target", true));
+
+    // rust/target/debug dir is ignored (child of ignored dir)
+    try testing.expect(gi.isIgnored("rust/target/debug", true));
+
+    // rust/target/debug/app.rs file - should be ignored
+    // (files inside ignored directories are also ignored)
+    try testing.expect(gi.isIgnored("rust/target/debug/app.rs", false));
+
+    // rust/target/rust-analyzer is NOT ignored (negation)
+    try testing.expect(!gi.isIgnored("rust/target/rust-analyzer", true));
+
+    // Files in rust-analyzer are also not ignored
+    try testing.expect(!gi.isIgnored("rust/target/rust-analyzer/analysis.rs", false));
+}
+
 // Test common real-world patterns
 test "gitignore - common patterns" {
     var gi = try GitIgnore.parse(testing.allocator,

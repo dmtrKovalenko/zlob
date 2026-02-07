@@ -94,10 +94,10 @@ typedef struct {
   (1 << 6) /* 0x0040 - Backslashes don't quote metacharacters */
 #define ZLOB_PERIOD                                                            \
   (1 << 7) /* 0x0080 - Leading `.` can be matched by metachars */
+#define ZLOB_MAGCHAR                                                           \
+  (1 << 8) /* 0x0100 - Set zlob() if any metachars seen (OUTPUT only) */
 
 /* GNU extensions */
-#define ZLOB_MAGCHAR                                                           \
-  (1 << 8) /* 0x0100 - Set in flags if any metachars seen (OUTPUT only) */
 #define ZLOB_ALTDIRFUNC                                                        \
   (1 << 9) /* 0x0200 - Use opendir/readdir/closedir functions */
 #define ZLOB_BRACE (1 << 10) /* 0x0400 - Expand "{a,b}" to "a" "b" */

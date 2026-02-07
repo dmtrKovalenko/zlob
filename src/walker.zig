@@ -112,10 +112,8 @@ pub const HiddenConfig = struct {
 pub const WalkerConfig = struct {
     /// Buffer size for getdents64 (Linux only)
     getdents_buffer_size: usize = 65536,
-    /// Maximum recursion depth.
-    /// 0 = no recursion (single directory only)
-    /// 1 = one level of subdirectories, etc.
-    /// Default 128 for deep recursion.
+
+    // left for convenience should not be used for getdents64
     max_depth: usize = 128,
 
     /// Hidden file and special entry filtering.
@@ -141,17 +139,7 @@ pub const WalkerConfig = struct {
 
     /// Filesystem provider for ALTDIRFUNC support.
     /// When set with valid callbacks, uses custom directory functions instead of real filesystem.
-    fs_provider: AltFs = AltFs.real_fs,
-
-    /// Convenience: config for single-directory iteration (no recursion)
-    pub fn singleDir(base_dir: ?std.fs.Dir, err_callback: ?ErrCallbackFn, abort_on_error: bool) WalkerConfig {
-        return .{
-            .max_depth = 0,
-            .base_dir = base_dir,
-            .err_callback = err_callback,
-            .abort_on_error = abort_on_error,
-        };
-    }
+    fs: AltFs = AltFs.real_fs,
 };
 
 inline fn shouldSkipEntry(name: []const u8, hidden: HiddenConfig) bool {
@@ -247,15 +235,14 @@ const RecursiveGetdents64Walker = struct {
         const dir_stack = std.ArrayList(DirEntry).initCapacity(allocator, 64) catch
             std.ArrayList(DirEntry){ .items = &.{}, .capacity = 0 };
 
-        // Open starting directory, using base_dir if provided
-        const start_fd = if (config.base_dir) |bd| blk: {
+        const start_fd = if (config.base_dir) |bd| open: {
             // Use openatZ to open relative to base_dir
             var path_z: [4096:0]u8 = undefined;
             if (start_path.len >= 4096) return error.NameTooLong;
             @memcpy(path_z[0..start_path.len], start_path);
             path_z[start_path.len] = 0;
 
-            break :blk posix.openatZ(bd.fd, &path_z, .{
+            break :open posix.openatZ(bd.fd, &path_z, .{
                 .ACCMODE = .RDONLY,
                 .DIRECTORY = true,
                 .CLOEXEC = true,
@@ -263,8 +250,8 @@ const RecursiveGetdents64Walker = struct {
                 try handleOpenError(start_path, err, config);
                 return err;
             };
-        } else blk: {
-            break :blk posix.open(start_path, .{
+        } else open: {
+            break :open posix.open(start_path, .{
                 .ACCMODE = .RDONLY,
                 .DIRECTORY = true,
                 .CLOEXEC = true,
@@ -340,7 +327,7 @@ const RecursiveGetdents64Walker = struct {
                 }
             }
 
-            // Buffer exhausted - read more from current directory
+            // buffer free - read more from current directory
             const bytes_read = linux.getdents64(self.current_fd, self.getdents_buffer.ptr, self.getdents_buffer.len);
 
             if (@as(isize, @bitCast(bytes_read)) < 0 or bytes_read == 0) {
@@ -827,24 +814,24 @@ pub const DirIterator = struct {
     /// Open a directory for single-level iteration.
     /// If base_dir is provided, opens path relative to it; otherwise relative to cwd.
     /// hidden_config controls filtering of ".", "..", and hidden files.
-    /// fs_provider allows using ALTDIRFUNC callbacks for virtual filesystem support.
-    pub fn openWithProvider(path: []const u8, base_dir: ?std.fs.Dir, hidden_config: HiddenConfig, fs_provider: AltFs) !DirIterator {
+    /// fs allows using ALTDIRFUNC callbacks for virtual filesystem support.
+    pub fn openWithProvider(path: []const u8, base_dir: ?std.fs.Dir, hidden_config: HiddenConfig, fs: AltFs) !DirIterator {
         if (path.len >= 4096) return error.NameTooLong;
 
-        if (fs_provider.isAltDirFunc()) {
+        if (fs.isAltDirFunc()) {
             // Use ALTDIRFUNC callbacks
             var path_z: [4096:0]u8 = undefined;
             @memcpy(path_z[0..path.len], path);
             path_z[path.len] = 0;
 
-            const handle = fs_provider.opendir.?(&path_z);
+            const handle = fs.opendir.?(&path_z);
             if (handle == null) return error.FileNotFound;
 
             return DirIterator{
                 .mode = .{ .alt_dirfunc = .{
                     .handle = handle,
-                    .readdir = fs_provider.readdir.?,
-                    .closedir = fs_provider.closedir.?,
+                    .readdir = fs.readdir.?,
+                    .closedir = fs.closedir.?,
                 } },
                 .hidden = hidden_config,
             };
@@ -890,10 +877,10 @@ pub const DirIterator = struct {
         path: []const u8,
         base_dir: ?std.fs.Dir,
         hidden_config: HiddenConfig,
-        fs_provider: AltFs,
+        fs: AltFs,
         err_config: OpenErrorConfig,
     ) error{Aborted}!?DirIterator {
-        return openWithProvider(path, base_dir, hidden_config, fs_provider) catch |err| {
+        return openWithProvider(path, base_dir, hidden_config, fs) catch |err| {
             if (err_config.err_callback) |cb| {
                 var path_z: [4096:0]u8 = undefined;
                 const len = @min(path.len, 4095);

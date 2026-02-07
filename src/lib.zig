@@ -7,30 +7,32 @@
 //! POSIX glob() and globfree() functions and C header (include/zlob.h).
 
 const std = @import("std");
-const glob = @import("zlob");
+const zlob = @import("zlob");
 
 // Re-export the flags module as a namespace
 // Consumers access constants via zlob.flags.ZLOB_MARK, zlob.flags.ZlobFlags, etc.
 pub const flags = @import("zlob_flags");
 
 // Re-export modules through zlob_core to avoid module conflicts
-pub const fnmatch = glob.fnmatch;
-pub const pattern_context = glob.pattern_context;
+pub const fnmatch = zlob.fnmatch;
+pub const pattern_context = zlob.pattern_context;
+pub const suffix_match = zlob.suffix_match;
+pub const PatternContext = zlob.PatternContext;
 
-pub const GlobResults = glob.GlobResults;
-pub const GlobError = glob.GlobError;
-pub const zlob_t = glob.zlob_t;
-pub const analyzePattern = glob.analyzePattern;
-pub const simdFindChar = glob.simdFindChar;
-pub const hasWildcardsWithFlags = glob.hasWildcards;
-pub const hasWildcardsBasic = glob.hasWildcardsBasic;
-pub const ZlobFlags = glob.ZlobFlags;
+pub const GlobResults = zlob.GlobResults;
+pub const GlobError = zlob.GlobError;
+pub const zlob_t = zlob.zlob_t;
+pub const analyzePattern = zlob.analyzePattern;
+pub const simdFindChar = zlob.simdFindChar;
+pub const hasWildcardsWithFlags = zlob.hasWildcards;
+pub const hasWildcardsBasic = zlob.hasWildcardsBasic;
+pub const ZlobFlags = zlob.ZlobFlags;
 
 /// Check if a pattern contains any glob special characters.
 /// Detects all glob syntax: basic wildcards (*, ?, [), braces ({), and extglob patterns.
 /// For fine-grained control, use `hasWildcardsWithFlags(pattern, flags)`.
 pub fn hasWildcards(s: []const u8) bool {
-    return glob.hasWildcards(s, .{ .brace = true, .extglob = true });
+    return zlob.hasWildcards(s, .{ .brace = true, .extglob = true });
 }
 
 /// Perform file system walking and collect matching results to GlobResults
@@ -46,22 +48,13 @@ pub fn hasWildcards(s: []const u8) bool {
 /// }
 /// ```
 ///
-/// Example with integer flags (legacy):
-/// ```zig
-/// if (try zlob.match(allocator, "**/*.zig", zlob.flags.ZLOB_BRACE | zlob.flags.ZLOB_GITIGNORE)) |*result| {
-///     defer result.deinit();
-///     for (result.paths) |path| {
-///         std.debug.print("{s}\n", .{path});
-///     }
-/// }
-/// ```
+/// You can also pass any integer type build from the ZLOB_* flags if you prefer
+/// or even struct literals like .{ .mark = true } for convenience
 pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: anytype) !?GlobResults {
     const zflags = flagsToZlobFlags(flags_param);
-    const pattern_z = try allocator.dupeZ(u8, pattern);
-    defer allocator.free(pattern_z);
 
     var pzlob: zlob_t = undefined;
-    const opt_result = try glob.glob(allocator, pattern_z.ptr, zflags.toInt(), null, &pzlob);
+    const opt_result = try zlob.globSlice(allocator, pattern, zflags.toInt(), null, &pzlob);
 
     if (opt_result) |_| {
         var paths = try allocator.alloc([]const u8, pzlob.zlo_pathc);
@@ -133,7 +126,7 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: any
 /// - Paths from filesystem operations are typically already normalized
 pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !GlobResults {
     const zflags = flagsToZlobFlags(flags_param);
-    return glob.path_matcher.matchPaths(allocator, pattern, paths, zflags);
+    return zlob.path_matcher.matchPaths(allocator, pattern, paths, zflags);
 }
 
 /// Match glob pattern against an array of absolute paths, treating each path as relative
@@ -166,7 +159,7 @@ pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []co
 /// Supported flags: same as `matchPaths`.
 pub fn matchPathsAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !GlobResults {
     const zflags = flagsToZlobFlags(flags_param);
-    return glob.path_matcher.matchPathsAt(allocator, base_path, pattern, paths, zflags);
+    return zlob.path_matcher.matchPathsAt(allocator, base_path, pattern, paths, zflags);
 }
 
 /// Perform file system walking within a specified base directory and collect matching results.
@@ -192,7 +185,7 @@ pub fn matchAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []c
     defer allocator.free(pattern_z);
 
     var pzlob: zlob_t = undefined;
-    const opt_result = try glob.globAt(allocator, base_path, pattern_z.ptr, zflags.toInt(), null, &pzlob);
+    const opt_result = try zlob.globAt(allocator, base_path, pattern_z.ptr, zflags.toInt(), null, &pzlob);
 
     if (opt_result) |_| {
         var paths = try allocator.alloc([]const u8, pzlob.zlo_pathc);

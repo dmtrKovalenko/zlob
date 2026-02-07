@@ -50,6 +50,7 @@ pub inline fn fnmatchWithContext(ctx: *const PatternContext, string: []const u8,
         }
     }
 
+    // this is mostly useful for character classes for posix support pretty cheap for any other checks
     if (ctx.matchTemplate(string)) |result| {
         return result;
     }
@@ -334,10 +335,6 @@ inline fn matchBracketBitmap(pattern: []const u8, bracket_pos: usize, ch: u8) st
     return .{ .matched = matched, .new_pi = pi };
 }
 
-// ============================================================================
-// POSIX character classes
-// ============================================================================
-
 const PosixCharClass = enum {
     alpha,
     digit,
@@ -457,8 +454,7 @@ inline fn addRangeToBitmap(bitmap: *[32]u8, start: u8, end: u8) void {
     }
 }
 
-// ============================================================================
-// Extended glob (extglob) support
+// Extended glob from bash (extglob)
 //
 // Implements bash-style extended globbing patterns:
 // - ?(pattern-list) - zero or one occurrence
@@ -469,9 +465,7 @@ inline fn addRangeToBitmap(bitmap: *[32]u8, start: u8, end: u8) void {
 //
 // Pattern-list is '|'-separated. Nested extglobs are NOT supported.
 // Standalone !(pattern) at pattern start is NOT supported; use *.!(js) instead.
-// ============================================================================
 
-/// Type of extended glob pattern
 pub const ExtglobType = enum {
     /// ?(pattern-list) - zero or one occurrence
     question,
@@ -526,8 +520,9 @@ pub fn findClosingParen(pattern: []const u8, open_pos: usize) ?usize {
     return null;
 }
 
-/// Split extglob content by '|' at the correct nesting level.
-/// Returns slices into the original pattern (no allocation, max 32 alternatives).
+// alternatives are not using the same code as braces because extglob
+// is very complicated and allows absolute mixing of thos thus it's hard to keep 
+// the code shared (the extglob support was mostly written by llm)
 pub fn splitAlternatives(content: []const u8, buffer: *[32][]const u8) [][]const u8 {
     var count: usize = 0;
     var start: usize = 0;
@@ -570,10 +565,6 @@ pub fn matchExtglob(pattern: []const u8, string: []const u8) bool {
     return matchExtglobImpl(pattern, string, 0, 0);
 }
 
-/// Extglob matcher that processes pattern and string positions.
-/// Uses iterative star-tracking for `*` wildcards (same O(1) stack approach as fnmatch).
-/// Extglob constructs like @(...) still use bounded recursion through matchExtglobType,
-/// but the `*` wildcard itself never recurses.
 fn matchExtglobImpl(pattern: []const u8, string: []const u8, pat_start: usize, str_start: usize) bool {
     var pi = pat_start;
     var si = str_start;

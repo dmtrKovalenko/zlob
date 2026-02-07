@@ -35,6 +35,173 @@ const PatternSegments = struct {
     }
 };
 
+const MultiSuffixMatcherResult = struct {
+    matcher: suffix_match.UnifiedMultiSuffix,
+    all_simple_suffixes: bool,
+};
+
+/// Try to build a unified multi-suffix matcher from expanded patterns.
+/// Returns a matcher if ALL patterns are simple suffix patterns (*.ext).
+fn tryBuildMultiSuffixMatcher(expanded_patterns: []const []const u8) MultiSuffixMatcherResult {
+    var result = MultiSuffixMatcherResult{
+        .matcher = suffix_match.UnifiedMultiSuffix{},
+        .all_simple_suffixes = true,
+    };
+
+    for (expanded_patterns) |pattern| {
+        // Check if pattern is *.ext (simple suffix)
+        if (pattern.len < 2 or pattern[0] != '*') {
+            result.all_simple_suffixes = false;
+            return result;
+        }
+
+        // Check there are no other wildcards or path separators
+        const suffix = pattern[1..];
+        if (hasWildcardsBasic(suffix) or mem.indexOfScalar(u8, suffix, '/') != null) {
+            result.all_simple_suffixes = false;
+            return result;
+        }
+
+        // Suffix must be 1-4 bytes to fit in SIMD matcher
+        if (suffix.len < 1 or suffix.len > 4) {
+            result.all_simple_suffixes = false;
+            return result;
+        }
+
+        // Add to matcher using MaskedSuffix.init
+        if (result.matcher.count < suffix_match.UnifiedMultiSuffix.MAX_SUFFIXES) {
+            result.matcher.suffixes[result.matcher.count] = suffix_match.MaskedSuffix.init(suffix);
+            result.matcher.count += 1;
+            if (suffix.len < result.matcher.min_suffix_len) {
+                result.matcher.min_suffix_len = @intCast(suffix.len);
+            }
+        } else {
+            result.all_simple_suffixes = false;
+            return result;
+        }
+    }
+
+    if (result.matcher.min_suffix_len == 255) {
+        result.matcher.min_suffix_len = 1;
+    }
+
+    return result;
+}
+
+/// Result of trying to build a recursive suffix matcher
+const RecursiveSuffixMatcherResult = struct {
+    matcher: suffix_match.UnifiedMultiSuffix,
+    all_recursive_suffix: bool,
+};
+
+/// Try to build a multi-suffix matcher for **/*.ext style patterns
+fn tryBuildRecursiveSuffixMatcher(expanded_patterns: []const []const u8) RecursiveSuffixMatcherResult {
+    var result = RecursiveSuffixMatcherResult{
+        .matcher = suffix_match.UnifiedMultiSuffix{},
+        .all_recursive_suffix = true,
+    };
+
+    for (expanded_patterns) |pattern| {
+        // Check if pattern is **/*.ext or just *.ext (both work for suffix matching)
+        var suffix_pattern = pattern;
+
+        // Strip leading **/ if present
+        if (mem.startsWith(u8, pattern, "**/")) {
+            suffix_pattern = pattern[3..];
+        }
+
+        // Now check if remaining is *.ext
+        if (suffix_pattern.len < 2 or suffix_pattern[0] != '*') {
+            result.all_recursive_suffix = false;
+            return result;
+        }
+
+        const suffix = suffix_pattern[1..];
+        if (hasWildcardsBasic(suffix) or mem.indexOfScalar(u8, suffix, '/') != null) {
+            result.all_recursive_suffix = false;
+            return result;
+        }
+
+        if (suffix.len < 1 or suffix.len > 4) {
+            result.all_recursive_suffix = false;
+            return result;
+        }
+
+        // Add to matcher using MaskedSuffix.init
+        if (result.matcher.count < suffix_match.UnifiedMultiSuffix.MAX_SUFFIXES) {
+            result.matcher.suffixes[result.matcher.count] = suffix_match.MaskedSuffix.init(suffix);
+            result.matcher.count += 1;
+            if (suffix.len < result.matcher.min_suffix_len) {
+                result.matcher.min_suffix_len = @intCast(suffix.len);
+            }
+        } else {
+            result.all_recursive_suffix = false;
+            return result;
+        }
+    }
+
+    if (result.matcher.min_suffix_len == 255) {
+        result.matcher.min_suffix_len = 1;
+    }
+
+    return result;
+}
+
+/// Get the basename (filename) from a path
+fn getBasename(path: []const u8) []const u8 {
+    if (lastIndexOfCharSIMD(path, '/')) |last_slash| {
+        return path[last_slash + 1 ..];
+    }
+    return path;
+}
+
+/// Finalize brace match results - handle sorting and empty results
+fn finalizeBraceMatches(
+    allocator: Allocator,
+    matches: *std.array_list.AlignedManaged([]const u8, null),
+    pattern: []const u8,
+    flags: ZlobFlags,
+) !GlobResults {
+    // Handle no matches
+    if (matches.items.len == 0) {
+        if (flags.nocheck) {
+            var result_paths = try allocator.alloc([]const u8, 1);
+            result_paths[0] = try allocator.dupe(u8, pattern);
+            return GlobResults{
+                .paths = result_paths,
+                .match_count = 1,
+                .allocator = allocator,
+                .owns_paths = true,
+            };
+        }
+        const empty: [][]const u8 = &[_][]const u8{};
+        return GlobResults{
+            .paths = empty,
+            .match_count = 0,
+            .allocator = allocator,
+            .owns_paths = false,
+        };
+    }
+
+    const result_paths = try matches.toOwnedSlice();
+
+    // Sort if needed
+    if (!flags.nosort) {
+        mem.sort([]const u8, result_paths, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
+    }
+
+    return GlobResults{
+        .paths = result_paths,
+        .match_count = result_paths.len,
+        .allocator = allocator,
+        .owns_paths = false,
+    };
+}
+
 fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8) !PatternSegments {
     if (mem.indexOf(u8, pattern, "**") == null) {
         var segments = try allocator.alloc([]const u8, 1);
@@ -516,6 +683,44 @@ fn matchPathsImpl(
             return matchPathsImpl(allocator, expanded_patterns[0], paths, path_offset, flags.without(.{ .brace = true }));
         }
 
+        // OPTIMIZATION: Check if all expanded patterns are simple suffix patterns (*.ext)
+        // If so, use the unified multi-suffix SIMD matcher for a single-pass match
+        const multi_suffix_result = tryBuildMultiSuffixMatcher(expanded_patterns);
+        if (multi_suffix_result.all_simple_suffixes and multi_suffix_result.matcher.count > 0) {
+            var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+            defer matches.deinit();
+
+            // Fast path: use unified multi-suffix SIMD matching
+            for (paths) |path| {
+                if (path.len < path_offset) continue;
+                // For simple suffix patterns, match against the full path (basename check)
+                const basename = getBasename(path);
+                if (multi_suffix_result.matcher.matchAny(basename)) {
+                    try matches.append(path);
+                }
+            }
+
+            return finalizeBraceMatches(allocator, &matches, pattern, flags);
+        }
+
+        // Check if patterns are **/*.ext style (recursive with suffix)
+        const recursive_suffix_result = tryBuildRecursiveSuffixMatcher(expanded_patterns);
+        if (recursive_suffix_result.all_recursive_suffix and recursive_suffix_result.matcher.count > 0) {
+            var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+            defer matches.deinit();
+
+            // Fast path: use unified multi-suffix SIMD matching on basename
+            for (paths) |path| {
+                if (path.len < path_offset) continue;
+                const basename = getBasename(path);
+                if (recursive_suffix_result.matcher.matchAny(basename)) {
+                    try matches.append(path);
+                }
+            }
+
+            return finalizeBraceMatches(allocator, &matches, pattern, flags);
+        }
+
         // Pre-compute pattern segments for each alternative
         var pattern_segments_list = try allocator.alloc(PatternSegments, expanded_patterns.len);
         defer {
@@ -544,44 +749,7 @@ fn matchPathsImpl(
             }
         }
 
-        // Handle no matches
-        if (matches.items.len == 0) {
-            if (flags.nocheck) {
-                var result_paths = try allocator.alloc([]const u8, 1);
-                result_paths[0] = try allocator.dupe(u8, pattern);
-                return GlobResults{
-                    .paths = result_paths,
-                    .match_count = 1,
-                    .allocator = allocator,
-                    .owns_paths = true,
-                };
-            }
-            const empty: [][]const u8 = &[_][]const u8{};
-            return GlobResults{
-                .paths = empty,
-                .match_count = 0,
-                .allocator = allocator,
-                .owns_paths = false,
-            };
-        }
-
-        const result_paths = try matches.toOwnedSlice();
-
-        // Sort if needed
-        if (!flags.nosort) {
-            mem.sort([]const u8, result_paths, {}, struct {
-                fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-                    return mem.order(u8, a, b) == .lt;
-                }
-            }.lessThan);
-        }
-
-        return GlobResults{
-            .paths = result_paths,
-            .match_count = result_paths.len,
-            .allocator = allocator,
-            .owns_paths = false,
-        };
+        return finalizeBraceMatches(allocator, &matches, pattern, flags);
     }
 
     if (paths.len == 0) {
@@ -693,7 +861,7 @@ fn matchPathsImpl(
     if (is_simple_suffix_only) {
         const suffix = suffix_info.suffix.?;
         if (suffix.len <= 4) {
-            try suffix_match.SimdBatchedSuffixMatch.init(suffix).matchPathsBatchedSIMD(paths, &matches);
+            try suffix_match.SingleSuffixMatcher.init(suffix).matchPathsBatched(paths, &matches);
         } else {
             const suffix_matcher = suffix_match.SuffixMatch.new(suffix);
             for (paths) |path| {
@@ -706,7 +874,7 @@ fn matchPathsImpl(
         if (suffix.len <= 4) {
             var pre_filtered = std.array_list.AlignedManaged([]const u8, null).init(allocator);
             defer pre_filtered.deinit();
-            try suffix_match.SimdBatchedSuffixMatch.init(suffix).matchPathsBatchedSIMD(paths, &pre_filtered);
+            try suffix_match.SingleSuffixMatcher.init(suffix).matchPathsBatched(paths, &pre_filtered);
 
             for (pre_filtered.items) |path| {
                 if (path.len < path_offset) continue;

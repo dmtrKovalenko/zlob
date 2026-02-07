@@ -56,7 +56,7 @@ pub const PatternContext = struct {
     bracket_bitmap: ?BracketBitmap,
 
     // Prebuilt patterns for various suffix matching optimizations
-    simd_batched_suffix_match: ?suffix_match.SimdBatchedSuffixMatch,
+    single_suffix_matcher: ?suffix_match.SingleSuffixMatcher,
     only_suffix_match: ?suffix_match.SuffixMatch,
 
     pub inline fn init(pattern: []const u8) PatternContext {
@@ -64,7 +64,7 @@ pub const PatternContext = struct {
 
         const starts_with_dot = pattern.len > 0 and pattern[0] == '.';
         const is_dot_or_dotdot = mem.eql(u8, pattern, ".") or mem.eql(u8, pattern, "..");
-        const simd_batched_suffix_match, const only_suffix_match = if (has_wildcards)
+        const single_suffix_matcher, const only_suffix_match = if (has_wildcards)
             suffix_match.check_simple_star_sufix(pattern)
         else
             .{ null, null };
@@ -75,7 +75,7 @@ pub const PatternContext = struct {
         return PatternContext{
             .pattern = pattern,
             .has_wildcards = has_wildcards,
-            .simd_batched_suffix_match = simd_batched_suffix_match,
+            .single_suffix_matcher = single_suffix_matcher,
             .only_suffix_match = only_suffix_match,
             .starts_with_dot = starts_with_dot,
             .is_dot_or_dotdot = is_dot_or_dotdot,

@@ -233,6 +233,7 @@ pub fn build(b: *std.Build) void {
         "test/test_path_matcher.zig",
         "test/test_errfunc.zig",
         "test/test_gitignore.zig",
+        "test/test_gitignore_e2e.zig",
         "test/test_extglob.zig",
         "test/test_utils.zig",
         "test/test_fnmatch.zig",
@@ -327,6 +328,25 @@ pub fn build(b: *std.Build) void {
     bench_fnmatch_cmd.step.dependOn(b.getInstallStep());
     const bench_fnmatch_step = b.step("bench-fnmatch", "Benchmark fnmatch pattern matching");
     bench_fnmatch_step.dependOn(&bench_fnmatch_cmd.step);
+
+    // Multi-suffix matching benchmark
+    const bench_multi_suffix = b.addExecutable(.{
+        .name = "bench_multi_suffix",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench_multi_suffix.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "zlob", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(bench_multi_suffix);
+
+    const bench_multi_suffix_cmd = b.addRunArtifact(bench_multi_suffix);
+    bench_multi_suffix_cmd.step.dependOn(b.getInstallStep());
+    const bench_multi_suffix_step = b.step("bench-multi-suffix", "Benchmark multi-suffix matching");
+    bench_multi_suffix_step.dependOn(&bench_multi_suffix_cmd.step);
 
     // Recursive pattern benchmark for perf profiling
     const bench_recursive = b.addExecutable(.{

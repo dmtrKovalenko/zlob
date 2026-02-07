@@ -1,5 +1,9 @@
 # zlob.h
 
+100% POSIX and glibc compatible globbing library for C, Zig, and Rust that is **faster** and supports **all the modern globbing formats** (more than libc and rust `glob` crate)
+
+---
+
 zlob is a C library, zig library and a rust crate that makes globbing fast. Why? Because `glob()` implemented by glibc sucks. It is very outdated and slow. Remember when you last time read all the flags avaialble exposed by glibc `glob(3)`? I am pretty sure you never read those because by default POSIX glob requires sorting of results list which is _VERY_ slow in glibc implementaion, it doesn't implement very basic patterns like `./**/*.c` and requires to pass a flags to enable bracing support like `./{a,b}/*.c`.
 
 In short libc's glob is unusable, so I wanted to make a library that is 100% POSIX and glibc compatible, that supports all the features modern glob implementation needed and is faster than glibc. So here is zlob, a little bit about it:
@@ -16,6 +20,12 @@ In short libc's glob is unusable, so I wanted to make a library that is 100% POS
 ## Why it is faster?
 
 zlob is using SIMD first implemenation. It is a primary reason it is written in zig to have a native portable SIMD support, somewhere it signficantly improves certain bottlenecks. But the primary reason it is faster is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directores and making lef matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
+
+One of my favourite optimizations for this project is patterns like `./**/*.{c,rs,zig}` this is usually the main reason glob is used and this pattern is the most optimized in the zlob implementation:
+
+- recursive worker is using `getdents64` syscall directly which dramatically improves directory listing
+- gitignore implemenation allows use to optionally skip large subdirectories out of the box
+- and the actual `*.{c,rs,zig}` pattern is precompiled down the the SIMD bitmask matching that allows to match 3 extension at once
 
 ## Copmatibility
 

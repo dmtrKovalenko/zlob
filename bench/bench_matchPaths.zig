@@ -42,6 +42,43 @@ fn benchmark(
     });
 }
 
+fn benchmarkWithBrace(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    pattern: []const u8,
+    paths: []const []const u8,
+) !void {
+    const flags = zlob.ZlobFlags.recommended().with(.{ .brace = true });
+
+    // Warmup
+    for (0..WARMUP_ITERATIONS) |_| {
+        var result = try zlob.matchPaths(allocator, pattern, paths, flags);
+        result.deinit();
+    }
+
+    // Actual benchmark
+    const start = time.nanoTimestamp();
+    for (0..ITERATIONS) |_| {
+        var result = try zlob.matchPaths(allocator, pattern, paths, flags);
+        result.deinit();
+    }
+    const end = time.nanoTimestamp();
+
+    const total_ns = @as(u64, @intCast(end - start));
+    const avg_ns = total_ns / ITERATIONS;
+    const avg_us = avg_ns / 1000;
+
+    std.debug.print("{s:50} | {d:8} µs/op | {d:6} matches\n", .{
+        name,
+        avg_us,
+        blk: {
+            var result = try zlob.matchPaths(allocator, pattern, paths, flags);
+            defer result.deinit();
+            break :blk result.match_count;
+        },
+    });
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -108,6 +145,27 @@ pub fn main() !void {
     try benchmark(allocator, "No match *.xyz - small", "*.xyz", small_paths);
     try benchmark(allocator, "No match *.xyz - medium", "*.xyz", medium_paths);
     try benchmark(allocator, "No match *.xyz - large", "*.xyz", large_paths);
+
+    // 9. Brace expansion patterns (*.{ext1,ext2,...})
+    std.debug.print("\n--- Brace Expansion (*.{{ext1,ext2}}) ---\n", .{});
+    try benchmarkWithBrace(allocator, "Brace *.{{zig,c}} - small", "*.{zig,c}", small_paths);
+    try benchmarkWithBrace(allocator, "Brace *.{{zig,c}} - medium", "*.{zig,c}", medium_paths);
+    try benchmarkWithBrace(allocator, "Brace *.{{zig,c}} - large", "*.{zig,c}", large_paths);
+
+    std.debug.print("\n--- Brace with Many Alternatives ---\n", .{});
+    try benchmarkWithBrace(allocator, "Brace *.{{zig,c,rs,go,py,js,md,txt}} - small", "*.{zig,c,rs,go,py,js,md,txt}", small_paths);
+    try benchmarkWithBrace(allocator, "Brace *.{{zig,c,rs,go,py,js,md,txt}} - medium", "*.{zig,c,rs,go,py,js,md,txt}", medium_paths);
+    try benchmarkWithBrace(allocator, "Brace *.{{zig,c,rs,go,py,js,md,txt}} - large", "*.{zig,c,rs,go,py,js,md,txt}", large_paths);
+
+    std.debug.print("\n--- Recursive Brace (**/*.{{ext}}) ---\n", .{});
+    try benchmarkWithBrace(allocator, "Recursive brace **/*.{{zig,c}} - small", "**/*.{zig,c}", small_paths);
+    try benchmarkWithBrace(allocator, "Recursive brace **/*.{{zig,c}} - medium", "**/*.{zig,c}", medium_paths);
+    try benchmarkWithBrace(allocator, "Recursive brace **/*.{{zig,c}} - large", "**/*.{zig,c}", large_paths);
+
+    std.debug.print("\n--- Mixed Length Suffixes ---\n", .{});
+    try benchmarkWithBrace(allocator, "Mixed *.{{c,rs,zig}} (2,3,4 bytes) - small", "*.{c,rs,zig}", small_paths);
+    try benchmarkWithBrace(allocator, "Mixed *.{{c,rs,zig}} (2,3,4 bytes) - medium", "*.{c,rs,zig}", medium_paths);
+    try benchmarkWithBrace(allocator, "Mixed *.{{c,rs,zig}} (2,3,4 bytes) - large", "*.{c,rs,zig}", large_paths);
 
     std.debug.print("\n", .{});
 }

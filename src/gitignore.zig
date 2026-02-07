@@ -351,7 +351,10 @@ pub const GitIgnore = struct {
             // OPTIMIZATION: Most wildcard patterns in typical .gitignore files
             // are basename-only (no /), so we only need to check against basename
             for (self.wildcard_patterns) |pattern| {
-                if (pattern.dir_only and !is_dir) continue;
+                // For dir_only patterns checking a file: only skip if the pattern
+                // cannot match a parent directory. matchPatternFast handles the
+                // "is this file inside an ignored directory" check.
+                if (pattern.dir_only and !is_dir and !pattern.anchored and !pattern.has_slash) continue;
                 if (matchPatternFast(&pattern, normalized_path, basename)) {
                     return true;
                 }
@@ -363,7 +366,10 @@ pub const GitIgnore = struct {
         // Slow path: has negations, must process all patterns in order
         var ignored = false;
         for (self.patterns) |pattern| {
-            if (pattern.dir_only and !is_dir) continue;
+            // For dir_only patterns checking a file: only skip if the pattern
+            // cannot match a parent directory. matchPatternFast handles the
+            // "is this file inside an ignored directory" check.
+            if (pattern.dir_only and !is_dir and !pattern.anchored and !pattern.has_slash) continue;
 
             if (matchPatternFast(&pattern, normalized_path, basename)) {
                 ignored = !pattern.negated;
@@ -372,11 +378,26 @@ pub const GitIgnore = struct {
 
         return ignored;
     }
+
     inline fn matchPatternFast(pattern: *const Pattern, path: []const u8, basename: []const u8) bool {
         const text = pattern.text;
 
         // Anchored patterns match against full path only
         if (pattern.anchored) {
+            // For directory patterns, also match paths that are inside the directory
+            // e.g., pattern "rust/target" should match "rust/target/debug/foo.rs"
+            if (pattern.dir_only) {
+                // Check exact match first
+                if (mem.eql(u8, text, path)) return true;
+                // Check if path is inside this directory (path starts with "pattern/")
+                if (path.len > text.len and
+                    mem.startsWith(u8, path, text) and
+                    path[text.len] == '/')
+                {
+                    return true;
+                }
+                return false;
+            }
             return path_matcher.matchGlobSimple(text, path);
         }
 
@@ -418,6 +439,24 @@ pub const GitIgnore = struct {
         }
 
         // Non-anchored patterns with / - match full path
+        // For directory patterns, also match paths inside the directory
+        if (pattern.dir_only) {
+            if (path_matcher.matchGlobSimple(text, path)) return true;
+            // Check if any path component matches and this is a child path
+            // e.g., pattern "target" with dir_only should match "foo/target/bar.rs"
+            var start: usize = 0;
+            while (start < path.len) {
+                const end = mem.indexOfPos(u8, path, start, "/") orelse path.len;
+                const component_path = path[0..end];
+                if (path_matcher.matchGlobSimple(text, component_path)) {
+                    // This path component matches, so any path starting with it is inside
+                    return true;
+                }
+                if (end >= path.len) break;
+                start = end + 1;
+            }
+            return false;
+        }
         return path_matcher.matchGlobSimple(text, path);
     }
 
@@ -470,6 +509,47 @@ pub const GitIgnore = struct {
                         break;
                     }
                     if (mem.startsWith(u8, pattern.text, basename)) {
+                        dominated_by_negation = true;
+                        break;
+                    }
+                }
+
+                if (!dominated_by_negation) {
+                    self.cacheResult(normalized_path, true);
+                    return true;
+                }
+            }
+        }
+
+        // Check anchored directory patterns (e.g., "rust/target/", "src/build/")
+        // These are stored in wildcard_patterns because they contain /
+        for (self.wildcard_patterns) |pattern| {
+            // Only check directory patterns that are anchored and literal
+            if (!pattern.dir_only) continue;
+            if (!pattern.anchored) continue;
+            if (!pattern.is_literal) continue;
+            if (pattern.negated) continue;
+
+            // For anchored literal directory patterns, check exact match
+            if (mem.eql(u8, pattern.text, normalized_path)) {
+                // Check if any negation could affect this directory or its children
+                if (!self.has_negations) {
+                    self.cacheResult(normalized_path, true);
+                    return true;
+                }
+
+                // Check for dominating negations
+                var dominated_by_negation = false;
+                for (self.patterns) |neg_pattern| {
+                    if (!neg_pattern.negated) continue;
+
+                    if (neg_pattern.has_double_star) {
+                        dominated_by_negation = true;
+                        break;
+                    }
+
+                    // Check if negation pattern could affect this dir or its children
+                    if (mem.startsWith(u8, neg_pattern.text, normalized_path)) {
                         dominated_by_negation = true;
                         break;
                     }
