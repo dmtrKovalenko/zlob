@@ -2,6 +2,11 @@
 
 100% POSIX and glibc compatible globbing library for C, Zig, and Rust that is **faster** and supports **all the modern globbing formats** (more than libc and rust `glob` crate)
 
+
+https://github.com/user-attachments/assets/24c8de52-a69b-461e-8162-c7024975d50b
+
+
+
 ---
 
 zlob is a C library, zig library and a rust crate that makes globbing fast. Why? Because `glob()` implemented by glibc sucks. It is very outdated and slow. Remember when you last time read all the flags avaialble exposed by glibc `glob(3)`? I am pretty sure you never read those because by default POSIX glob requires sorting of results list which is _VERY_ slow in glibc implementaion, it doesn't implement very basic patterns like `./**/*.c` and requires to pass a flags to enable bracing support like `./{a,b}/*.c`.
