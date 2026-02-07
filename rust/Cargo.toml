@@ -1,9 +1,9 @@
 [package]
 name = "zlob"
-version = "0.1.0"
+version = "1.1.0"
 edition = "2021"
-description = "High-performance glob pattern matching with SIMD optimizations"
 license = "MIT"
+description = "SIMD optimized glob pattern matching library faster than glob crate"
 keywords = ["glob", "pattern", "matching", "simd", "gitignore"]
 categories = ["filesystem", "text-processing"]
 readme = "README.md"
