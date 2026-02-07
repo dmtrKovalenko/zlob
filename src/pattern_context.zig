@@ -1,6 +1,8 @@
 const std = @import("std");
 const mem = std.mem;
 const suffix_match = @import("suffix_match.zig");
+const zlob_flags = @import("zlob_flags");
+const ZlobFlags = zlob_flags.ZlobFlags;
 
 /// Common pattern templates that can be matched with specialized fast paths
 pub const PatternTemplate = enum {
@@ -58,7 +60,7 @@ pub const PatternContext = struct {
     only_suffix_match: ?suffix_match.SuffixMatch,
 
     pub inline fn init(pattern: []const u8) PatternContext {
-        const has_wildcards = hasWildcardsSIMD(pattern);
+        const has_wildcards = hasWildcardsBasic(pattern);
 
         const starts_with_dot = pattern.len > 0 and pattern[0] == '.';
         const is_dot_or_dotdot = mem.eql(u8, pattern, ".") or mem.eql(u8, pattern, "..");
@@ -385,7 +387,10 @@ pub fn lastIndexOfCharSIMD(s: []const u8, needle: u8) ?usize {
     return mem.lastIndexOfScalar(u8, s, needle);
 }
 
-pub fn hasWildcardsSIMD(s: []const u8) bool {
+/// Internal SIMD-accelerated check for basic glob wildcards (*, ?, [).
+/// Used internally where only basic wildcard detection is needed (pattern fragments,
+/// suffix checks, etc.) and brace/extglob detection is not applicable.
+pub fn hasWildcardsBasic(s: []const u8) bool {
     const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
 
     if (s.len >= vec_len) {
@@ -476,13 +481,24 @@ pub fn containsExtglob(s: []const u8) bool {
     return false;
 }
 
-/// Check if pattern has wildcards or extglob patterns (when extglob is enabled).
-/// When check_extglob is true, performs a single SIMD pass checking for all
-/// special characters (*, ?, [, and extglob prefix+() simultaneously.
-pub fn hasWildcardsOrExtglob(s: []const u8, check_extglob: bool) bool {
-    if (!check_extglob) return hasWildcardsSIMD(s);
+/// Unified SIMD-accelerated detection of glob special characters in a pattern.
+///
+/// Checks for the presence of glob metacharacters in a single SIMD pass:
+/// - Always checks: `*`, `?`, `[` (basic wildcards)
+/// - When `flags.brace` is set: also checks for `{` (brace expansion)
+/// - When `flags.extglob` is set: also checks for extglob sequences `?(`, `*(`, `+(`, `@(`, `!(`
+///
+/// Returns true if the pattern contains any active glob syntax that would require
+/// pattern matching rather than literal string comparison.
+///
+/// This is the public API function for determining whether a string is a glob pattern.
+pub fn hasWildcards(s: []const u8, flags: ZlobFlags) bool {
+    const check_braces = flags.brace;
+    const check_extglob = flags.extglob;
 
-    // Combined single-pass check for wildcards AND extglob patterns
+    // Fast path: no extra checks needed, use basic wildcard detection
+    if (!check_braces and !check_extglob) return hasWildcardsBasic(s);
+
     const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
 
     if (s.len >= vec_len) {
@@ -491,34 +507,43 @@ pub fn hasWildcardsOrExtglob(s: []const u8, check_extglob: bool) bool {
         const star_vec: Vec = @splat('*');
         const question_vec: Vec = @splat('?');
         const bracket_vec: Vec = @splat('[');
-        const paren_vec: Vec = @splat('(');
 
         var i: usize = 0;
         while (i + vec_len <= s.len) : (i += vec_len) {
             const chunk: Vec = s[i..][0..vec_len].*;
 
-            // Check wildcards
+            // Check basic wildcards
             const has_star = chunk == star_vec;
             const has_question = chunk == question_vec;
             const has_bracket = chunk == bracket_vec;
-            const wildcard_mask = @as(MaskInt, @bitCast(has_star | has_question | has_bracket));
+            var combined = has_star | has_question | has_bracket;
+
+            // Check braces if enabled
+            if (check_braces) {
+                const brace_vec: Vec = @splat('{');
+                combined = combined | (chunk == brace_vec);
+            }
+
+            const wildcard_mask = @as(MaskInt, @bitCast(combined));
             if (wildcard_mask != 0) return true;
 
-            // Check for '(' which could be extglob
-            const paren_mask = @as(MaskInt, @bitCast(chunk == paren_vec));
-            if (paren_mask != 0) {
-                // Check if any '(' is preceded by an extglob prefix
-                var remaining = paren_mask;
-                while (remaining != 0) {
-                    const bit_pos = @ctz(remaining);
-                    const paren_idx = i + bit_pos;
-                    if (paren_idx > 0) {
-                        switch (s[paren_idx - 1]) {
-                            '?', '*', '+', '@', '!' => return true,
-                            else => {},
+            // Check for extglob patterns: prefix + '('
+            if (check_extglob) {
+                const paren_vec: Vec = @splat('(');
+                const paren_mask = @as(MaskInt, @bitCast(chunk == paren_vec));
+                if (paren_mask != 0) {
+                    var remaining = paren_mask;
+                    while (remaining != 0) {
+                        const bit_pos = @ctz(remaining);
+                        const paren_idx = i + bit_pos;
+                        if (paren_idx > 0) {
+                            switch (s[paren_idx - 1]) {
+                                '?', '*', '+', '@', '!' => return true,
+                                else => {},
+                            }
                         }
+                        remaining &= remaining - 1;
                     }
-                    remaining &= remaining - 1;
                 }
             }
         }
@@ -526,7 +551,8 @@ pub fn hasWildcardsOrExtglob(s: []const u8, check_extglob: bool) bool {
         // Handle remainder
         for (s[i..], i..) |ch, idx| {
             if (ch == '*' or ch == '?' or ch == '[') return true;
-            if (ch == '(' and idx > 0) {
+            if (check_braces and ch == '{') return true;
+            if (check_extglob and ch == '(' and idx > 0) {
                 switch (s[idx - 1]) {
                     '?', '*', '+', '@', '!' => return true,
                     else => {},
@@ -539,7 +565,8 @@ pub fn hasWildcardsOrExtglob(s: []const u8, check_extglob: bool) bool {
     // Fallback for short strings
     for (s, 0..) |ch, idx| {
         if (ch == '*' or ch == '?' or ch == '[') return true;
-        if (ch == '(' and idx > 0) {
+        if (check_braces and ch == '{') return true;
+        if (check_extglob and ch == '(' and idx > 0) {
             switch (s[idx - 1]) {
                 '?', '*', '+', '@', '!' => return true,
                 else => {},

@@ -162,6 +162,24 @@ test "matchPaths - complex pattern" {
     }.assert, @src());
 }
 
+test "??? - question marks only" {
+    const files = [_][]const u8{
+        "abc.txt",
+        "fef.txt",
+        "q!@.txt",
+        "abcd.txt",
+    };
+
+    try zlobIsomorphicTest(&files, "???.txt", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expect(result.hasPath("abc.txt"));
+            try testing.expect(result.hasPath("ef.txt"));
+        }
+    }.assert, @src());
+}
+
+
 test "matchPaths - sorted results" {
     const files = [_][]const u8{
         "c.txt",

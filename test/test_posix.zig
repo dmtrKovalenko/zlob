@@ -1294,4 +1294,134 @@ test "ZLOB_ALTDIRFUNC - nested directory with wildcard pattern" {
     try testing.expect(found_util);
 }
 
-// SIMD helper function tests
+test "ZLOB_MAGCHAR - set when pattern has wildcards" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var test_dir: [4096:0]u8 = undefined;
+    @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
+    test_dir[test_dir_str.len] = 0;
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    // Test with wildcard pattern - ZLOB_MAGCHAR should be set
+    const pattern = try allocator.dupeZ(u8, "*.c");
+    defer allocator.free(pattern);
+
+    var pzlob: glob.zlob_t = undefined;
+    pzlob.zlo_flags = 0; // Initialize to 0
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(0, result);
+    // ZLOB_MAGCHAR should be set because pattern contains *
+    try testing.expect((pzlob.zlo_flags & zlob_flags.ZLOB_MAGCHAR) != 0);
+}
+
+test "ZLOB_MAGCHAR - not set when pattern has no wildcards" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var test_dir: [4096:0]u8 = undefined;
+    @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
+    test_dir[test_dir_str.len] = 0;
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    // Test with literal pattern (no wildcards) - ZLOB_MAGCHAR should NOT be set
+    const pattern = try allocator.dupeZ(u8, "file1.txt");
+    defer allocator.free(pattern);
+
+    var pzlob: glob.zlob_t = undefined;
+    pzlob.zlo_flags = 0; // Initialize to 0
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(0, result);
+    // ZLOB_MAGCHAR should NOT be set because pattern is a literal
+    try testing.expectEqual(@as(c_int, 0), pzlob.zlo_flags & zlob_flags.ZLOB_MAGCHAR);
+}
+
+test "ZLOB_MAGCHAR - set with question mark wildcard" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var test_dir: [4096:0]u8 = undefined;
+    @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
+    test_dir[test_dir_str.len] = 0;
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    // Test with ? wildcard - ZLOB_MAGCHAR should be set
+    const pattern = try allocator.dupeZ(u8, "file?.txt");
+    defer allocator.free(pattern);
+
+    var pzlob: glob.zlob_t = undefined;
+    pzlob.zlo_flags = 0; // Initialize to 0
+    const result = c_lib.zlob(pattern.ptr, 0, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(0, result);
+    // ZLOB_MAGCHAR should be set because pattern contains ?
+    try testing.expect((pzlob.zlo_flags & zlob_flags.ZLOB_MAGCHAR) != 0);
+}
+
+test "ZLOB_MAGCHAR - set with brace expansion when ZLOB_BRACE enabled" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
+    defer allocator.free(test_dir_str);
+
+    var test_dir: [4096:0]u8 = undefined;
+    @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
+    test_dir[test_dir_str.len] = 0;
+
+    var cwd_buf: [4096]u8 = undefined;
+    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    // Test with brace pattern and ZLOB_BRACE flag - ZLOB_MAGCHAR should be set
+    const pattern = try allocator.dupeZ(u8, "file{1,2}.txt");
+    defer allocator.free(pattern);
+
+    var pzlob: glob.zlob_t = undefined;
+    pzlob.zlo_flags = 0; // Initialize to 0
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(0, result);
+    // ZLOB_MAGCHAR should be set because pattern contains braces with ZLOB_BRACE flag
+    try testing.expect((pzlob.zlo_flags & zlob_flags.ZLOB_MAGCHAR) != 0);
+}

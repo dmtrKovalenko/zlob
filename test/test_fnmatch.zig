@@ -395,6 +395,46 @@ test "hasWildcardsSIMD - detects wildcards" {
     try testing.expect(!fnmatch.hasWildcards(""));
 }
 
+test "hasWildcards - detects braces" {
+    try testing.expect(fnmatch.hasWildcards("{a,b}"));
+    try testing.expect(fnmatch.hasWildcards("src/{lib,main}.rs"));
+    try testing.expect(fnmatch.hasWildcards("{foo}"));
+    try testing.expect(!fnmatch.hasWildcards("no_braces"));
+}
+
+test "hasWildcards - detects extglob" {
+    try testing.expect(fnmatch.hasWildcards("?(foo)"));
+    try testing.expect(fnmatch.hasWildcards("*(bar)"));
+    try testing.expect(fnmatch.hasWildcards("+(baz)"));
+    try testing.expect(fnmatch.hasWildcards("@(qux)"));
+    try testing.expect(fnmatch.hasWildcards("!(quux)"));
+    try testing.expect(!fnmatch.hasWildcards("plain(text)"));
+}
+
+test "hasWildcardsWithFlags - respects flags" {
+    const ZlobFlags = zlob_flags.ZlobFlags;
+    // No flags: only basic wildcards
+    try testing.expect(pattern_context.hasWildcards("*.txt", ZlobFlags{}));
+    try testing.expect(!pattern_context.hasWildcards("{a,b}", ZlobFlags{}));
+    // Note: "?(foo)" contains '?' which IS a basic wildcard, so it's always detected.
+    // To test extglob-only detection, use a pattern where extglob prefix is NOT a basic wildcard.
+    try testing.expect(!pattern_context.hasWildcards("@(foo)", ZlobFlags{})); // '@' is not a wildcard
+    try testing.expect(!pattern_context.hasWildcards("+(foo)", ZlobFlags{})); // '+' is not a wildcard
+
+    // Brace flag only
+    try testing.expect(pattern_context.hasWildcards("{a,b}", ZlobFlags{ .brace = true }));
+    try testing.expect(!pattern_context.hasWildcards("@(foo)", ZlobFlags{ .brace = true }));
+
+    // Extglob flag only
+    try testing.expect(pattern_context.hasWildcards("@(foo)", ZlobFlags{ .extglob = true }));
+    try testing.expect(pattern_context.hasWildcards("+(bar)", ZlobFlags{ .extglob = true }));
+    try testing.expect(!pattern_context.hasWildcards("{a,b}", ZlobFlags{ .extglob = true }));
+
+    // Both flags
+    try testing.expect(pattern_context.hasWildcards("{a,b}", ZlobFlags{ .brace = true, .extglob = true }));
+    try testing.expect(pattern_context.hasWildcards("@(foo)", ZlobFlags{ .brace = true, .extglob = true }));
+}
+
 test "indexOfCharSIMD - finds character" {
     try testing.expectEqual(@as(?usize, 5), pattern_context.indexOfCharSIMD("hello world", ' '));
     try testing.expectEqual(@as(?usize, 0), pattern_context.indexOfCharSIMD("hello", 'h'));

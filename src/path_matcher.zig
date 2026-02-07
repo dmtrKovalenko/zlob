@@ -9,7 +9,7 @@ const glob = @import("zlob.zig");
 const suffix_match = @import("suffix_match.zig");
 const brace_optimizer = @import("brace_optimizer.zig");
 
-const hasWildcardsSIMD = glob.hasWildcardsSIMD;
+const hasWildcardsBasic = glob.hasWildcardsBasic;
 const indexOfCharSIMD = glob.indexOfCharSIMD;
 const lastIndexOfCharSIMD = glob.lastIndexOfCharSIMD;
 const PatternContext = glob.PatternContext;
@@ -21,7 +21,7 @@ const ZlobFlags = glob.ZlobFlags;
 
 const PatternSegments = struct {
     segments: [][]const u8,
-    contexts: []PatternContext, // Pre-computed contexts to avoid redundant hasWildcardsSIMD calls
+    contexts: []PatternContext, // Pre-computed contexts to avoid redundant hasWildcardsBasic calls
     allocator: Allocator,
 
     // Pre-computed metadata to avoid per-path checks
@@ -250,7 +250,7 @@ pub fn extractSuffixFromPattern(pattern: []const u8) struct { suffix: ?[]const u
     const after_star = last_component[1..];
 
     // Check for wildcards OR extglob patterns
-    if (hasWildcardsSIMD(after_star)) return .{ .suffix = null };
+    if (hasWildcardsBasic(after_star)) return .{ .suffix = null };
     if (containsExtglob(after_star)) return .{ .suffix = null };
 
     if (after_star.len == 0) return .{ .suffix = null };
@@ -609,7 +609,7 @@ fn matchPathsImpl(
     // Paths must be normalized (no consecutive slashes).
     // Note: If extglob is enabled, we need to check for extglob patterns too
     const has_extglob = flags.extglob and containsExtglob(pattern);
-    if (!hasWildcardsSIMD(pattern) and !has_extglob) {
+    if (!hasWildcardsBasic(pattern) and !has_extglob) {
         var norm_pattern_buf: [4096]u8 = undefined;
         const norm_pattern = blk: {
             var len: usize = 0;

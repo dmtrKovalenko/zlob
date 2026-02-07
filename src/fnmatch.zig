@@ -18,8 +18,15 @@ const flags_mod = @import("zlob_flags");
 
 pub const ZlobFlags = flags_mod.ZlobFlags;
 pub const PatternContext = pattern_context_mod.PatternContext;
-pub const hasWildcards = pattern_context_mod.hasWildcardsSIMD;
+pub const hasWildcardsWithFlags = pattern_context_mod.hasWildcards;
+pub const hasWildcardsBasic = pattern_context_mod.hasWildcardsBasic;
 pub const containsExtglob = pattern_context_mod.containsExtglob;
+
+/// Check if a pattern contains any glob special characters.
+/// Detects all glob syntax: basic wildcards (*, ?, [), braces ({), and extglob patterns.
+pub fn hasWildcards(s: []const u8) bool {
+    return pattern_context_mod.hasWildcards(s, .{ .brace = true, .extglob = true });
+}
 
 /// Match a string against a pattern with flags.
 pub inline fn fnmatch(pattern: []const u8, string: []const u8, flags: ZlobFlags) bool {

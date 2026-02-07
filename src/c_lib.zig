@@ -4,6 +4,7 @@ const zlob_flags = @import("zlob_flags");
 
 const mem = std.mem;
 const ZlobFlags = zlob_flags.ZlobFlags;
+const pattern_context = zlob_impl.pattern_context;
 
 pub const zlob_t = zlob_impl.zlob_t;
 pub const zlob_dirent_t = zlob_impl.zlob_dirent_t;
@@ -20,7 +21,7 @@ pub const zlob_slice_t = extern struct {
     len: usize,
 };
 
-pub fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) callconv(.c) c_int {
+pub export fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) callconv(.c) c_int {
     const allocator = std.heap.c_allocator;
 
     if (zlob_impl.glob(allocator, pattern, flags, errfunc, pzlob)) |opt_result| {
@@ -37,20 +38,14 @@ pub fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfun
     }
 }
 
-pub fn zlobfree(pzlob: *zlob_t) callconv(.c) void {
+pub export fn zlobfree(pzlob: *zlob_t) callconv(.c) void {
     zlob_impl.globfreeInternal(std.heap.c_allocator, pzlob);
-}
-
-// pub functions avaialble as C symbols
-comptime {
-    @export(&zlob, .{ .name = "zlob" });
-    @export(&zlobfree, .{ .name = "zlobfree" });
 }
 
 /// Glob within a specific base directory.
 /// base_path must be an absolute path (starts with '/'), otherwise returns zlob_flags.ZLOB_ABORTED.
 /// This is the C-compatible version of globAt().
-pub fn zlob_at(
+pub export fn zlob_at(
     base_path: [*:0]const u8,
     pattern: [*:0]const u8,
     flags: c_int,
@@ -72,11 +67,6 @@ pub fn zlob_at(
             error.Aborted => zlob_flags.ZLOB_ABORTED,
         };
     }
-}
-
-// Export zlob_at
-comptime {
-    @export(&zlob_at, .{ .name = "zlob_at" });
 }
 
 /// Extnesion to the standard C api allowing to match the pattern against the flat list of paths
@@ -297,4 +287,22 @@ pub export fn zlob_match_paths_at_slice(
     pzlob.zlo_flags = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
 
     return 0;
+}
+
+/// Check if a pattern string contains any glob special characters.
+///
+/// Detects all glob syntax in a single SIMD-accelerated pass:
+/// - Basic wildcards: *, ?, [
+/// - Brace expansion: {
+/// - Extended glob patterns: ?(, *(, +(, @(, !(
+///
+/// Returns 1 (true) if the pattern contains glob syntax, 0 (false) otherwise.
+/// This is useful for determining whether a string should be treated as a glob
+/// pattern or as a literal path.
+pub export fn zlob_has_wildcards(
+    pattern_str: [*:0]const u8,
+    flags: c_int,
+) callconv(.c) c_int {
+    const pattern_slice = mem.sliceTo(pattern_str, 0);
+    return @intFromBool(pattern_context.hasWildcards(pattern_slice, ZlobFlags.fromInt(flags)));
 }

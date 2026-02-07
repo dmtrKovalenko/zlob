@@ -178,3 +178,43 @@ pub use error::*;
 pub use flags::*;
 pub use match_paths::*;
 pub use zlob::*;
+
+/// Check if a pattern string contains any glob special characters.
+///
+/// Detects glob syntax using SIMD-accelerated scanning:
+/// - Basic wildcards: `*`, `?`, `[`
+/// - Brace expansion: `{` (only if `BRACE` flag is set)
+/// - Extended glob patterns: `?(`, `*(`, `+(`, `@(`, `!(` (only if `EXTGLOB` flag is set)
+///
+/// This is useful for determining whether a string should be treated as a glob
+/// pattern or as a literal file path.
+///
+/// # Example
+///
+/// ```
+/// use zlob::{has_wildcards, ZlobFlags};
+///
+/// // Basic wildcards are always detected
+/// assert!(has_wildcards("*.txt", ZlobFlags::empty()));
+/// assert!(has_wildcards("file?.rs", ZlobFlags::empty()));
+///
+/// // Brace patterns only detected with BRACE flag
+/// assert!(!has_wildcards("{a,b}.rs", ZlobFlags::empty()));
+/// assert!(has_wildcards("{a,b}.rs", ZlobFlags::BRACE));
+///
+/// // Extglob patterns only detected with EXTGLOB flag
+/// assert!(!has_wildcards("@(foo|bar)", ZlobFlags::empty()));
+/// assert!(has_wildcards("@(foo|bar)", ZlobFlags::EXTGLOB));
+///
+/// // Literal paths
+/// assert!(!has_wildcards("literal_path.txt", ZlobFlags::empty()));
+/// ```
+pub fn has_wildcards(pattern: &str, flags: ZlobFlags) -> bool {
+    use std::ffi::CString;
+    let c_pattern = match CString::new(pattern) {
+        Ok(s) => s,
+        Err(_) => return false, // pattern contains null byte, not a valid glob
+    };
+    // Safety: c_pattern is a valid null-terminated string
+    unsafe { ffi::zlob_has_wildcards(c_pattern.as_ptr(), flags.bits()) != 0 }
+}

@@ -636,3 +636,4 @@ test "globfreeZ - only frees arrays not strings" {
     try testing.expectEqual(0, pzlob.zlo_pathc);
     try testing.expectEqual(@as(?[*][*c]u8, null), pzlob.zlo_pathv);
 }
+

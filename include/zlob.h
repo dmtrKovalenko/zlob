@@ -336,9 +336,45 @@ int zlob_match_paths_at(const char *base_path, const char *pattern,
  * - Use zlobfree() to clean up results
  */
 int zlob_match_paths_at_slice(const zlob_slice_t *base_path,
-                              const zlob_slice_t *pattern,
-                              const zlob_slice_t *paths, size_t path_count,
-                              int flags, zlob_t *pzlob);
+                               const zlob_slice_t *pattern,
+                               const zlob_slice_t *paths, size_t path_count,
+                               int flags, zlob_t *pzlob);
+
+/* ============================================================================
+ * Pattern Detection API
+ * ============================================================================
+ */
+
+/**
+ * zlob_has_wildcards - Check if a string contains glob pattern syntax
+ *
+ * @param pattern  Null-terminated pattern string to check
+ * @param flags    Bitwise OR of ZLOB_* flags (affects which patterns are recognized)
+ *
+ * @return 1 if the pattern contains glob syntax, 0 otherwise
+ *
+ * Detects glob metacharacters in a single SIMD-accelerated pass:
+ * - Basic wildcards: *, ?, [
+ * - Brace expansion syntax: { (only if ZLOB_BRACE flag is set)
+ * - Extended glob patterns: ?(, *(, +(, @(, !( (only if ZLOB_EXTGLOB flag is set)
+ *
+ * This is useful for determining whether a string should be treated as a
+ * glob pattern or as a literal file path. For example, a file manager could
+ * use this to decide whether to call zlob() or just stat() the path directly.
+ *
+ * Example:
+ *   if (zlob_has_wildcards("*.txt", 0)) {
+ *       // Use zlob() for pattern matching
+ *   } else {
+ *       // Treat as literal path
+ *   }
+ *
+ *   // With brace expansion enabled
+ *   if (zlob_has_wildcards("{a,b}.txt", ZLOB_BRACE)) {
+ *       // Detected brace pattern
+ *   }
+ */
+int zlob_has_wildcards(const char *pattern, int flags);
 
 #ifdef __cplusplus
 }

@@ -22,8 +22,16 @@ pub const GlobError = glob.GlobError;
 pub const zlob_t = glob.zlob_t;
 pub const analyzePattern = glob.analyzePattern;
 pub const simdFindChar = glob.simdFindChar;
-pub const hasWildcardsSIMD = glob.hasWildcardsSIMD;
+pub const hasWildcardsWithFlags = glob.hasWildcards;
+pub const hasWildcardsBasic = glob.hasWildcardsBasic;
 pub const ZlobFlags = glob.ZlobFlags;
+
+/// Check if a pattern contains any glob special characters.
+/// Detects all glob syntax: basic wildcards (*, ?, [), braces ({), and extglob patterns.
+/// For fine-grained control, use `hasWildcardsWithFlags(pattern, flags)`.
+pub fn hasWildcards(s: []const u8) bool {
+    return glob.hasWildcards(s, .{ .brace = true, .extglob = true });
+}
 
 /// Perform file system walking and collect matching results to GlobResults
 ///

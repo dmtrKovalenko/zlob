@@ -1,18 +1,11 @@
-//! Test utilities for zlob tests
-//!
-//! Provides helpers for testing both in-memory matchPaths and filesystem-based match
-//! with a unified interface.
-
 const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
 
-/// Result wrapper for unified test assertions
 pub const TestResult = struct {
     paths: []const []const u8,
     count: usize,
 
-    /// Check if a specific path (or path suffix) exists in results
     pub fn hasPath(self: TestResult, expected: []const u8) bool {
         for (self.paths) |path| {
             if (std.mem.eql(u8, path, expected)) return true;
@@ -22,7 +15,6 @@ pub const TestResult = struct {
         return false;
     }
 
-    /// Check if any path ends with the given suffix
     pub fn hasPathEndingWith(self: TestResult, suffix: []const u8) bool {
         for (self.paths) |path| {
             if (std.mem.endsWith(u8, path, suffix)) return true;
@@ -30,7 +22,6 @@ pub const TestResult = struct {
         return false;
     }
 
-    /// Check that NO path ends with the given suffix
     pub fn noPathEndsWith(self: TestResult, suffix: []const u8) bool {
         for (self.paths) |path| {
             if (std.mem.endsWith(u8, path, suffix)) return false;
@@ -38,7 +29,6 @@ pub const TestResult = struct {
         return true;
     }
 
-    /// Check if any path contains the given substring
     pub fn hasPathContaining(self: TestResult, substr: []const u8) bool {
         for (self.paths) |path| {
             if (std.mem.indexOf(u8, path, substr) != null) return true;
@@ -46,7 +36,6 @@ pub const TestResult = struct {
         return false;
     }
 
-    /// Get all paths as a slice (for debugging)
     pub fn debugPrint(self: TestResult) void {
         std.debug.print("TestResult ({d} paths):\n", .{self.count});
         for (self.paths) |path| {
@@ -55,10 +44,8 @@ pub const TestResult = struct {
     }
 };
 
-/// Assertion function type for test validation
 pub const AssertFn = *const fn (result: TestResult) anyerror!void;
 
-/// Create directories recursively (like mkdir -p)
 fn makeDirRecursive(path: []const u8) !void {
     var path_buf: [4096]u8 = undefined;
     var pos: usize = 0;
@@ -196,8 +183,6 @@ pub fn zlobIsomorphicTest(
     }
 }
 
-/// Run a glob test against matchPaths only (no filesystem).
-/// Useful for testing patterns with special characters that can't be filenames.
 pub fn testMatchPathsOnly(
     comptime files: []const []const u8,
     pattern: []const u8,
@@ -217,8 +202,6 @@ pub fn testMatchPathsOnly(
     try assertFn(test_result);
 }
 
-/// Run a glob test against filesystem only (no matchPaths).
-/// Useful when you need to test against an existing directory structure.
 pub fn testFilesystemOnly(
     dir_path: []const u8,
     pattern: []const u8,

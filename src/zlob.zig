@@ -21,7 +21,8 @@ pub const pattern_context = pattern_context_internal;
 
 pub const PatternContext = pattern_context_internal.PatternContext;
 pub const PatternTemplate = pattern_context_internal.PatternTemplate;
-pub const hasWildcardsSIMD = pattern_context_internal.hasWildcardsSIMD;
+pub const hasWildcardsBasic = pattern_context_internal.hasWildcardsBasic;
+pub const hasWildcards = pattern_context_internal.hasWildcards;
 pub const indexOfCharSIMD = pattern_context_internal.indexOfCharSIMD;
 pub const lastIndexOfCharSIMD = pattern_context_internal.lastIndexOfCharSIMD;
 pub const containsExtglob = fnmatch_impl.containsExtglob;
@@ -176,6 +177,7 @@ pub const ZlobFlags = zlob_flags.ZlobFlags;
 pub const GlobError = zlob_flags.GlobError;
 
 const ZLOB_ALTDIRFUNC = zlob_flags.ZLOB_ALTDIRFUNC;
+const ZLOB_MAGCHAR = zlob_flags.ZLOB_MAGCHAR;
 const ZLOB_FLAGS_OWNS_STRINGS = zlob_flags.ZLOB_FLAGS_OWNS_STRINGS;
 const ZLOB_FLAGS_SHARED_STRINGS = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
 
@@ -350,7 +352,7 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
     if (info.wildcard_suffix.len > 0) {
         if (mem.lastIndexOf(u8, info.wildcard_suffix, "/")) |pos| {
             const dir_part = info.wildcard_suffix[0..pos];
-            info.has_dir_wildcards = pattern_context_internal.hasWildcardsOrExtglob(dir_part, flags.extglob);
+            info.has_dir_wildcards = pattern_context_internal.hasWildcards(dir_part, flags);
         }
     }
 
@@ -358,7 +360,7 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
         info.wildcard_suffix.len >= 2 and info.wildcard_suffix[0] == '*')
     {
         const suffix = info.wildcard_suffix[1..];
-        if (!hasWildcardsSIMD(suffix) and indexOfCharSIMD(suffix, '/') == null) {
+        if (!hasWildcardsBasic(suffix) and indexOfCharSIMD(suffix, '/') == null) {
             info.simple_extension = suffix;
         }
     }
@@ -627,7 +629,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     const needs_tilde_expansion = effective_pattern.len > 0 and effective_pattern[0] == '~';
     const has_brace_alternatives = brace_parsed != null;
     const has_extglob_pattern = flags.extglob and fnmatch_impl.containsExtglob(effective_pattern);
-    if (!hasWildcardsSIMD(effective_pattern) and !needs_tilde_expansion and !has_brace_alternatives and !has_extglob_pattern) {
+    if (!hasWildcardsBasic(effective_pattern) and !needs_tilde_expansion and !has_brace_alternatives and !has_extglob_pattern) {
         // Check gitignore for literal path
         if (gitignore_filter) |gi| {
             const root = base_dir orelse std.fs.cwd();
@@ -913,6 +915,9 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
     var pattern_slice = mem.sliceTo(pattern, 0);
     const original_pattern_ptr = pattern_slice.ptr;
 
+    // Check if pattern has magic characters (for ZLOB_MAGCHAR output flag)
+    const has_magic = hasWildcards(pattern_slice, gf);
+
     var expanded_pattern: ?[:0]const u8 = null;
     defer if (expanded_pattern) |exp| {
         // Only free if we allocated a new pattern (not the original)
@@ -941,39 +946,49 @@ fn globInternal(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_i
         pattern_slice = expanded_pattern.?;
     }
 
-    if (gf.brace and brace_optimizer.containsBraces(pattern_slice)) {
-        var opt = brace_optimizer.analyzeBracedPattern(allocator, pattern_slice) catch {
-            // On error, fall back to standard brace expansion
-            return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
-        };
-        defer opt.deinit();
+    // Perform the actual globbing
+    const result = blk: {
+        if (gf.brace and brace_optimizer.containsBraces(pattern_slice)) {
+            var opt = brace_optimizer.analyzeBracedPattern(allocator, pattern_slice) catch {
+                // On error, fall back to standard brace expansion
+                break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
+            };
+            defer opt.deinit();
 
-        switch (opt) {
-            .single_walk => |*brace_parsed| {
-                // All single_walk patterns flow through globSingle
-                // which handles braces in any position via globRecursive
-                return try globSingle(
-                    allocator,
-                    pattern_slice,
-                    brace_parsed,
-                    gf,
-                    errfunc,
-                    pzlob,
-                    gitignore_ptr,
-                    base_dir,
-                    fs_provider,
-                );
-            },
-            .fallback => {
-                return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
-            },
-            .no_braces => {
-                return try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
-            },
+            switch (opt) {
+                .single_walk => |*brace_parsed| {
+                    // All single_walk patterns flow through globSingle
+                    // which handles braces in any position via globRecursive
+                    break :blk try globSingle(
+                        allocator,
+                        pattern_slice,
+                        brace_parsed,
+                        gf,
+                        errfunc,
+                        pzlob,
+                        gitignore_ptr,
+                        base_dir,
+                        fs_provider,
+                    );
+                },
+                .fallback => {
+                    break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
+                },
+                .no_braces => {
+                    break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
+                },
+            }
         }
+
+        break :blk try globSingle(allocator, pattern_slice, null, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
+    };
+
+    // Set ZLOB_MAGCHAR output flag if pattern contained magic characters
+    if (has_magic) {
+        pzlob.zlo_flags |= ZLOB_MAGCHAR;
     }
 
-    return try globSingle(allocator, pattern_slice, null, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
+    return result;
 }
 
 // Expand brace patterns and glob each independently (no ZLOB_APPEND manipulation)
@@ -1131,7 +1146,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
             // Process components BEFORE **
             var literal_prefix_end: usize = 0;
             for (parsed.components[0..ds_idx], 0..) |comp, i| {
-                if (comp.alternatives != null or hasWildcardsSIMD(comp.text)) {
+                if (comp.alternatives != null or hasWildcardsBasic(comp.text)) {
                     break;
                 }
                 literal_prefix_end = i + 1;

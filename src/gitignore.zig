@@ -122,7 +122,7 @@ pub const GitIgnore = struct {
 
     /// Check if a pattern text contains any glob wildcards (SIMD-accelerated)
     fn hasWildcards(text: []const u8) bool {
-        return glob.hasWildcardsSIMD(text);
+        return glob.hasWildcardsBasic(text);
     }
 
     /// Extract suffix from a simple *.ext pattern

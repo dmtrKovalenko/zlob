@@ -15,7 +15,7 @@ In short libc's glob is unusable, so I wanted to make a library that is 100% POS
 
 ## Why it is faster?
 
-zlob is using SIMD first implemenation. It is a primary reason it is written in zig to have a native portable SIMD support, somewhere it signficantly improves certain bottlenecks. But the primary reason it is faster is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directores and making lef matches like suffix for small extensions way faster
+zlob is using SIMD first implemenation. It is a primary reason it is written in zig to have a native portable SIMD support, somewhere it signficantly improves certain bottlenecks. But the primary reason it is faster is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directores and making lef matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
 
 ## Copmatibility
 
