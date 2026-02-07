@@ -142,14 +142,6 @@ typedef struct {
 /**
  * zlob - Find pathnames matching a pattern
  *
- * @param pattern   The glob pattern to match (e.g., "*.txt", "src/test_*.c")
- * @param flags     Bitwise OR of ZLOB_* flags
- * @param errfunc   Error callback function: int (*errfunc)(const char *epath,
- * int eerrno) Called when a directory read error occurs. If it returns non-zero
- *                  or ZLOB_ERR is set, zlob() will abort and return
- * ZLOB_ABORTED. Pass NULL to ignore errors and continue matching.
- * @param pzlob     Pointer to zlob_t structure to receive results
- *
  * @return 0 on success, or one of ZLOB_NOSPACE, ZLOB_ABORTED, ZLOB_NOMATCH
  *
  * Supported patterns:
@@ -200,12 +192,6 @@ void zlobfree(zlob_t *pzlob);
  * base_path instead of the current working directory. The matched paths in
  * pzlob->pathv will be relative to base_path.
  *
- * @param base_path Absolute path to the base directory (must start with '/')
- * @param pattern   The glob pattern to match (relative to base_path)
- * @param flags     Bitwise OR of ZLOB_* flags
- * @param errfunc   Error callback function (see zlob() for details)
- * @param pzlob     Pointer to zlob_t structure to receive results
- *
  * @return 0 on success, or one of ZLOB_NOSPACE, ZLOB_ABORTED, ZLOB_NOMATCH
  *
  * Returns ZLOB_ABORTED if base_path is not an absolute path.
@@ -224,10 +210,6 @@ int zlob_at(const char *base_path, const char *restrict pattern, int flags,
             int (*errfunc)(const char *epath, int eerrno),
             zlob_t *restrict pzlob);
 
-/* ============================================================================
- * Path Matching API (no filesystem access)
- * ============================================================================
- */
 
 /**
  * zlob_slice_t - FFI-compatible slice representation
@@ -244,13 +226,6 @@ typedef struct {
  * zlob_match_paths_slice - Filter paths with glob pattern (zero-copy, slice
  * version)
  *
- * @param pattern       Pointer to zlob_slice_t containing the pattern
- * @param paths         Array of zlob_slice_t (one per path)
- * @param path_count    Number of paths in the array
- * @param flags         Bitwise OR of ZLOB_* flags
- * @param pzlob         Pointer to zlob_t structure to receive results
- * @return 0 on success, ZLOB_NOMATCH if no matches, ZLOB_NOSPACE on OOM
- *
  * This function filters an array of paths using a glob pattern WITHOUT copying
  * the path strings. The result pointers in pzlob->pathv point directly to
  * the caller's original memory.
@@ -266,13 +241,6 @@ int zlob_match_paths_slice(const zlob_slice_t *pattern,
 /**
  * zlob_match_paths - Filter paths with glob pattern (zero-copy, C string
  * version)
- *
- * @param pattern       Null-terminated pattern string
- * @param paths         Array of null-terminated path strings
- * @param path_count    Number of paths in the array
- * @param flags         Bitwise OR of ZLOB_* flags
- * @param pzlob         Pointer to zlob_t structure to receive results
- * @return 0 on success, ZLOB_NOMATCH if no matches, ZLOB_NOSPACE on OOM
  *
  * This function filters an array of paths using a glob pattern WITHOUT copying
  * the path strings. The result pointers in pzlob->pathv point directly to
@@ -320,14 +288,6 @@ int zlob_match_paths_at(const char *base_path, const char *pattern,
  * zlob_match_paths_at_slice - Filter paths with glob pattern relative to a
  * base directory (zero-copy, slice version)
  *
- * @param base_path     Pointer to zlob_slice_t containing the base directory
- * @param pattern       Pointer to zlob_slice_t containing the pattern
- * @param paths         Array of zlob_slice_t (one per path)
- * @param path_count    Number of paths in the array
- * @param flags         Bitwise OR of ZLOB_* flags
- * @param pzlob         Pointer to zlob_t structure to receive results
- * @return 0 on success, ZLOB_NOMATCH if no matches, ZLOB_NOSPACE on OOM
- *
  * Same as zlob_match_paths_at but using slice types for zero-copy FFI with
  * languages like Rust and Zig.
  *
@@ -340,18 +300,8 @@ int zlob_match_paths_at_slice(const zlob_slice_t *base_path,
                                const zlob_slice_t *paths, size_t path_count,
                                int flags, zlob_t *pzlob);
 
-/* ============================================================================
- * Pattern Detection API
- * ============================================================================
- */
-
 /**
  * zlob_has_wildcards - Check if a string contains glob pattern syntax
- *
- * @param pattern  Null-terminated pattern string to check
- * @param flags    Bitwise OR of ZLOB_* flags (affects which patterns are recognized)
- *
- * @return 1 if the pattern contains glob syntax, 0 otherwise
  *
  * Detects glob metacharacters in a single SIMD-accelerated pass:
  * - Basic wildcards: *, ?, [
