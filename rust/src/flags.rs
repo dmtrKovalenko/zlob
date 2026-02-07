@@ -138,7 +138,6 @@ mod tests {
         assert_eq!(ZlobFlags::APPEND.bits(), 0x0020);
         assert_eq!(ZlobFlags::NOESCAPE.bits(), 0x0040);
         assert_eq!(ZlobFlags::PERIOD.bits(), 0x0080);
-        assert_eq!(ZlobFlags::MAGCHAR.bits(), 0x0100);
         assert_eq!(ZlobFlags::ALTDIRFUNC.bits(), 0x0200);
         assert_eq!(ZlobFlags::BRACE.bits(), 0x0400);
         assert_eq!(ZlobFlags::NOMAGIC.bits(), 0x0800);

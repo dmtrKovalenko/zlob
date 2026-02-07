@@ -11,7 +11,7 @@ In short libc's glob is unusable, so I wanted to make a library that is 100% POS
 - 100% POSIX and glibc compatible with all the flags and features supported
 - absolutely cross platform (does not yet support backslashes on windows but works under cygwin)
 - Faster than glibc up to 10x in certain cases and for general cases 1.2-1.7x faster
-- In addition to standard globbing supportes `**` recursive patterns, `gitignore` and bash `extglob` patterns
+- In addition to standard globbing supportes `**` recursive patterns, braces `*.{c,h}`, `gitignore` and bash `extglob` patterns
 - SIMD first implementaion where needed
 - Direct usage of [getdents64](https://linux.die.net/man/2/getdents64) syscall for faster directory listing
 - Supports `.gitignore` out of the box
