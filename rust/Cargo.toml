@@ -1,12 +1,31 @@
 [package]
 name = "zlob"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 license = "MIT"
 description = "SIMD optimized glob pattern matching library faster than glob crate"
 keywords = ["glob", "pattern", "matching", "simd", "gitignore"]
 categories = ["filesystem", "text-processing"]
 readme = "README.md"
+repository = "https://github.com/dmtrKovalenko/zlob"
+homepage = "https://github.com/dmtrKovalenko/zlob"
+documentation = "https://docs.rs/zlob"
+include = [
+    "/src/**/*",
+    "/Cargo.toml",
+    "/Cargo.lock", 
+    "/build.rs",
+    "/README.md",
+    # Zig build system (symlinks resolved by cargo during packaging)
+    "/build.zig",
+    "/build.zig.zon",
+    "/include/**/*",
+    # Zig sources - symlinked as zig-src/, will be copied to package
+    "/zig-src/**/*",
+]
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 bitflags = "2"

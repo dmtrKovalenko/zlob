@@ -3,21 +3,73 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // docs.rs sets this env var; skip native build since Zig isn't available there
+    if env::var("DOCS_RS").is_ok() {
+        return;
+    }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let zlob_root = manifest_dir.parent().unwrap();
+
+    // Find the zlob project root and determine source directory:
+    // 1. For local dev: parent directory, sources in "src"
+    // 2. For published crate: manifest_dir itself, sources in "zig-src"
+    let (zlob_root, zig_src_dir) = if let Some(parent) = manifest_dir.parent() {
+        if parent.join("build.zig").exists() && parent.join("include/zlob.h").exists() {
+            // Local development - use parent directory with default "src"
+            (parent.to_path_buf(), "src")
+        } else if manifest_dir.join("build.zig").exists() {
+            // Published crate - files are in manifest_dir, zig sources in "zig-src"
+            (manifest_dir.clone(), "zig-src")
+        } else {
+            panic!(
+                "Cannot find zlob source files.\n\
+                 Checked parent: {}\n\
+                 Checked manifest: {}\n\
+                 Make sure build.zig and include/zlob.h exist.",
+                parent.display(),
+                manifest_dir.display()
+            );
+        }
+    } else if manifest_dir.join("build.zig").exists() {
+        (manifest_dir.clone(), "zig-src")
+    } else {
+        panic!(
+            "Cannot find zlob source files in {}",
+            manifest_dir.display()
+        );
+    };
+
     let header_path = zlob_root.join("include/zlob.h");
+
+    if !header_path.exists() {
+        panic!("Cannot find zlob header at {}", header_path.display());
+    }
+
+    println!("cargo:rerun-if-changed={}", header_path.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        zlob_root.join(zig_src_dir).display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        zlob_root.join("build.zig").display()
+    );
 
     let bindings = bindgen::Builder::default()
         .header(header_path.to_str().unwrap())
         .use_core()
-        // Disable doc comments to avoid invalid doctests from C header comments
         .generate_comments(false)
-        // Generate constants as consts, not statics
         .default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
-        .expect("Unable to generate bindings from zlob.h");
+        .unwrap_or_else(|e| {
+            panic!(
+                "Unable to generate bindings from {}: {:?}",
+                header_path.display(),
+                e
+            )
+        });
 
     bindings
         .write_to_file(out_dir.join("zlob_bindings.rs"))
@@ -48,18 +100,39 @@ fn main() {
         _ => "Debug",
     };
 
+    // Determine if we're building from published crate (need to skip benchmarks)
+    let is_published_crate = zig_src_dir == "zig-src";
+
+    // Use OUT_DIR for zig cache to avoid modifying source directory
+    let zig_cache_dir = out_dir.join("zig-cache");
+    let zig_global_cache = out_dir.join("zig-global-cache");
+
     let mut cmd = Command::new(&zig);
-    cmd.current_dir(zlob_root)
+    cmd.current_dir(&zlob_root)
         .arg("build")
         .arg(format!("-Doptimize={}", optimize))
+        .arg(format!("-Dsrc-dir={}", zig_src_dir))
+        .arg("--cache-dir")
+        .arg(&zig_cache_dir)
+        .arg("--global-cache-dir")
+        .arg(&zig_global_cache)
         .arg("-p")
         .arg(out_dir.as_os_str());
+
+    // Skip benchmarks when building from published crate (bench/ dir not included)
+    if is_published_crate {
+        cmd.arg("-Dskip-bench=true");
+    }
 
     if zig_target != "native" {
         cmd.arg(format!("-Dtarget={}", zig_target));
     }
 
-    println!("cargo:warning=Running: {:?}", cmd);
+    println!(
+        "cargo:warning=Building zlob from: {} (src-dir={})",
+        zlob_root.display(),
+        zig_src_dir
+    );
 
     let output = cmd.output().expect("Failed to run zig build");
     if !output.status.success() {
@@ -82,10 +155,6 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}/lib", out_dir.display());
     println!("cargo:rustc-link-lib=static=zlob");
-
-    println!("cargo:rerun-if-changed=../src/");
-    println!("cargo:rerun-if-changed=../build.zig");
-    println!("cargo:rerun-if-changed=../include/zlob.h");
 }
 
 fn rust_target_to_zig(target: &str) -> &'static str {
