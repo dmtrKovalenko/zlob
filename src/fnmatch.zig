@@ -521,7 +521,7 @@ pub fn findClosingParen(pattern: []const u8, open_pos: usize) ?usize {
 }
 
 // alternatives are not using the same code as braces because extglob
-// is very complicated and allows absolute mixing of thos thus it's hard to keep 
+// is very complicated and allows absolute mixing of thos thus it's hard to keep
 // the code shared (the extglob support was mostly written by llm)
 pub fn splitAlternatives(content: []const u8, buffer: *[32][]const u8) [][]const u8 {
     var count: usize = 0;
