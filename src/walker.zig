@@ -473,6 +473,10 @@ const StdFsWalker = struct {
         dir: std.fs.Dir,
         depth: usize,
         path_len: usize,
+        // Heap-allocated path prefix to restore when popping
+        // This is needed because the path_buffer is shared and may be
+        // overwritten by sibling directory processing before we pop
+        path_prefix: []u8,
     };
 
     pub fn init(allocator: Allocator, start_path: []const u8, config: WalkerConfig) !StdFsWalker {
@@ -527,9 +531,12 @@ const StdFsWalker = struct {
             dir.close();
         }
 
-        // Close any remaining stacked directories
+        // Close any remaining stacked directories and free path prefixes
         for (self.dir_stack.items) |*entry| {
             entry.dir.close();
+            if (entry.path_prefix.len > 0) {
+                self.allocator.free(entry.path_prefix);
+            }
         }
         self.dir_stack.deinit(self.allocator);
     }
@@ -567,12 +574,21 @@ const StdFsWalker = struct {
 
                         if (should_descend) {
                             if (self.current_dir.?.openDir(entry.name, .{ .iterate = true })) |subdir| {
-                                // Push to stack
+                                // Allocate path prefix - only what we need
+                                const path_copy = self.allocator.alloc(u8, self.path_len) catch {
+                                    var sd = subdir;
+                                    sd.close();
+                                    continue;
+                                };
+                                @memcpy(path_copy, self.path_buffer[0..self.path_len]);
+
                                 self.dir_stack.append(self.allocator, .{
                                     .dir = subdir,
                                     .depth = self.current_depth + 1,
                                     .path_len = self.path_len,
+                                    .path_prefix = path_copy,
                                 }) catch {
+                                    self.allocator.free(path_copy);
                                     var sd = subdir;
                                     sd.close();
                                 };
@@ -607,11 +623,18 @@ const StdFsWalker = struct {
             }
 
             // Pop next directory from stack
-            const next_entry = self.dir_stack.pop();
+            const next_entry = self.dir_stack.pop() orelse {
+                self.finished = true;
+                return null;
+            };
             self.current_dir = next_entry.dir;
             self.current_iter = next_entry.dir.iterate();
             self.current_depth = next_entry.depth;
+            // Restore the path prefix from when we pushed this directory
+            @memcpy(self.path_buffer[0..next_entry.path_len], next_entry.path_prefix);
             self.path_len = next_entry.path_len;
+            // Free the path prefix allocation
+            self.allocator.free(next_entry.path_prefix);
         }
     }
 };
@@ -791,12 +814,20 @@ pub const DirIterator = struct {
         kind: EntryKind,
     };
 
-    /// SIMD-optimized strlen for dirent d_name (max 256 bytes).
-    inline fn direntNameSlice(d_name: *const [256]u8) []const u8 {
+    /// Platform-specific d_name buffer size:
+    /// - Linux: 256 bytes
+    /// - macOS (64-bit inodes): 1024 bytes (__DARWIN_MAXPATHLEN)
+    const DIRENT_NAME_LEN: usize = switch (builtin.os.tag) {
+        .macos => 1024,
+        else => 256,
+    };
+
+    /// SIMD-optimized strlen for dirent d_name.
+    inline fn direntNameSlice(d_name: *const [DIRENT_NAME_LEN]u8) []const u8 {
         const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
         const Vec = @Vector(vec_len, u8);
         const zeros: Vec = @splat(0);
-        const iterations = 256 / vec_len;
+        const iterations = DIRENT_NAME_LEN / vec_len;
 
         inline for (0..iterations) |iter| {
             const i = iter * vec_len;
@@ -808,7 +839,7 @@ pub const DirIterator = struct {
                 return d_name[0 .. i + @ctz(mask)];
             }
         }
-        return d_name[0..256];
+        return d_name[0..DIRENT_NAME_LEN];
     }
 
     /// Open a directory for single-level iteration.
