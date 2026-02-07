@@ -9,6 +9,7 @@ zlob is a C library, zig library and a rust crate that makes globbing fast. Why?
 In short libc's glob is unusable, so I wanted to make a library that is 100% POSIX and glibc compatible, that supports all the features modern glob implementation needed and is faster than glibc. So here is zlob, a little bit about it:
 
 - 100% POSIX and glibc compatible with all the flags and features supported
+- absolutely cross platform (does not yet support backslashes on windows but works under cygwin)
 - Faster than glibc up to 10x in certain cases and for general cases 1.2-1.7x faster
 - In addition to standard globbing supportes `**` recursive patterns, `gitignore` and bash `extglob` patterns
 - SIMD first implementaion where needed
@@ -80,6 +81,7 @@ Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves l
 - `ZLOB_NOSORT` - do not sort the output results, this is default behavior and it is recommended to use it for better performance
 - `ZLOB_BRACE` - enable support for `{a,b}` patterns
 - `ZLOB_TILDE` - expand `~` to the home directory
+- `ZLOB_TILDE_CHECK` - checks the user exists when expanding `~user` and returns error if it doesn't
 
 ### Not included in ZLOB_RECOMMENDED
 
@@ -88,6 +90,7 @@ Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves l
 - `ZLOB_EXTGLOB` - enable support for bash extglob patterns like `@(pattern-list)`, `!(pattern-list)`, `?(pattern-list)`, `*(pattern-list)` and `+(pattern-list)`
 
 - `ZLOB_NOCHECK` - if no matches found return the pattern itself as the only result
+- `ZLOB_NOMAGIC` - if the pattern contains no special characters return the pattern itself as the only result
 - `ZLOB_NOESCAPE` - disable backslash escaping
 - `ZLOB_MARK` - append a slash to each directory match
 - `ZLOB_ONLYDIR` - only match directories
@@ -115,7 +118,8 @@ int result = zlob_match_paths("**/*.c", paths, path_count, ZLOB_RECOMMENDED, &pz
 zlobfree(&pzlob);
 ```
 
-This allows a very fast SIMD processing of the paths and supports **ALL** the features of the standard FS globbing except `ALTDIRFUNC` which is not applicable because this mode is done to avoid using ALTDIRFUNC all along. Make sure that if you will use `ZLOB_TILDE` flag the paths input have to be absolute.
+This allows a very fast SIMD processing of the paths and supports **NOT ALL** the features of the standard FS globbing except `ALTDIRFUNC` which is not applicable because this mode is done to avoid using ALTDIRFUNC all along. Make sure that if you will use `ZLOB_TILDE` flag the paths input have to be absolute. Other flags like nomagic might not work as expected because they generally makes very little sense.
+
 
 ## Rust
 

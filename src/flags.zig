@@ -143,7 +143,7 @@ pub const ZlobFlags = packed struct(u32) {
     }
 };
 
-pub const GlobError = error{
+pub const ZlobError = error{
     OutOfMemory,
     Aborted,
 };

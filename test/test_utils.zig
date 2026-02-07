@@ -99,9 +99,12 @@ pub fn zlobIsomorphicTest(
         var result = try zlob.matchPaths(allocator, pattern, files, flags);
         defer result.deinit();
 
+        const result_slice = try result.toSlice(allocator);
+        defer allocator.free(result_slice);
+
         const test_result = TestResult{
-            .paths = result.paths,
-            .count = result.match_count,
+            .paths = result_slice,
+            .count = result.len(),
         };
 
         try assertFn(test_result);
@@ -154,11 +157,13 @@ pub fn zlobIsomorphicTest(
             defer fs_result.deinit();
 
             // Strip tmp_dir prefix from paths for comparison
-            var stripped_paths = try allocator.alloc([]const u8, fs_result.match_count);
+            const result_len = fs_result.len();
+            var stripped_paths = try allocator.alloc([]const u8, result_len);
             defer allocator.free(stripped_paths);
 
             const prefix_len = tmp_dir.len + 1; // +1 for the '/'
-            for (fs_result.paths, 0..) |path, i| {
+            for (0..result_len) |i| {
+                const path = fs_result.get(i);
                 if (path.len > prefix_len and std.mem.startsWith(u8, path, tmp_dir)) {
                     stripped_paths[i] = path[prefix_len..];
                 } else {
@@ -168,7 +173,7 @@ pub fn zlobIsomorphicTest(
 
             const test_result = TestResult{
                 .paths = stripped_paths,
-                .count = fs_result.match_count,
+                .count = result_len,
             };
 
             try assertFn(test_result);
@@ -194,9 +199,12 @@ pub fn testMatchPathsOnly(
     var result = try zlob.matchPaths(allocator, pattern, files, flags);
     defer result.deinit();
 
+    const result_slice = try result.toSlice(allocator);
+    defer allocator.free(result_slice);
+
     const test_result = TestResult{
-        .paths = result.paths,
-        .count = result.match_count,
+        .paths = result_slice,
+        .count = result.len(),
     };
 
     try assertFn(test_result);
@@ -218,9 +226,12 @@ pub fn testFilesystemOnly(
     if (fs_result_opt) |*fs_result| {
         defer fs_result.deinit();
 
+        const result_slice = try fs_result.toSlice(allocator);
+        defer allocator.free(result_slice);
+
         const test_result = TestResult{
-            .paths = fs_result.paths,
-            .count = fs_result.match_count,
+            .paths = result_slice,
+            .count = fs_result.len(),
         };
 
         try assertFn(test_result);

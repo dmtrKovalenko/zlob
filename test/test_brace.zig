@@ -1354,8 +1354,8 @@ test "combined flags - BRACE and NOCHECK" {
     var result = try zlob.matchPaths(testing.allocator, "{x,y,z}.txt", &files, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_NOCHECK);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 1), result.match_count);
-    try testing.expectEqualStrings("{x,y,z}.txt", result.paths[0]);
+    try testing.expectEqual(@as(usize, 1), result.len());
+    try testing.expectEqualStrings("{x,y,z}.txt", result.get(0));
 
     const filesPartial = [_][]const u8{
         "a.txt",
@@ -1367,6 +1367,6 @@ test "combined flags - BRACE and NOCHECK" {
     var resultPartial = try zlob.matchPaths(testing.allocator, "{a,x,y}.txt", &filesPartial, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_NOCHECK);
     defer resultPartial.deinit();
 
-    try testing.expectEqual(@as(usize, 1), resultPartial.match_count);
-    try testing.expectEqualStrings("a.txt", resultPartial.paths[0]);
+    try testing.expectEqual(@as(usize, 1), resultPartial.len());
+    try testing.expectEqualStrings("a.txt", resultPartial.get(0));
 }

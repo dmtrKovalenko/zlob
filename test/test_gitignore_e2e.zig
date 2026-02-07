@@ -82,14 +82,17 @@ test "gitignore e2e - target directory is filtered" {
         defer result.?.deinit();
 
         // Should find all 5 .rs files
-        try testing.expectEqual(@as(usize, 5), result.?.match_count);
+        try testing.expectEqual(@as(usize, 5), result.?.len());
 
         // Verify we have files from target/
         var has_target_file = false;
-        for (result.?.paths) |path| {
-            if (std.mem.indexOf(u8, path, "target/") != null) {
-                has_target_file = true;
-                break;
+        if (result) |*r| {
+            var it = r.iterator();
+            while (it.next()) |path| {
+                if (std.mem.indexOf(u8, path, "target/") != null) {
+                    has_target_file = true;
+                    break;
+                }
             }
         }
         try testing.expect(has_target_file);
@@ -112,19 +115,25 @@ test "gitignore e2e - target directory is filtered" {
         defer result.?.deinit();
 
         // Should find only 2 .rs files (src/main.rs and src/lib.rs)
-        try testing.expectEqual(@as(usize, 2), result.?.match_count);
+        try testing.expectEqual(@as(usize, 2), result.?.len());
 
         // Verify NO files from target/
-        for (result.?.paths) |path| {
-            try testing.expect(std.mem.indexOf(u8, path, "target/") == null);
+        if (result) |*r| {
+            var it = r.iterator();
+            while (it.next()) |path| {
+                try testing.expect(std.mem.indexOf(u8, path, "target/") == null);
+            }
         }
 
         // Verify we have the expected files
         var has_main = false;
         var has_lib = false;
-        for (result.?.paths) |path| {
-            if (std.mem.endsWith(u8, path, "src/main.rs")) has_main = true;
-            if (std.mem.endsWith(u8, path, "src/lib.rs")) has_lib = true;
+        if (result) |*r| {
+            var it = r.iterator();
+            while (it.next()) |path| {
+                if (std.mem.endsWith(u8, path, "src/main.rs")) has_main = true;
+                if (std.mem.endsWith(u8, path, "src/lib.rs")) has_lib = true;
+            }
         }
         try testing.expect(has_main);
         try testing.expect(has_lib);
@@ -196,11 +205,14 @@ test "gitignore e2e - node_modules directory is filtered" {
     defer result.?.deinit();
 
     // Should find only 2 .js files (src/index.js and src/utils.js)
-    try testing.expectEqual(@as(usize, 2), result.?.match_count);
+    try testing.expectEqual(@as(usize, 2), result.?.len());
 
     // Verify NO files from node_modules/
-    for (result.?.paths) |path| {
-        try testing.expect(std.mem.indexOf(u8, path, "node_modules/") == null);
+    if (result) |*r| {
+        var it = r.iterator();
+        while (it.next()) |path| {
+            try testing.expect(std.mem.indexOf(u8, path, "node_modules/") == null);
+        }
     }
 }
 
@@ -266,19 +278,25 @@ test "gitignore e2e - wildcard patterns" {
     defer result.?.deinit();
 
     // Should find only .c files (2 files), not .o files
-    try testing.expectEqual(@as(usize, 2), result.?.match_count);
+    try testing.expectEqual(@as(usize, 2), result.?.len());
 
     // Verify NO .o files
-    for (result.?.paths) |path| {
-        try testing.expect(!std.mem.endsWith(u8, path, ".o"));
+    if (result) |*r| {
+        var it = r.iterator();
+        while (it.next()) |path| {
+            try testing.expect(!std.mem.endsWith(u8, path, ".o"));
+        }
     }
 
     // Verify we have .c files
     var has_main_c = false;
     var has_utils_c = false;
-    for (result.?.paths) |path| {
-        if (std.mem.endsWith(u8, path, "main.c")) has_main_c = true;
-        if (std.mem.endsWith(u8, path, "utils.c")) has_utils_c = true;
+    if (result) |*r| {
+        var it = r.iterator();
+        while (it.next()) |path| {
+            if (std.mem.endsWith(u8, path, "main.c")) has_main_c = true;
+            if (std.mem.endsWith(u8, path, "utils.c")) has_utils_c = true;
+        }
     }
     try testing.expect(has_main_c);
     try testing.expect(has_utils_c);
@@ -364,11 +382,14 @@ test "gitignore e2e - anchored directory patterns (rust/target/)" {
 
     // Should find only 2 .rs files (rust/src/main.rs and rust/src/lib.rs)
     // NOT the files in rust/target/
-    try testing.expectEqual(@as(usize, 2), result.?.match_count);
+    try testing.expectEqual(@as(usize, 2), result.?.len());
 
     // Verify NO files from rust/target/
-    for (result.?.paths) |path| {
-        try testing.expect(std.mem.indexOf(u8, path, "rust/target/") == null);
+    if (result) |*r| {
+        var it = r.iterator();
+        while (it.next()) |path| {
+            try testing.expect(std.mem.indexOf(u8, path, "rust/target/") == null);
+        }
     }
 }
 
@@ -433,10 +454,10 @@ test "gitignore e2e - negation patterns" {
     defer result.?.deinit();
 
     // Should find only important.log (negation should re-include it)
-    try testing.expectEqual(@as(usize, 1), result.?.match_count);
+    try testing.expectEqual(@as(usize, 1), result.?.len());
 
     // Verify we have important.log
-    try testing.expect(std.mem.endsWith(u8, result.?.paths[0], "important.log"));
+    try testing.expect(std.mem.endsWith(u8, result.?.get(0), "important.log"));
 }
 
 test "gitignore e2e - negated subdirectory of ignored directory" {
@@ -519,16 +540,19 @@ test "gitignore e2e - negated subdirectory of ignored directory" {
     // - rust/target/rust-analyzer/analysis.rs (negation re-includes it)
     // Should NOT find:
     // - rust/target/debug/app.rs (ignored by rust/target/)
-    try testing.expectEqual(@as(usize, 2), result.?.match_count);
+    try testing.expectEqual(@as(usize, 2), result.?.len());
 
     // Verify we have the expected files
     var has_main = false;
     var has_analysis = false;
     var has_debug_app = false;
-    for (result.?.paths) |path| {
-        if (std.mem.endsWith(u8, path, "rust/src/main.rs")) has_main = true;
-        if (std.mem.endsWith(u8, path, "rust/target/rust-analyzer/analysis.rs")) has_analysis = true;
-        if (std.mem.endsWith(u8, path, "rust/target/debug/app.rs")) has_debug_app = true;
+    if (result) |*r| {
+        var it = r.iterator();
+        while (it.next()) |path| {
+            if (std.mem.endsWith(u8, path, "rust/src/main.rs")) has_main = true;
+            if (std.mem.endsWith(u8, path, "rust/target/rust-analyzer/analysis.rs")) has_analysis = true;
+            if (std.mem.endsWith(u8, path, "rust/target/debug/app.rs")) has_debug_app = true;
+        }
     }
     try testing.expect(has_main);
     try testing.expect(has_analysis);

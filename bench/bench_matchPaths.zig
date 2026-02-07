@@ -37,7 +37,7 @@ fn benchmark(
         blk: {
             var result = try zlob.matchPaths(allocator, pattern, paths, 0);
             defer result.deinit();
-            break :blk result.match_count;
+            break :blk result.len();
         },
     });
 }
@@ -74,7 +74,7 @@ fn benchmarkWithBrace(
         blk: {
             var result = try zlob.matchPaths(allocator, pattern, paths, flags);
             defer result.deinit();
-            break :blk result.match_count;
+            break :blk result.len();
         },
     });
 }

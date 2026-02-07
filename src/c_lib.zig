@@ -101,25 +101,27 @@ pub export fn zlob_match_paths(
     };
     defer results.deinit();
 
-    if (results.match_count == 0) {
+    const result_len = results.len();
+    if (result_len == 0) {
         return zlob_flags.ZLOB_NOMATCH;
     }
 
-    const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return zlob_flags.ZLOB_NOSPACE;
+    const pathv_buf = allocator.alloc([*c]u8, result_len + 1) catch return zlob_flags.ZLOB_NOSPACE;
     errdefer allocator.free(pathv_buf);
 
-    const pathlen_buf = allocator.alloc(usize, results.match_count) catch {
+    const pathlen_buf = allocator.alloc(usize, result_len) catch {
         allocator.free(pathv_buf);
         return zlob_flags.ZLOB_NOSPACE;
     };
 
-    for (results.paths, 0..) |path, i| {
+    for (0..result_len) |i| {
+        const path = results.get(i);
         pathv_buf[i] = @ptrCast(@constCast(path.ptr));
         pathlen_buf[i] = path.len;
     }
-    pathv_buf[results.match_count] = null;
+    pathv_buf[result_len] = null;
 
-    pzlob.zlo_pathc = results.match_count;
+    pzlob.zlo_pathc = result_len;
     pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
     pzlob.zlo_offs = 0;
     pzlob.zlo_pathlen = pathlen_buf.ptr;
@@ -150,25 +152,27 @@ pub export fn zlob_match_paths_slice(
     };
     defer results.deinit();
 
-    if (results.match_count == 0) {
+    const result_len = results.len();
+    if (result_len == 0) {
         return zlob_flags.ZLOB_NOMATCH;
     }
 
-    const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return zlob_flags.ZLOB_NOSPACE;
+    const pathv_buf = allocator.alloc([*c]u8, result_len + 1) catch return zlob_flags.ZLOB_NOSPACE;
     errdefer allocator.free(pathv_buf);
 
-    const pathlen_buf = allocator.alloc(usize, results.match_count) catch {
+    const pathlen_buf = allocator.alloc(usize, result_len) catch {
         allocator.free(pathv_buf);
         return zlob_flags.ZLOB_NOSPACE;
     };
 
-    for (results.paths, 0..) |path, i| {
+    for (0..result_len) |i| {
+        const path = results.get(i);
         pathv_buf[i] = @ptrCast(@constCast(path.ptr));
         pathlen_buf[i] = path.len;
     }
-    pathv_buf[results.match_count] = null;
+    pathv_buf[result_len] = null;
 
-    pzlob.zlo_pathc = results.match_count;
+    pzlob.zlo_pathc = result_len;
     pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
     pzlob.zlo_offs = 0;
     pzlob.zlo_pathlen = pathlen_buf.ptr;
@@ -211,25 +215,27 @@ pub export fn zlob_match_paths_at(
     };
     defer results.deinit();
 
-    if (results.match_count == 0) {
+    const result_len = results.len();
+    if (result_len == 0) {
         return zlob_flags.ZLOB_NOMATCH;
     }
 
-    const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return zlob_flags.ZLOB_NOSPACE;
+    const pathv_buf = allocator.alloc([*c]u8, result_len + 1) catch return zlob_flags.ZLOB_NOSPACE;
     errdefer allocator.free(pathv_buf);
 
-    const pathlen_buf = allocator.alloc(usize, results.match_count) catch {
+    const pathlen_buf = allocator.alloc(usize, result_len) catch {
         allocator.free(pathv_buf);
         return zlob_flags.ZLOB_NOSPACE;
     };
 
-    for (results.paths, 0..) |path, i| {
+    for (0..result_len) |i| {
+        const path = results.get(i);
         pathv_buf[i] = @ptrCast(@constCast(path.ptr));
         pathlen_buf[i] = path.len;
     }
-    pathv_buf[results.match_count] = null;
+    pathv_buf[result_len] = null;
 
-    pzlob.zlo_pathc = results.match_count;
+    pzlob.zlo_pathc = result_len;
     pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
     pzlob.zlo_offs = 0;
     pzlob.zlo_pathlen = pathlen_buf.ptr;
@@ -262,25 +268,27 @@ pub export fn zlob_match_paths_at_slice(
     };
     defer results.deinit();
 
-    if (results.match_count == 0) {
+    const result_len = results.len();
+    if (result_len == 0) {
         return zlob_flags.ZLOB_NOMATCH;
     }
 
-    const pathv_buf = allocator.alloc([*c]u8, results.match_count + 1) catch return zlob_flags.ZLOB_NOSPACE;
+    const pathv_buf = allocator.alloc([*c]u8, result_len + 1) catch return zlob_flags.ZLOB_NOSPACE;
     errdefer allocator.free(pathv_buf);
 
-    const pathlen_buf = allocator.alloc(usize, results.match_count) catch {
+    const pathlen_buf = allocator.alloc(usize, result_len) catch {
         allocator.free(pathv_buf);
         return zlob_flags.ZLOB_NOSPACE;
     };
 
-    for (results.paths, 0..) |path, i| {
+    for (0..result_len) |i| {
+        const path = results.get(i);
         pathv_buf[i] = @ptrCast(@constCast(path.ptr));
         pathlen_buf[i] = path.len;
     }
-    pathv_buf[results.match_count] = null;
+    pathv_buf[result_len] = null;
 
-    pzlob.zlo_pathc = results.match_count;
+    pzlob.zlo_pathc = result_len;
     pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
     pzlob.zlo_offs = 0;
     pzlob.zlo_pathlen = pathlen_buf.ptr;

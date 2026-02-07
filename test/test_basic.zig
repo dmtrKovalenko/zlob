@@ -179,7 +179,6 @@ test "??? - question marks only" {
     }.assert, @src());
 }
 
-
 test "matchPaths - sorted results" {
     const files = [_][]const u8{
         "c.txt",
@@ -209,7 +208,7 @@ test "matchPaths - NOSORT flag" {
     var result = try zlob.matchPaths(testing.allocator, "*.txt", &files, zlob_flags.ZLOB_NOSORT);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(@as(usize, 3), result.len());
     // Order should match input order
 }
 
@@ -228,7 +227,7 @@ test "matchPaths - large file list" {
 
     // Should match file_5.txt, file_50.txt, file_51.txt, ..., file_599.txt
     // That's 111 files (5, 50-59, 500-599)
-    try testing.expect(result.match_count > 0);
+    try testing.expect(result.len() > 0);
 }
 
 test "matchPaths - SIMD fast path" {

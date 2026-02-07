@@ -506,10 +506,11 @@ test "ZLOB_TILDE_CHECK - without flag returns tilde literal on unknown user" {
 }
 
 // ============================================================================
-// ZLOB_NOMAGIC - Return nothing if no magic and no match
+// ZLOB_NOMAGIC if pattern has no magic characters and doesn't
+// match, return the pattern itself as the sole result (like NOCHECK).
 // ============================================================================
 
-test "ZLOB_NOMAGIC - returns NOMATCH for literal with no match" {
+test "ZLOB_NOMAGIC - returns pattern for literal with no match" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -528,14 +529,19 @@ test "ZLOB_NOMAGIC - returns NOMATCH for literal with no match" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    // Literal pattern (no wildcards) that doesn't exist
+    // Literal pattern (no wildcards) that doesn't exist - should return the
+    // pattern itself as a result (BSD NOMAGIC acts like NOCHECK for literals)
     const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
     const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_NOMAGIC, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
 
-    try testing.expectEqual(@as(c_int, zlob_flags.ZLOB_NOMATCH), result);
+    try testing.expectEqual(@as(c_int, 0), result);
+    try testing.expectEqual(1, pzlob.zlo_pathc);
+    const path = std.mem.sliceTo(pzlob.zlo_pathv[0], 0);
+    try testing.expectEqualStrings("nonexistent.txt", path);
 }
 
 test "ZLOB_NOMAGIC - returns NOMATCH for wildcard pattern with no match" {
@@ -557,18 +563,18 @@ test "ZLOB_NOMAGIC - returns NOMATCH for wildcard pattern with no match" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
-    // Pattern with wildcards that doesn't match
+    // Pattern with wildcards that doesn't match - NOMAGIC does NOT help here,
+    // because the pattern has magic characters. Returns NOMATCH.
     const pattern = try allocator.dupeZ(u8, "*.nonexistent");
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
     const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_NOMAGIC, null, &pzlob);
 
-    // Has metacharacters, so still returns NOMATCH
     try testing.expectEqual(@as(c_int, zlob_flags.ZLOB_NOMATCH), result);
 }
 
-test "ZLOB_NOMAGIC - succeeds for literal that exists" {
+test "ZLOB_NOMAGIC - succeeds normally for wildcard pattern with matches" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";
 
@@ -587,6 +593,7 @@ test "ZLOB_NOMAGIC - succeeds for literal that exists" {
     try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
     defer std.posix.chdir(old_cwd) catch {};
 
+    // Wildcard pattern that matches - normal glob behavior, NOMAGIC irrelevant
     const pattern = try allocator.dupeZ(u8, "*.txt");
     defer allocator.free(pattern);
 

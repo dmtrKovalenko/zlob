@@ -21,7 +21,7 @@ pub fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
 }
 
 pub fn expandBraces(allocator: Allocator, pattern: []const u8) ![][]const u8 {
-    var results = std.ArrayListUnmanaged([]const u8){};
+    var results = std.ArrayList([]const u8){};
     errdefer {
         for (results.items) |item| allocator.free(item);
         results.deinit(allocator);
@@ -32,7 +32,7 @@ pub fn expandBraces(allocator: Allocator, pattern: []const u8) ![][]const u8 {
     return results.toOwnedSlice(allocator);
 }
 
-fn recursivelyExpandBraces(allocator: Allocator, pattern: []const u8, results: *std.ArrayListUnmanaged([]const u8)) !void {
+fn recursivelyExpandBraces(allocator: Allocator, pattern: []const u8, results: *std.ArrayList([]const u8)) !void {
     // Find first unescaped opening brace
     var brace_start: ?usize = null;
     var i: usize = 0;
@@ -140,7 +140,7 @@ pub const BracedPattern = struct {
     }
 
     pub fn parse(allocator: Allocator, pattern: []const u8) !BracedPattern {
-        var components = std.ArrayListUnmanaged(BracedComponent){};
+        var components = std.ArrayList(BracedComponent){};
         errdefer {
             for (components.items) |comp| {
                 if (comp.pattern_contexts) |contexts| allocator.free(contexts);

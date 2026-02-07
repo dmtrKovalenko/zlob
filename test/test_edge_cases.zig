@@ -132,7 +132,7 @@ test "matchPaths - pattern starting with dot" {
     var result = try zlob.matchPaths(testing.allocator, ".*", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(@as(usize, 3), result.len());
 }
 
 test "matchPaths - double star in matchPaths" {
@@ -145,7 +145,7 @@ test "matchPaths - double star in matchPaths" {
     var result = try zlob.matchPaths(testing.allocator, "**/*.txt", &files, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(@as(usize, 3), result.len());
 }
 
 test "matchPaths - pattern ending with slash" {
@@ -159,5 +159,5 @@ test "matchPaths - pattern ending with slash" {
     defer result.deinit();
 
     // Should match directory entries ending with /
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqual(@as(usize, 2), result.len());
 }

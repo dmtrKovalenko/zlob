@@ -276,8 +276,8 @@ test "matchPaths - empty file list with NOCHECK" {
     var result = try zlob.matchPaths(testing.allocator, "*.txt", &paths, zlob_flags.ZLOB_NOCHECK);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 1), result.match_count);
-    try testing.expectEqualStrings("*.txt", result.paths[0]);
+    try testing.expectEqual(@as(usize, 1), result.len());
+    try testing.expectEqualStrings("*.txt", result.get(0));
 }
 
 test "matchPaths - literal pattern matching" {
@@ -288,8 +288,8 @@ test "matchPaths - literal pattern matching" {
     var result = try zlob.matchPaths(testing.allocator, "exact_match.txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 1), result.match_count);
-    try testing.expectEqualStrings("exact_match.txt", result.paths[0]);
+    try testing.expectEqual(@as(usize, 1), result.len());
+    try testing.expectEqualStrings("exact_match.txt", result.get(0));
 }
 
 test "matchPaths - pattern with all wildcards" {
@@ -301,7 +301,7 @@ test "matchPaths - pattern with all wildcards" {
     var result = try zlob.matchPaths(testing.allocator, "*", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(@as(usize, 3), result.len());
 }
 
 test "matchPaths - bracket expression with path" {
@@ -314,7 +314,7 @@ test "matchPaths - bracket expression with path" {
     var result = try zlob.matchPaths(testing.allocator, "file[123].txt", &paths, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(@as(usize, 3), result.len());
 }
 
 test "matchPaths - case sensitivity" {
@@ -327,8 +327,8 @@ test "matchPaths - case sensitivity" {
     defer result.deinit();
 
     // Glob is case-sensitive by default
-    try testing.expectEqual(@as(usize, 1), result.match_count);
-    try testing.expectEqualStrings("test.txt", result.paths[0]);
+    try testing.expectEqual(@as(usize, 1), result.len());
+    try testing.expectEqualStrings("test.txt", result.get(0));
 }
 
 // ============================================================================

@@ -154,10 +154,10 @@ test "matchPaths - simple wildcard" {
     var result = try root.matchPaths(testing.allocator, "*.zig", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
+    try testing.expectEqual(@as(usize, 2), result.len());
     // Results are sorted alphabetically
-    try testing.expectEqualStrings("lib.zig", result.paths[0]);
-    try testing.expectEqualStrings("test.zig", result.paths[1]);
+    try testing.expectEqualStrings("lib.zig", result.get(0));
+    try testing.expectEqualStrings("test.zig", result.get(1));
 }
 
 test "matchPaths - question mark wildcard" {
@@ -171,9 +171,9 @@ test "matchPaths - question mark wildcard" {
     var result = try root.matchPaths(testing.allocator, "?.c", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
-    try testing.expectEqualStrings("a.c", result.paths[0]);
-    try testing.expectEqualStrings("b.c", result.paths[1]);
+    try testing.expectEqual(@as(usize, 2), result.len());
+    try testing.expectEqualStrings("a.c", result.get(0));
+    try testing.expectEqualStrings("b.c", result.get(1));
 }
 
 test "matchPaths - character class" {
@@ -188,10 +188,10 @@ test "matchPaths - character class" {
     var result = try root.matchPaths(testing.allocator, "test[123].txt", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
-    try testing.expectEqualStrings("test1.txt", result.paths[0]);
-    try testing.expectEqualStrings("test2.txt", result.paths[1]);
-    try testing.expectEqualStrings("test3.txt", result.paths[2]);
+    try testing.expectEqual(@as(usize, 3), result.len());
+    try testing.expectEqualStrings("test1.txt", result.get(0));
+    try testing.expectEqualStrings("test2.txt", result.get(1));
+    try testing.expectEqualStrings("test3.txt", result.get(2));
 }
 
 test "matchPaths - negated character class" {
@@ -205,9 +205,9 @@ test "matchPaths - negated character class" {
     var result = try root.matchPaths(testing.allocator, "test[!12].txt", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
-    try testing.expectEqualStrings("testa.txt", result.paths[0]);
-    try testing.expectEqualStrings("testb.txt", result.paths[1]);
+    try testing.expectEqual(@as(usize, 2), result.len());
+    try testing.expectEqualStrings("testa.txt", result.get(0));
+    try testing.expectEqualStrings("testb.txt", result.get(1));
 }
 
 test "matchPaths - no matches" {
@@ -220,7 +220,7 @@ test "matchPaths - no matches" {
     var result = try root.matchPaths(testing.allocator, "*.zig", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 0), result.match_count);
+    try testing.expectEqual(@as(usize, 0), result.len());
 }
 
 test "matchPaths - all match" {
@@ -233,7 +233,7 @@ test "matchPaths - all match" {
     var result = try root.matchPaths(testing.allocator, "*.zig", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
+    try testing.expectEqual(@as(usize, 3), result.len());
 }
 
 test "matchPaths - empty file list" {
@@ -242,7 +242,7 @@ test "matchPaths - empty file list" {
     var result = try root.matchPaths(testing.allocator, "*.zig", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 0), result.match_count);
+    try testing.expectEqual(@as(usize, 0), result.len());
 }
 
 test "matchPaths - exact match pattern" {
@@ -255,8 +255,8 @@ test "matchPaths - exact match pattern" {
     var result = try root.matchPaths(testing.allocator, "exact.txt", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 1), result.match_count);
-    try testing.expectEqualStrings("exact.txt", result.paths[0]);
+    try testing.expectEqual(@as(usize, 1), result.len());
+    try testing.expectEqualStrings("exact.txt", result.get(0));
 }
 
 test "matchPaths - complex pattern" {
@@ -271,10 +271,10 @@ test "matchPaths - complex pattern" {
     var result = try root.matchPaths(testing.allocator, "test_[0-9][0-9].txt", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 3), result.match_count);
-    try testing.expectEqualStrings("test_01.txt", result.paths[0]);
-    try testing.expectEqualStrings("test_02.txt", result.paths[1]);
-    try testing.expectEqualStrings("test_99.txt", result.paths[2]);
+    try testing.expectEqual(@as(usize, 3), result.len());
+    try testing.expectEqualStrings("test_01.txt", result.get(0));
+    try testing.expectEqualStrings("test_02.txt", result.get(1));
+    try testing.expectEqualStrings("test_99.txt", result.get(2));
 }
 
 test "matchPaths - paths with directories" {
@@ -288,9 +288,9 @@ test "matchPaths - paths with directories" {
     var result = try root.matchPaths(testing.allocator, "src/*.zig", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.match_count);
-    try testing.expectEqualStrings("src/main.zig", result.paths[0]);
-    try testing.expectEqualStrings("src/test.zig", result.paths[1]);
+    try testing.expectEqual(@as(usize, 2), result.len());
+    try testing.expectEqualStrings("src/main.zig", result.get(0));
+    try testing.expectEqualStrings("src/test.zig", result.get(1));
 }
 
 test "matchPaths - special characters in filenames" {
@@ -304,5 +304,5 @@ test "matchPaths - special characters in filenames" {
     var result = try root.matchPaths(testing.allocator, "test*.txt", &files, 0);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 4), result.match_count);
+    try testing.expectEqual(@as(usize, 4), result.len());
 }

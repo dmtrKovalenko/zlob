@@ -166,7 +166,7 @@ fn globLiteralPath(allocator: Allocator, path: []const u8, flags: ZlobFlags, pzl
 }
 
 pub const ZlobFlags = zlob_flags.ZlobFlags;
-pub const GlobError = zlob_flags.GlobError;
+pub const ZlobError = zlob_flags.ZlobError;
 
 const ZLOB_ALTDIRFUNC = zlob_flags.ZLOB_ALTDIRFUNC;
 const ZLOB_MAGCHAR = zlob_flags.ZLOB_MAGCHAR;
@@ -184,8 +184,8 @@ pub const DT_DIR = std.c.DT.DIR;
 
 /// Parallel arrays of paths and their lengths for zlob_t output.
 pub const ResultsList = struct {
-    paths: std.ArrayListUnmanaged([*c]u8),
-    lengths: std.ArrayListUnmanaged(usize),
+    paths: std.ArrayList([*c]u8),
+    lengths: std.ArrayList(usize),
     allocator: Allocator,
 
     /// Initialize with zero capacity
@@ -199,8 +199,8 @@ pub const ResultsList = struct {
 
     /// Initialize with pre-allocated capacity to avoid reallocations
     pub fn initWithCapacity(allocator: Allocator, capacity: usize) Allocator.Error!ResultsList {
-        var paths = std.ArrayListUnmanaged([*c]u8){};
-        var lengths = std.ArrayListUnmanaged(usize){};
+        var paths = std.ArrayList([*c]u8){};
+        var lengths = std.ArrayList(usize){};
         try paths.ensureTotalCapacity(allocator, capacity);
         try lengths.ensureTotalCapacity(allocator, capacity);
         return .{
@@ -905,6 +905,13 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
 
     if (has_magic) {
         pzlob.zlo_flags |= ZLOB_MAGCHAR;
+    }
+
+    // BSD GLOB_NOMAGIC: if no matches and pattern has no magic characters,
+    // return the pattern itself as the sole result (like NOCHECK but only
+    // when there are no wildcards). See FreeBSD glob.c err_nomatch().
+    if (result == null and gf.nomagic and !has_magic) {
+        return returnPatternAsResult(allocator, pattern_slice, pzlob);
     }
 
     return result;
@@ -1908,9 +1915,6 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
         }
     }
 
-    // Note: "." and ".." handling is now done at the iterator level via HiddenConfig.
-    // The iterator includes them when pattern starts with '.' (POSIX compliant)
-
     if (names.len() == 0) {
         if (flags.nocheck) {
             const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
@@ -1937,40 +1941,105 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
     return finalizeResults(allocator, &names, flags, pzlob);
 }
 
-/// Result of a glob operation containing matched paths
-pub const GlobResults = struct {
-    paths: [][]const u8,
-    match_count: usize,
+/// Result of a glob operation containing matched paths.
+///
+/// Uses zero-copy access when backed by a zlob_t (filesystem glob results),
+/// avoiding an extra allocation and re-iteration over the paths array.
+/// For in-memory matching (matchPaths), stores an owned Zig slice directly.
+///
+/// Access paths via:
+/// - `result.get(i)` for indexed access
+/// - `var it = result.iterator(); while (it.next()) |path| { ... }` for iteration
+/// - `result.len()` for the count
+pub const ZlobResults = struct {
+    /// Backing storage: either a zlob_t (zero-copy C arrays) or an owned Zig slice
+    source: Source,
     allocator: Allocator,
-    // Store full zlob_t for zero-copy glob results (null if paths are Zig-allocated)
-    // This allows proper cleanup via globfreeInternal() which handles arena allocator
-    pzlob: ?zlob_t = null,
-    // Whether we own the path strings (true for glob(), false for matchPaths())
-    owns_paths: bool = true,
 
-    pub fn deinit(self: *GlobResults) void {
-        if (self.pzlob) |*pzlob_ptr| {
-            // Zero-copy mode: use globfreeInternal() which handles allocated paths
-            globfreeInternal(self.allocator, pzlob_ptr);
-            self.allocator.free(self.paths);
-        } else if (self.owns_paths) {
-            // Normal mode: paths are Zig-allocated, free them
-            for (self.paths) |path| {
-                self.allocator.free(path);
-            }
-            self.allocator.free(self.paths);
-        } else {
-            // matchPaths mode: we don't own the path strings, only free the array
-            self.allocator.free(self.paths);
+    pub const Source = union(enum) {
+        /// Zero-copy: reads directly from zlob_t's C arrays (zlo_pathv + zlo_pathlen)
+        zlob: zlob_t,
+        /// Owned Zig slice of path slices (from matchPaths or nocheck fallback)
+        paths: OwnedPaths,
+    };
+
+    pub const OwnedPaths = struct {
+        items: [][]const u8,
+        owns_strings: bool,
+    };
+
+    /// Iterator over glob results. Yields one `[]const u8` path per call to `next()`.
+    pub const Iterator = struct {
+        results: *const ZlobResults,
+        index: usize = 0,
+
+        pub fn next(self: *Iterator) ?[]const u8 {
+            if (self.index >= self.results.len()) return null;
+            const path = self.results.get(self.index);
+            self.index += 1;
+            return path;
         }
+
+        /// Reset the iterator to the beginning
+        pub fn reset(self: *Iterator) void {
+            self.index = 0;
+        }
+    };
+
+    /// Return the number of matched paths
+    pub fn len(self: *const ZlobResults) usize {
+        return switch (self.source) {
+            .zlob => |pzlob| pzlob.zlo_pathc,
+            .paths => |owned| owned.items.len,
+        };
     }
 
-    /// Extract the internal zlob_t for C API use (transfers ownership)
-    /// After calling this, deinit() will not free the zlob_t data
-    pub fn extractGlobT(self: *GlobResults) ?zlob_t {
-        const result = self.pzlob;
-        self.pzlob = null; // Mark as extracted, so deinit won't free it
-        return result;
+    /// Efficiently get zig slice from the zlob results without copying.
+    pub fn get(self: *const ZlobResults, i: usize) []const u8 {
+        return switch (self.source) {
+            .zlob => |pzlob| {
+                const c_path: [*]const u8 = @ptrCast(pzlob.zlo_pathv[i]);
+                const path_len = pzlob.zlo_pathlen[i];
+                return c_path[0..path_len];
+            },
+            .paths => |owned| owned.items[i],
+        };
+    }
+
+    /// Return an iterator over all matched paths
+    pub fn iterator(self: *const ZlobResults) Iterator {
+        return .{ .results = self };
+    }
+
+    /// Materialize all paths into a `[][]const u8` slice.
+    /// Caller owns the returned slice and must free it with `alloc.free(slice)`.
+    /// The path strings themselves are NOT copied — they point into the original storage.
+    pub fn toSlice(self: *const ZlobResults, alloc: Allocator) ![][]const u8 {
+        const count = self.len();
+        const slice = try alloc.alloc([]const u8, count);
+        for (0..count) |i| {
+            slice[i] = self.get(i);
+        }
+        return slice;
+    }
+
+    pub fn deinit(self: *ZlobResults) void {
+        switch (self.source) {
+            .zlob => |*pzlob_ptr| {
+                // Zero-copy mode: use globfreeInternal() which handles allocated paths
+                globfreeInternal(self.allocator, @constCast(pzlob_ptr));
+            },
+            .paths => |owned| {
+                if (owned.owns_strings) {
+                    for (owned.items) |path| {
+                        self.allocator.free(path);
+                    }
+                }
+                if (owned.items.len > 0) {
+                    self.allocator.free(owned.items);
+                }
+            },
+        }
     }
 };
 

@@ -16,7 +16,7 @@ const PatternContext = glob.PatternContext;
 const containsExtglob = glob.containsExtglob;
 const fnmatch_mod = glob.fnmatch;
 
-const GlobResults = glob.GlobResults;
+const ZlobResults = glob.ZlobResults;
 const ZlobFlags = glob.ZlobFlags;
 
 const PatternSegments = struct {
@@ -161,25 +161,21 @@ fn finalizeBraceMatches(
     matches: *std.array_list.AlignedManaged([]const u8, null),
     pattern: []const u8,
     flags: ZlobFlags,
-) !GlobResults {
+) !ZlobResults {
     // Handle no matches
     if (matches.items.len == 0) {
         if (flags.nocheck) {
             var result_paths = try allocator.alloc([]const u8, 1);
             result_paths[0] = try allocator.dupe(u8, pattern);
-            return GlobResults{
-                .paths = result_paths,
-                .match_count = 1,
+            return ZlobResults{
+                .source = .{ .paths = .{ .items = result_paths, .owns_strings = true } },
                 .allocator = allocator,
-                .owns_paths = true,
             };
         }
         const empty: [][]const u8 = &[_][]const u8{};
-        return GlobResults{
-            .paths = empty,
-            .match_count = 0,
+        return ZlobResults{
+            .source = .{ .paths = .{ .items = empty, .owns_strings = false } },
             .allocator = allocator,
-            .owns_paths = false,
         };
     }
 
@@ -194,11 +190,9 @@ fn finalizeBraceMatches(
         }.lessThan);
     }
 
-    return GlobResults{
-        .paths = result_paths,
-        .match_count = result_paths.len,
+    return ZlobResults{
+        .source = .{ .paths = .{ .items = result_paths, .owns_strings = false } },
         .allocator = allocator,
-        .owns_paths = false,
     };
 }
 
@@ -610,7 +604,7 @@ pub fn matchPaths(
     raw_pattern: []const u8,
     paths: []const []const u8,
     flags: ZlobFlags,
-) !GlobResults {
+) !ZlobResults {
     // Strip leading "./" from pattern - paths are relative to the current directory by default
     const pattern = if (raw_pattern.len >= 2 and raw_pattern[0] == '.' and raw_pattern[1] == '/')
         raw_pattern[2..]
@@ -640,7 +634,7 @@ pub fn matchPathsAt(
     raw_pattern: []const u8,
     paths: []const []const u8,
     flags: ZlobFlags,
-) !GlobResults {
+) !ZlobResults {
     // Compute offset: for empty base_path, offset is 0.
     // Otherwise, base_path length plus 1 for the separator if it doesn't already
     // end with '/'.
@@ -667,7 +661,7 @@ fn matchPathsImpl(
     paths: []const []const u8,
     path_offset: usize,
     flags: ZlobFlags,
-) !GlobResults {
+) !ZlobResults {
     // Handle ZLOB_BRACE - expand pattern and match against any alternative
     if (flags.brace) {
         const expanded_patterns = try brace_optimizer.expandBraces(allocator, pattern);
@@ -756,19 +750,15 @@ fn matchPathsImpl(
         if (flags.nocheck) {
             var result_paths = try allocator.alloc([]const u8, 1);
             result_paths[0] = try allocator.dupe(u8, pattern);
-            return GlobResults{
-                .paths = result_paths,
-                .match_count = 1,
+            return ZlobResults{
+                .source = .{ .paths = .{ .items = result_paths, .owns_strings = true } },
                 .allocator = allocator,
-                .owns_paths = true,
             };
         }
         const empty: [][]const u8 = &[_][]const u8{};
-        return GlobResults{
-            .paths = empty,
-            .match_count = 0,
+        return ZlobResults{
+            .source = .{ .paths = .{ .items = empty, .owns_strings = false } },
             .allocator = allocator,
-            .owns_paths = false,
         };
     }
 
@@ -815,30 +805,24 @@ fn matchPathsImpl(
         if (matches.items.len == 0 and flags.nocheck) {
             var result_paths = try allocator.alloc([]const u8, 1);
             result_paths[0] = try allocator.dupe(u8, pattern);
-            return GlobResults{
-                .paths = result_paths,
-                .match_count = 1,
+            return ZlobResults{
+                .source = .{ .paths = .{ .items = result_paths, .owns_strings = true } },
                 .allocator = allocator,
-                .owns_paths = true,
             };
         }
 
         if (matches.items.len == 0) {
             const empty: [][]const u8 = &[_][]const u8{};
-            return GlobResults{
-                .paths = empty,
-                .match_count = 0,
+            return ZlobResults{
+                .source = .{ .paths = .{ .items = empty, .owns_strings = false } },
                 .allocator = allocator,
-                .owns_paths = false,
             };
         }
 
         const result_paths = try matches.toOwnedSlice();
-        return GlobResults{
-            .paths = result_paths,
-            .match_count = result_paths.len,
+        return ZlobResults{
+            .source = .{ .paths = .{ .items = result_paths, .owns_strings = false } },
             .allocator = allocator,
-            .owns_paths = false,
         };
     }
 
@@ -906,21 +890,17 @@ fn matchPathsImpl(
     if (matches.items.len == 0 and flags.nocheck) {
         var result_paths = try allocator.alloc([]const u8, 1);
         result_paths[0] = try allocator.dupe(u8, pattern);
-        return GlobResults{
-            .paths = result_paths,
-            .match_count = 1,
+        return ZlobResults{
+            .source = .{ .paths = .{ .items = result_paths, .owns_strings = true } },
             .allocator = allocator,
-            .owns_paths = true,
         };
     }
 
     if (matches.items.len == 0) {
         const empty: [][]const u8 = &[_][]const u8{};
-        return GlobResults{
-            .paths = empty,
-            .match_count = 0,
+        return ZlobResults{
+            .source = .{ .paths = .{ .items = empty, .owns_strings = false } },
             .allocator = allocator,
-            .owns_paths = false,
         };
     }
 
@@ -934,10 +914,8 @@ fn matchPathsImpl(
         }.lessThan);
     }
 
-    return GlobResults{
-        .paths = result_paths,
-        .match_count = result_paths.len,
+    return ZlobResults{
+        .source = .{ .paths = .{ .items = result_paths, .owns_strings = false } },
         .allocator = allocator,
-        .owns_paths = false,
     };
 }

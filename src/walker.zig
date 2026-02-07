@@ -452,7 +452,7 @@ const StdFsWalker = struct {
     config: WalkerConfig,
 
     // Stack of directories to process (LIFO order)
-    dir_stack: std.ArrayListUnmanaged(StackEntry),
+    dir_stack: std.ArrayList(StackEntry),
 
     // Current directory being iterated
     current_dir: ?std.fs.Dir,
@@ -483,7 +483,7 @@ const StdFsWalker = struct {
         };
         errdefer dir.close();
 
-        var dir_stack = std.ArrayListUnmanaged(StackEntry){};
+        var dir_stack = std.ArrayList(StackEntry){};
         // Only pre-allocate stack if we're doing recursion
         if (config.max_depth > 0) {
             dir_stack.ensureTotalCapacity(allocator, 64) catch {};

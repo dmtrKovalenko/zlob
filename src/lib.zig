@@ -19,8 +19,8 @@ pub const pattern_context = zlob.pattern_context;
 pub const suffix_match = zlob.suffix_match;
 pub const PatternContext = zlob.PatternContext;
 
-pub const GlobResults = zlob.GlobResults;
-pub const GlobError = zlob.GlobError;
+pub const ZlobResults = zlob.ZlobResults;
+pub const ZlobError = zlob.ZlobError;
 pub const zlob_t = zlob.zlob_t;
 pub const analyzePattern = zlob.analyzePattern;
 pub const simdFindChar = zlob.simdFindChar;
@@ -35,14 +35,15 @@ pub fn hasWildcards(s: []const u8) bool {
     return zlob.hasWildcards(s, .{ .brace = true, .extglob = true });
 }
 
-/// Perform file system walking and collect matching results to GlobResults
+/// Perform file system walking and collect matching results to ZlobResults
 ///
 /// Example with ZlobFlags (recommended):
 /// ```zig
 /// const flags = zlob.ZlobFlags{ .brace = true, .gitignore = true };
 /// if (try zlob.match(allocator, "**/*.zig", flags)) |*result| {
 ///     defer result.deinit();
-///     for (result.paths) |path| {
+///     var it = result.iterator();
+///     while (it.next()) |path| {
 ///         std.debug.print("{s}\n", .{path});
 ///     }
 /// }
@@ -50,37 +51,23 @@ pub fn hasWildcards(s: []const u8) bool {
 ///
 /// You can also pass any integer type build from the ZLOB_* flags if you prefer
 /// or even struct literals like .{ .mark = true } for convenience
-pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: anytype) !?GlobResults {
+pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: anytype) !?ZlobResults {
     const zflags = flagsToZlobFlags(flags_param);
 
     var pzlob: zlob_t = undefined;
     const opt_result = try zlob.globSlice(allocator, pattern, zflags.toInt(), null, &pzlob);
 
     if (opt_result) |_| {
-        var paths = try allocator.alloc([]const u8, pzlob.zlo_pathc);
-        errdefer allocator.free(paths);
-
-        var i: usize = 0;
-        while (i < pzlob.zlo_pathc) : (i += 1) {
-            const c_path = pzlob.zlo_pathv[i];
-            const path_len = pzlob.zlo_pathlen[i];
-            paths[i] = c_path[0..path_len];
-        }
-
-        return GlobResults{
-            .paths = paths,
-            .match_count = pzlob.zlo_pathc,
+        return ZlobResults{
+            .source = .{ .zlob = pzlob },
             .allocator = allocator,
-            .pzlob = pzlob,
         };
     } else {
         if (zflags.nocheck) {
             var paths = try allocator.alloc([]const u8, 1);
-            errdefer allocator.free(paths);
             paths[0] = try allocator.dupe(u8, pattern);
-            return GlobResults{
-                .paths = paths,
-                .match_count = 1,
+            return ZlobResults{
+                .source = .{ .paths = .{ .items = paths, .owns_strings = true } },
                 .allocator = allocator,
             };
         }
@@ -107,10 +94,11 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: any
 ///     "/users/bob/docs/readme.md",
 /// };
 ///
-/// const result = try zlob.matchPaths(allocator, "/users/**/code/*.c", &paths, .{});
+/// var result = try zlob.matchPaths(allocator, "/users/**/code/*.c", &paths, .{});
 /// defer result.deinit();
 ///
-/// for (result.paths) |path| {
+/// var it = result.iterator();
+/// while (it.next()) |path| {
 ///     std.debug.print("Match: {s}\n", .{path});
 /// }
 /// ```
@@ -124,7 +112,7 @@ pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: any
 /// Requirements:
 /// - Input paths MUST be normalized (no consecutive slashes like //)
 /// - Paths from filesystem operations are typically already normalized
-pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !GlobResults {
+pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !ZlobResults {
     const zflags = flagsToZlobFlags(flags_param);
     return zlob.path_matcher.matchPaths(allocator, pattern, paths, zflags);
 }
@@ -153,11 +141,11 @@ pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []co
 ///
 /// const result = try zlob.matchPathsAt(allocator, "/home/user/project", "**/*.c", &paths, .{});
 /// defer result.deinit();
-/// // result.paths → the 3 original absolute paths that end in .c
+/// // Use result.get(i) or result.iterator() to access the 3 matching absolute paths
 /// ```
 ///
 /// Supported flags: same as `matchPaths`.
-pub fn matchPathsAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !GlobResults {
+pub fn matchPathsAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !ZlobResults {
     const zflags = flagsToZlobFlags(flags_param);
     return zlob.path_matcher.matchPathsAt(allocator, base_path, pattern, paths, zflags);
 }
@@ -172,14 +160,15 @@ pub fn matchPathsAt(allocator: std.mem.Allocator, base_path: []const u8, pattern
 /// // Find all .zig files under /home/user/project
 /// if (try zlob.matchAt(allocator, "/home/user/project", "**/*.zig", .{ .brace = true })) |*result| {
 ///     defer result.deinit();
-///     for (result.paths) |path| {
+///     var it = result.iterator();
+///     while (it.next()) |path| {
 ///         std.debug.print("{s}\n", .{path});
 ///     }
 /// }
 /// ```
 ///
 /// Returns `error.Aborted` if `base_path` is not an absolute path (doesn't start with '/').
-pub fn matchAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, flags_param: anytype) !?GlobResults {
+pub fn matchAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, flags_param: anytype) !?ZlobResults {
     const zflags = flagsToZlobFlags(flags_param);
     const pattern_z = try allocator.dupeZ(u8, pattern);
     defer allocator.free(pattern_z);
@@ -188,30 +177,16 @@ pub fn matchAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []c
     const opt_result = try zlob.globAt(allocator, base_path, pattern_z.ptr, zflags.toInt(), null, &pzlob);
 
     if (opt_result) |_| {
-        var paths = try allocator.alloc([]const u8, pzlob.zlo_pathc);
-        errdefer allocator.free(paths);
-
-        var i: usize = 0;
-        while (i < pzlob.zlo_pathc) : (i += 1) {
-            const c_path = pzlob.zlo_pathv[i];
-            const path_len = pzlob.zlo_pathlen[i];
-            paths[i] = c_path[0..path_len];
-        }
-
-        return GlobResults{
-            .paths = paths,
-            .match_count = pzlob.zlo_pathc,
+        return ZlobResults{
+            .source = .{ .zlob = pzlob },
             .allocator = allocator,
-            .pzlob = pzlob,
         };
     } else {
         if (zflags.nocheck) {
             var paths = try allocator.alloc([]const u8, 1);
-            errdefer allocator.free(paths);
             paths[0] = try allocator.dupe(u8, pattern);
-            return GlobResults{
-                .paths = paths,
-                .match_count = 1,
+            return ZlobResults{
+                .source = .{ .paths = .{ .items = paths, .owns_strings = true } },
                 .allocator = allocator,
             };
         }

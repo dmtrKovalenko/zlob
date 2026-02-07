@@ -67,7 +67,7 @@ const TestDir = struct {
         try std.posix.chdir(self.path);
         defer std.posix.chdir(old_cwd) catch {};
 
-        // Use match API - returns ?GlobResults
+        // Use match API - returns ?ZlobResults
         var result = try zlob.match(allocator, pattern, 0) orelse {
             // No matches - return empty array
             return try allocator.alloc([]const u8, 0);
@@ -75,9 +75,9 @@ const TestDir = struct {
         defer result.deinit();
 
         // Copy paths to return (match owns the strings, we need separate copies)
-        const paths = try allocator.alloc([]const u8, result.match_count);
-        for (result.paths, 0..) |path, i| {
-            paths[i] = try allocator.dupe(u8, path);
+        const paths = try allocator.alloc([]const u8, result.len());
+        for (0..result.len()) |i| {
+            paths[i] = try allocator.dupe(u8, result.get(i));
         }
         return paths;
     }

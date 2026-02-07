@@ -210,6 +210,7 @@ pub fn main() !void {
     flags.noescape = opts.no_escape;
     flags.period = opts.hidden;
     flags.onlydir = opts.dirs_only;
+    flags.nomagic = false; // always enable magic, since we require a pattern argument
     _ = &flags; // suppress unused warning if match accepts anytype
 
     var match_result = zlob.match(allocator, full_pattern, flags) catch |err| {
@@ -221,11 +222,15 @@ pub fn main() !void {
     if (match_result) |*result| {
         defer result.deinit();
 
-        const total = result.match_count;
+        const total = result.len();
         const display_limit = if (opts.show_all) total else @min(opts.limit, total);
 
-        for (result.paths[0..display_limit]) |path| {
+        var displayed: usize = 0;
+        var it = result.iterator();
+        while (it.next()) |path| {
+            if (displayed >= display_limit) break;
             stdout.print("{s}\n", .{path}) catch {};
+            displayed += 1;
         }
 
         stdout_writer.flush();
