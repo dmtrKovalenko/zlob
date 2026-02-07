@@ -1,6 +1,6 @@
 # zlob.h
 
-100% POSIX and glibc compatible globbing library for C, Zig, and Rust that is **faster** and supports **all the modern globbing formats** (more than libc and rust `glob` crate)
+100% POSIX and glibc compatible globbing library for C, Zig, and Rust that is **faster** and supports **all the modern globbing formats** and gitignore
 
 
 https://github.com/user-attachments/assets/24c8de52-a69b-461e-8162-c7024975d50b
