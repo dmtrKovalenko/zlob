@@ -25,12 +25,12 @@ In short libc's glob is unusable, so I wanted to make a library that is 100% POS
 
 ## Why it is faster?
 
-zlob is using SIMD first implemenation. It is a primary reason it is written in zig to have a native portable SIMD support, somewhere it signficantly improves certain bottlenecks. But the primary reason it is faster is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directores and making lef matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
+zlob is using SIMD first implementation. It is a primary reason it is written in zig to have a native portable SIMD support, somewhere it signficantly improves certain bottlenecks. But the primary reason it is faster is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directories and making lef matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
 
 One of my favourite optimizations for this project is patterns like `./**/*.{c,rs,zig}` this is usually the main reason glob is used and this pattern is the most optimized in the zlob implementation:
 
 - recursive worker is using `getdents64` syscall directly which dramatically improves directory listing
-- gitignore implemenation allows use to optionally skip large subdirectories out of the box
+- gitignore implementation allows use to optionally skip large subdirectories out of the box
 - and the actual `*.{c,rs,zig}` pattern is precompiled down the the SIMD bitmask matching that allows to match 3 extension at once
 
 ## Compatibility
@@ -39,7 +39,7 @@ As much as I could I converted all the tests that I found from the glibc test su
 
 ## Supported patterns
 
-Any pattern you may think of should be already supported including gnu symbol classes, negation of charcter group, and event bash's extglob syntax.
+Any pattern you may think of should be already supported including gnu symbol classes, negation of character group, and event bash's extglob syntax.
 
 Here are some examples:
 
@@ -60,7 +60,7 @@ Here are some examples:
 
 ## API
 
-The easierst way is to look at `include/zlob.h` but it exposes the same API as POSIX glob requires
+The easiest way is to look at `include/zlob.h` but it exposes the same API as POSIX glob requires
 
 ```c
 #include "zlob.h"
@@ -79,7 +79,7 @@ if (ret == 0) {
 }
 ```
 
-Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves like a modern glob implemenation without sorting the output results, and enabling all the modern features that you might need. Additional flags that might be used are:
+Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves like a modern glob implementation without sorting the output results, and enabling all the modern features that you might need. Additional flags that might be used are:
 
 ### Included in ZLOB_RECOMMENDED
 
@@ -123,7 +123,7 @@ int result = zlob_match_paths("**/*.c", paths, path_count, ZLOB_RECOMMENDED, &pz
 zlobfree(&pzlob);
 ```
 
-This allows a very fast SIMD processing of the paths and supports **NOT ALL** the features of the standard FS globbing except `ALTDIRFUNC` which is not applicable because this mode is done to avoid using ALTDIRFUNC all along. Make sure that if you will use `ZLOB_TILDE` flag the paths input have to be absolute. Other flags like nomagic might not work as expected because they generally makes very little sense.
+This allows a very fast SIMD processing of the paths and supports **NOT ALL** the features of the standard FS globbing except `ALTDIRFUNC` which is not applicable because this mode is done to avoid using ALTDIRFUNC all along. Make sure that if you will use `ZLOB_TILDE` flag the paths input have to be absolute. Other flags like nomagic might not work as expected because they generally make very little sense.
 
 
 ## Rust
@@ -140,11 +140,11 @@ make test
 make install <PREFIX>
 ```
 
-I know it might be annoying to install zig but zig's linker is currently a decent way to cross compiler any native code so I would definetely recommend trying it out.
+I know it might be annoying to install zig but zig's linker is currently a decent way to cross compiler any native code so I would definitely recommend trying it out.
 
 ## Naming
 
-This is my favourite part. `zlob` is not just zig zlob but also it means redneck in a varios Eastern-European languaes but in polish it means "a manger", which I find very funny.
+This is my favourite part. `zlob` is not just zig zlob but also it means redneck in a varios Eastern-European languages but in polish it means "a manger", which I find very funny.
 
 ## License
 
