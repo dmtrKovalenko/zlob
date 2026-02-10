@@ -89,11 +89,10 @@ if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would run: git add build.zig.zon rust/Cargo.toml${NC}"
     echo -e "${BLUE}[DRY-RUN] Would run: git commit -m \"chore: bump version to ${NEW_VERSION}\"${NC}"
 else
-    git add build.zig.zon rust/Cargo.toml
-    git commit -m "chore: bump version to ${NEW_VERSION}"
+    git add --all
+    git commit -m "chore: version to ${NEW_VERSION}"
 fi
 
-# Push commit
 echo -e "${GREEN}Pushing commit...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would run: git push${NC}"
