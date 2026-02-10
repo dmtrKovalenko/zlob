@@ -1,10 +1,18 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zlob_impl = @import("zlob");
 const zlob_flags = @import("zlob_flags");
 
 const mem = std.mem;
 const ZlobFlags = zlob_flags.ZlobFlags;
 const pattern_context = zlob_impl.pattern_context;
+
+// On Windows without libc, use page_allocator (backed by VirtualAlloc).
+// On POSIX, use c_allocator (backed by malloc/free) for better small-alloc performance.
+const allocator = if (builtin.os.tag == .windows and !builtin.link_libc)
+    std.heap.page_allocator
+else
+    std.heap.c_allocator;
 
 pub const zlob_t = zlob_impl.zlob_t;
 pub const zlob_dirent_t = zlob_impl.zlob_dirent_t;
@@ -22,8 +30,6 @@ pub const zlob_slice_t = extern struct {
 };
 
 pub export fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) callconv(.c) c_int {
-    const allocator = std.heap.c_allocator;
-
     if (zlob_impl.glob(allocator, pattern, flags, errfunc, pzlob)) |opt_result| {
         if (opt_result) |_| {
             return 0; // Success with matches
@@ -39,7 +45,7 @@ pub export fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob
 }
 
 pub export fn zlobfree(pzlob: *zlob_t) callconv(.c) void {
-    zlob_impl.globfreeInternal(std.heap.c_allocator, pzlob);
+    zlob_impl.globfreeInternal(allocator, pzlob);
 }
 
 /// Glob within a specific base directory.
@@ -52,7 +58,6 @@ pub export fn zlob_at(
     errfunc: zlob_impl.zlob_errfunc_t,
     pzlob: *zlob_t,
 ) callconv(.c) c_int {
-    const allocator = std.heap.c_allocator;
     const base_slice = mem.sliceTo(base_path, 0);
 
     if (zlob_impl.globAt(allocator, base_slice, pattern, flags, errfunc, pzlob)) |opt_result| {
@@ -78,8 +83,6 @@ pub export fn zlob_match_paths(
     flags: c_int,
     pzlob: *zlob_t,
 ) c_int {
-    const allocator = std.heap.c_allocator;
-
     const pattern_slice = mem.sliceTo(pattern, 0);
 
     const STACK_LIMIT = 256;
@@ -139,7 +142,6 @@ pub export fn zlob_match_paths_slice(
     flags: c_int,
     pzlob: *zlob_t,
 ) c_int {
-    const allocator = std.heap.c_allocator;
     const pattern_slice = pattern.ptr[0..pattern.len];
 
     // UNSAFE: Relies on Zig ABI compatibility
@@ -191,8 +193,6 @@ pub export fn zlob_match_paths_at(
     flags: c_int,
     pzlob: *zlob_t,
 ) c_int {
-    const allocator = std.heap.c_allocator;
-
     const base_slice = mem.sliceTo(base_path, 0);
     const pattern_slice = mem.sliceTo(pattern, 0);
 
@@ -254,7 +254,6 @@ pub export fn zlob_match_paths_at_slice(
     flags: c_int,
     pzlob: *zlob_t,
 ) c_int {
-    const allocator = std.heap.c_allocator;
     const base_slice = base_path.ptr[0..base_path.len];
     const pattern_slice = pattern.ptr[0..pattern.len];
 

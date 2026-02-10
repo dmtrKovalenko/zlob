@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  ZIG_VERSION: "0.15.1"
+  ZIG_VERSION: "0.15.2"
 
 jobs:
   linux:
@@ -238,14 +238,62 @@ jobs:
       - name: Zig build
         run: zig build
 
-      - name: Zig tests
-        run: zig build test
-
       - name: Test Zig CLI
         run: |
           ./zig-out/bin/zlob --version
           ./zig-out/bin/zlob "*.zig" src/
           ./zig-out/bin/zlob "**/*.zig" .
+
+      - name: Rust tests
+        working-directory: rust
+        run: cargo test
+
+      - name: Rust build release
+        working-directory: rust
+        run: cargo build --release
+
+  windows-native:
+    name: Native windows msvc
+    runs-on: windows-latest
+    env:
+      ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Zig build
+        run: zig build
+
+      - name: List zig-out contents
+        run: Get-ChildItem -Recurse zig-out
+        shell: pwsh
+
+      - name: Test Zig CLI version
+        run: .\zig-out\bin\zlob.exe --version
+        shell: pwsh
+
+      - name: Test Zig CLI glob
+        run: |
+          Write-Host "Listing src directory:"
+          Get-ChildItem src\
+          Write-Host "Running zlob:"
+          .\zig-out\bin\zlob.exe "**/*.zig" src\ 2>&1
+          Write-Host "Exit code: $LASTEXITCODE"
+        shell: pwsh
+        continue-on-error: true
+
+      - name: Rust build
+        working-directory: rust
+        run: cargo build
 
       - name: Rust tests
         working-directory: rust

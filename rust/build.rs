@@ -88,7 +88,11 @@ fn main() {
     let target = env::var("TARGET").unwrap();
     let host = env::var("HOST").unwrap();
 
-    let zig_target = if target == host {
+    // For Windows targets, always map through rust_target_to_zig().
+    // Using "native" on Windows would cause Zig to resolve to GNU/MinGW ABI
+    // (because Zig ships its own MinGW libc), but Rust's MSVC linker expects
+    // MSVC symbols (e.g., __chkstk vs ___chkstk_ms). This causes linker errors.
+    let zig_target = if target == host && !target.contains("windows") {
         "native"
     } else {
         rust_target_to_zig(&target)
@@ -100,12 +104,8 @@ fn main() {
         _ => "Debug",
     };
 
-    // Determine if we're building from published crate (need to skip benchmarks)
-    let is_published_crate = zig_src_dir == "zig-src";
-
-    // Use OUT_DIR for zig cache to avoid modifying source directory
-    let zig_cache_dir = out_dir.join("zig-cache");
-    let zig_global_cache = out_dir.join("zig-global-cache");
+    let zig_cache_dir = PathBuf::from(zig_src_dir).join(".zig-cache");
+    let zig_global_cache_dir = out_dir.join("zig-global-cache");
 
     let mut cmd = Command::new(&zig);
     cmd.current_dir(&zlob_root)
@@ -115,14 +115,10 @@ fn main() {
         .arg("--cache-dir")
         .arg(&zig_cache_dir)
         .arg("--global-cache-dir")
-        .arg(&zig_global_cache)
+        .arg(&zig_global_cache_dir)
+        .arg("-Dskip-bench=true")
         .arg("-p")
         .arg(out_dir.as_os_str());
-
-    // Skip benchmarks when building from published crate (bench/ dir not included)
-    if is_published_crate {
-        cmd.arg("-Dskip-bench=true");
-    }
 
     if zig_target != "native" {
         cmd.arg(format!("-Dtarget={}", zig_target));
@@ -193,6 +189,14 @@ fn rust_target_to_zig(target: &str) -> &'static str {
         "aarch64-pc-windows-msvc" => "aarch64-windows-msvc",
         "x86_64-unknown-freebsd" => "x86_64-freebsd",
         "aarch64-unknown-freebsd" => "aarch64-freebsd",
+        _ if target.contains("windows") => panic!(
+            "Unsupported Windows target: '{}'. \
+             Please add a mapping for this target in rust_target_to_zig(). \
+             Using 'native' as a fallback on Windows is not safe because Zig \
+             resolves to GNU/MinGW ABI, but Rust's MSVC linker expects MSVC symbols \
+             (e.g., ___chkstk_ms vs __chkstk).",
+            target
+        ),
         _ => "native",
     }
 }

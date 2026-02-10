@@ -22,6 +22,15 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    // On Windows MSVC, don't link libc to avoid ___chkstk_ms vs __chkstk symbol
+    // mismatch when MSVC's link.exe links the static library. All Zig code already
+    // handles link_libc=false on Windows with proper stubs (walker uses std.fs,
+    // zlob.zig/utils.zig stub out libc-only headers, c_lib.zig uses page_allocator).
+    const is_windows_msvc = target.result.os.tag == .windows and
+        target.result.abi == .msvc;
+
+    const use_libc = !is_windows_msvc;
+
     // Source directory option - allows overriding for Rust crate builds
     const src_dir = b.option([]const u8, "src-dir", "Source directory (default: src)") orelse "src";
 
@@ -52,14 +61,14 @@ pub fn build(b: *std.Build) void {
     const walker_mod = b.addModule("walker", .{
         .root_source_file = srcPath(b, src_dir, "walker.zig"),
         .target = target,
-        .link_libc = true,
+        .link_libc = use_libc,
     });
 
     // Flags module (canonical source of all ZLOB_* constants)
     const flags_mod = b.addModule("zlob_flags", .{
         .root_source_file = srcPath(b, src_dir, "flags.zig"),
         .target = target,
-        .link_libc = true,
+        .link_libc = use_libc,
     });
     flags_mod.addIncludePath(b.path("include"));
 
@@ -67,7 +76,7 @@ pub fn build(b: *std.Build) void {
     const zlob_core_mod = b.addModule("zlob_core", .{
         .root_source_file = srcPath(b, src_dir, "zlob.zig"),
         .target = target,
-        .link_libc = true,
+        .link_libc = use_libc,
         .imports = &.{
             .{ .name = "walker", .module = walker_mod },
             .{ .name = "zlob_flags", .module = flags_mod },
@@ -88,7 +97,7 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
-        .link_libc = true,
+        .link_libc = use_libc,
         .imports = &.{
             .{ .name = "zlob", .module = zlob_core_mod },
             .{ .name = "zlob_flags", .module = flags_mod },
@@ -99,7 +108,7 @@ pub fn build(b: *std.Build) void {
     const c_lib_mod = b.addModule("c_lib", .{
         .root_source_file = srcPath(b, src_dir, "c_lib.zig"),
         .target = target,
-        .link_libc = true,
+        .link_libc = use_libc,
         .imports = &.{
             .{ .name = "zlob", .module = zlob_core_mod },
             .{ .name = "zlob_flags", .module = flags_mod },
@@ -110,7 +119,7 @@ pub fn build(b: *std.Build) void {
     const test_utils_mod = b.addModule("test_utils", .{
         .root_source_file = b.path("test/test_utils.zig"),
         .target = target,
-        .link_libc = true,
+        .link_libc = use_libc,
         .imports = &.{
             .{ .name = "zlob", .module = mod },
         },
@@ -125,7 +134,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = srcPath(b, src_dir, "c_lib.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = true,
+            .link_libc = use_libc,
             .imports = &.{
                 .{ .name = "zlob", .module = zlob_core_mod },
                 .{ .name = "zlob_flags", .module = flags_mod },
@@ -144,7 +153,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = srcPath(b, src_dir, "c_lib.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = true,
+            .link_libc = use_libc,
             // required for shared libraries on musl
             .pic = true,
             .imports = &.{
@@ -267,7 +276,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(test_file),
             .target = target,
             .optimize = optimize,
-            .link_libc = true,
+            .link_libc = use_libc,
             .imports = &.{
                 .{ .name = "zlob", .module = mod },
                 .{ .name = "zlob_core", .module = zlob_core_mod },
@@ -408,126 +417,129 @@ pub fn build(b: *std.Build) void {
             compare_libc_step.dependOn(&compare_libc_cmd.step);
         }
 
-        // Perf test for C-style glob
-        const perf_test_libc = b.addExecutable(.{
-            .name = "perf_test_libc",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/perf_test_libc.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zlob", .module = mod },
-                    .{ .name = "c_lib", .module = c_lib_mod },
-                },
-            }),
-        });
-        perf_test_libc.linkLibC();
-        b.installArtifact(perf_test_libc);
+        // Benchmarks that need libc - skip on Windows MSVC (Zig can't provide libc for MSVC targets)
+        if (!is_windows_msvc) {
+            // Perf test for C-style glob
+            const perf_test_libc = b.addExecutable(.{
+                .name = "perf_test_libc",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/perf_test_libc.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "zlob", .module = mod },
+                        .{ .name = "c_lib", .module = c_lib_mod },
+                    },
+                }),
+            });
+            perf_test_libc.linkLibC();
+            b.installArtifact(perf_test_libc);
 
-        const perf_test_libc_cmd = b.addRunArtifact(perf_test_libc);
-        perf_test_libc_cmd.step.dependOn(b.getInstallStep());
-        const perf_test_libc_step = b.step("perf-test-libc", "Perf profiling for C-style glob");
-        perf_test_libc_step.dependOn(&perf_test_libc_cmd.step);
+            const perf_test_libc_cmd = b.addRunArtifact(perf_test_libc);
+            perf_test_libc_cmd.step.dependOn(b.getInstallStep());
+            const perf_test_libc_step = b.step("perf-test-libc", "Perf profiling for C-style glob");
+            perf_test_libc_step.dependOn(&perf_test_libc_cmd.step);
 
-        // Profile big repo with zlob_libc
-        const profile_big_repo = b.addExecutable(.{
-            .name = "profile_big_repo",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/profile_big_repo.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zlob", .module = mod },
-                    .{ .name = "c_lib", .module = c_lib_mod },
-                    .{ .name = "zlob_flags", .module = flags_mod },
-                },
-            }),
-        });
-        profile_big_repo.linkLibC();
-        b.installArtifact(profile_big_repo);
+            // Profile big repo with zlob_libc
+            const profile_big_repo = b.addExecutable(.{
+                .name = "profile_big_repo",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/profile_big_repo.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "zlob", .module = mod },
+                        .{ .name = "c_lib", .module = c_lib_mod },
+                        .{ .name = "zlob_flags", .module = flags_mod },
+                    },
+                }),
+            });
+            profile_big_repo.linkLibC();
+            b.installArtifact(profile_big_repo);
 
-        const profile_big_repo_cmd = b.addRunArtifact(profile_big_repo);
-        profile_big_repo_cmd.step.dependOn(b.getInstallStep());
-        const profile_big_repo_step = b.step("profile-big-repo", "Profile zlob_libc on Linux kernel repository");
-        profile_big_repo_step.dependOn(&profile_big_repo_cmd.step);
+            const profile_big_repo_cmd = b.addRunArtifact(profile_big_repo);
+            profile_big_repo_cmd.step.dependOn(b.getInstallStep());
+            const profile_big_repo_step = b.step("profile-big-repo", "Profile zlob_libc on Linux kernel repository");
+            profile_big_repo_step.dependOn(&profile_big_repo_cmd.step);
 
-        const bench_brace = b.addExecutable(.{
-            .name = "bench_brace",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/bench_brace.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zlob", .module = mod },
-                    .{ .name = "c_lib", .module = c_lib_mod },
-                    .{ .name = "zlob_flags", .module = flags_mod },
-                },
-            }),
-        });
-        bench_brace.linkLibC();
-        b.installArtifact(bench_brace);
+            const bench_brace = b.addExecutable(.{
+                .name = "bench_brace",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/bench_brace.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "zlob", .module = mod },
+                        .{ .name = "c_lib", .module = c_lib_mod },
+                        .{ .name = "zlob_flags", .module = flags_mod },
+                    },
+                }),
+            });
+            bench_brace.linkLibC();
+            b.installArtifact(bench_brace);
 
-        const bench_brace_cmd = b.addRunArtifact(bench_brace);
-        bench_brace_cmd.step.dependOn(b.getInstallStep());
-        const bench_brace_step = b.step("bench-brace", "Benchmark brace pattern optimizations");
-        bench_brace_step.dependOn(&bench_brace_cmd.step);
+            const bench_brace_cmd = b.addRunArtifact(bench_brace);
+            bench_brace_cmd.step.dependOn(b.getInstallStep());
+            const bench_brace_step = b.step("bench-brace", "Benchmark brace pattern optimizations");
+            bench_brace_step.dependOn(&bench_brace_cmd.step);
 
-        // Compare walker backends
-        const compare_walker = b.addExecutable(.{
-            .name = "compare_walker",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/compare_walker.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "walker", .module = walker_mod },
-                },
-            }),
-        });
-        compare_walker.linkLibC();
-        b.installArtifact(compare_walker);
+            // Compare walker backends
+            const compare_walker = b.addExecutable(.{
+                .name = "compare_walker",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/compare_walker.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "walker", .module = walker_mod },
+                    },
+                }),
+            });
+            compare_walker.linkLibC();
+            b.installArtifact(compare_walker);
 
-        const compare_walker_cmd = b.addRunArtifact(compare_walker);
-        compare_walker_cmd.step.dependOn(b.getInstallStep());
-        const compare_walker_step = b.step("compare-walker", "Compare walker backends");
-        compare_walker_step.dependOn(&compare_walker_cmd.step);
+            const compare_walker_cmd = b.addRunArtifact(compare_walker);
+            compare_walker_cmd.step.dependOn(b.getInstallStep());
+            const compare_walker_step = b.step("compare-walker", "Compare walker backends");
+            compare_walker_step.dependOn(&compare_walker_cmd.step);
 
-        // Test recursive benchmark
-        const test_recursive = b.addExecutable(.{
-            .name = "test_recursive",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/test_recursive.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zlob", .module = mod },
-                    .{ .name = "c_lib", .module = c_lib_mod },
-                },
-            }),
-        });
-        test_recursive.linkLibC();
-        b.installArtifact(test_recursive);
+            // Test recursive benchmark
+            const test_recursive = b.addExecutable(.{
+                .name = "test_recursive",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/test_recursive.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "zlob", .module = mod },
+                        .{ .name = "c_lib", .module = c_lib_mod },
+                    },
+                }),
+            });
+            test_recursive.linkLibC();
+            b.installArtifact(test_recursive);
 
-        const test_recursive_cmd = b.addRunArtifact(test_recursive);
-        test_recursive_cmd.step.dependOn(b.getInstallStep());
-        const test_recursive_step = b.step("test-recursive", "Test recursive glob");
-        test_recursive_step.dependOn(&test_recursive_cmd.step);
+            const test_recursive_cmd = b.addRunArtifact(test_recursive);
+            test_recursive_cmd.step.dependOn(b.getInstallStep());
+            const test_recursive_step = b.step("test-recursive", "Test recursive glob");
+            test_recursive_step.dependOn(&test_recursive_cmd.step);
 
-        // Perf recursive benchmark
-        const perf_recursive = b.addExecutable(.{
-            .name = "perf_recursive",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/perf_recursive.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zlob", .module = mod },
-                    .{ .name = "c_lib", .module = c_lib_mod },
-                },
-            }),
-        });
-        perf_recursive.linkLibC();
-        b.installArtifact(perf_recursive);
+            // Perf recursive benchmark
+            const perf_recursive = b.addExecutable(.{
+                .name = "perf_recursive",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/perf_recursive.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "zlob", .module = mod },
+                        .{ .name = "c_lib", .module = c_lib_mod },
+                    },
+                }),
+            });
+            perf_recursive.linkLibC();
+            b.installArtifact(perf_recursive);
+        }
 
         // Tree-size scaling benchmark (not available on Windows - no libc glob())
         if (!is_windows) {
