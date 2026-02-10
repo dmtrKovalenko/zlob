@@ -145,6 +145,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            // required for shared libraries on musl
+            .pic = true,
             .imports = &.{
                 .{ .name = "zlob", .module = zlob_core_mod },
                 .{ .name = "zlob_flags", .module = flags_mod },
