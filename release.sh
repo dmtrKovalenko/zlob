@@ -82,6 +82,15 @@ if [ "$DRY_RUN" = false ]; then
     grep -q "\.version = \"${NEW_VERSION}\"" build.zig.zon || { echo -e "${RED}Failed to update build.zig.zon${NC}"; exit 1; }
     grep -q "^version = \"${NEW_VERSION}\"" rust/Cargo.toml || { echo -e "${RED}Failed to update rust/Cargo.toml${NC}"; exit 1; }
 fi
+#
+# Publish to crates.io
+echo -e "${GREEN}Publishing to crates.io...${NC}"
+if [ "$DRY_RUN" = true ]; then
+    echo -e "${BLUE}[DRY-RUN] Would run: cd rust && cargo publish${NC}"
+else
+    cd rust
+    cargo publish
+fi
 
 # Create commit
 echo -e "${GREEN}Creating commit...${NC}"
@@ -115,14 +124,6 @@ else
     git push origin "v${NEW_VERSION}"
 fi
 
-# Publish to crates.io
-echo -e "${GREEN}Publishing to crates.io...${NC}"
-if [ "$DRY_RUN" = true ]; then
-    echo -e "${BLUE}[DRY-RUN] Would run: cd rust && cargo publish${NC}"
-else
-    cd rust
-    cargo publish
-fi
 
 if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}[DRY-RUN] Completed. No changes were made.${NC}"

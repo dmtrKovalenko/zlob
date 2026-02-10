@@ -104,7 +104,7 @@ fn main() {
         _ => "Debug",
     };
 
-    let zig_cache_dir = PathBuf::from(zig_src_dir).join(".zig-cache");
+    let zig_cache_dir = out_dir.join(".zig-cache");
     let zig_global_cache_dir = out_dir.join("zig-global-cache");
 
     let mut cmd = Command::new(&zig);
