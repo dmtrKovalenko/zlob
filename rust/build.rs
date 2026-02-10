@@ -134,23 +134,42 @@ fn main() {
         zig_src_dir
     );
 
+    // Capture command string before running (cmd is consumed by output())
+    let cmd_debug = format!("{:?}", cmd);
+    println!("cargo:warning=Running: {}", cmd_debug);
+
     let output = cmd.output().expect("Failed to run zig build");
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
+        eprintln!("\n========== ZIG BUILD FAILED ==========");
+        eprintln!("Command: {}", cmd_debug);
+        eprintln!("Status: {}", output.status);
+        eprintln!("Working dir: {}", zlob_root.display());
+        eprintln!("Target: {}", zig_target);
+        eprintln!("Optimize: {}", optimize);
+
         if !stdout.is_empty() {
+            eprintln!("\n----- STDOUT -----");
+            eprintln!("{}", stdout);
             for line in stdout.lines() {
-                println!("cargo:warning={}", line);
+                println!("cargo:warning=[zig stdout] {}", line);
             }
         }
         if !stderr.is_empty() {
+            eprintln!("\n----- STDERR -----");
+            eprintln!("{}", stderr);
             for line in stderr.lines() {
-                println!("cargo:warning={}", line);
+                println!("cargo:warning=[zig stderr] {}", line);
             }
         }
+        eprintln!("=====================================\n");
 
-        panic!("zig build failed with status: {}", output.status);
+        panic!(
+            "zig build failed with status: {}\nstdout: {}\nstderr: {}",
+            output.status, stdout, stderr
+        );
     }
 
     println!("cargo:rustc-link-search=native={}/lib", out_dir.display());

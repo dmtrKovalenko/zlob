@@ -288,6 +288,8 @@ pub fn build(b: *std.Build) void {
 
     // Benchmark executables (only if not skipped)
     if (!skip_bench) {
+        const is_windows = target.result.os.tag == .windows;
+
         // Benchmark executable
         const benchmark = b.addExecutable(.{
             .name = "benchmark",
@@ -379,29 +381,30 @@ pub fn build(b: *std.Build) void {
         });
         b.installArtifact(bench_recursive);
 
-        // libc comparison benchmark executable
-        const compare_libc = b.addExecutable(.{
-            .name = "compare_libc",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/compare_libc.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "c_lib", .module = c_lib_mod },
-                },
-            }),
-        });
-        compare_libc.linkLibC(); // Link against libc for glob()
-        b.installArtifact(compare_libc);
+        if (!is_windows) {
+            const compare_libc = b.addExecutable(.{
+                .name = "compare_libc",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/compare_libc.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "c_lib", .module = c_lib_mod },
+                    },
+                }),
+            });
+            compare_libc.linkLibC(); // Link against libc for glob()
+            b.installArtifact(compare_libc);
 
-        // libc comparison run step
-        const compare_libc_cmd = b.addRunArtifact(compare_libc);
-        compare_libc_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| {
-            compare_libc_cmd.addArgs(args);
+            // libc comparison run step
+            const compare_libc_cmd = b.addRunArtifact(compare_libc);
+            compare_libc_cmd.step.dependOn(b.getInstallStep());
+            if (b.args) |args| {
+                compare_libc_cmd.addArgs(args);
+            }
+            const compare_libc_step = b.step("compare-libc", "Compare SIMD glob vs libc glob()");
+            compare_libc_step.dependOn(&compare_libc_cmd.step);
         }
-        const compare_libc_step = b.step("compare-libc", "Compare SIMD glob vs libc glob()");
-        compare_libc_step.dependOn(&compare_libc_cmd.step);
 
         // Perf test for C-style glob
         const perf_test_libc = b.addExecutable(.{
@@ -524,26 +527,28 @@ pub fn build(b: *std.Build) void {
         perf_recursive.linkLibC();
         b.installArtifact(perf_recursive);
 
-        // Tree-size scaling benchmark (small/medium/large trees vs libc)
-        const bench_tree_sizes = b.addExecutable(.{
-            .name = "bench_tree_sizes",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/bench_tree_sizes.zig"),
-                .target = target,
-                .optimize = .ReleaseFast,
-                .imports = &.{
-                    .{ .name = "c_lib", .module = c_lib_mod },
-                    .{ .name = "zlob_flags", .module = flags_mod },
-                },
-            }),
-        });
-        bench_tree_sizes.linkLibC();
-        b.installArtifact(bench_tree_sizes);
+        // Tree-size scaling benchmark (not available on Windows - no libc glob())
+        if (!is_windows) {
+            const bench_tree_sizes = b.addExecutable(.{
+                .name = "bench_tree_sizes",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/bench_tree_sizes.zig"),
+                    .target = target,
+                    .optimize = .ReleaseFast,
+                    .imports = &.{
+                        .{ .name = "c_lib", .module = c_lib_mod },
+                        .{ .name = "zlob_flags", .module = flags_mod },
+                    },
+                }),
+            });
+            bench_tree_sizes.linkLibC();
+            b.installArtifact(bench_tree_sizes);
 
-        const bench_tree_sizes_cmd = b.addRunArtifact(bench_tree_sizes);
-        bench_tree_sizes_cmd.step.dependOn(b.getInstallStep());
-        const bench_tree_sizes_step = b.step("bench-tree-sizes", "Benchmark zlob vs libc across small/medium/large directory trees");
-        bench_tree_sizes_step.dependOn(&bench_tree_sizes_cmd.step);
+            const bench_tree_sizes_cmd = b.addRunArtifact(bench_tree_sizes);
+            bench_tree_sizes_cmd.step.dependOn(b.getInstallStep());
+            const bench_tree_sizes_step = b.step("bench-tree-sizes", "Benchmark zlob vs libc across small/medium/large directory trees");
+            bench_tree_sizes_step.dependOn(&bench_tree_sizes_cmd.step);
+        }
     }
 
     // Just like flags, top level steps are also listed in the `--help` menu.
