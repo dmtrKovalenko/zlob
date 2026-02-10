@@ -25,6 +25,25 @@ const c = if (has_libc) std.c else struct {
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 
+const is_windows = builtin.os.tag == .windows;
+
+/// Check if a character is a path separator.
+/// On Windows, both '/' and '\\' are valid path separators.
+inline fn isSep(ch: u8) bool {
+    return ch == '/' or (is_windows and ch == '\\');
+}
+
+/// Find the last path separator in a slice.
+/// On Windows, this checks for both '/' and '\\'.
+fn lastSepPos(s: []const u8) ?usize {
+    var i: usize = s.len;
+    while (i > 0) {
+        i -= 1;
+        if (isSep(s[i])) return i;
+    }
+    return null;
+}
+
 const c_zlob = @cImport({
     @cInclude("zlob.h");
 });
@@ -368,14 +387,20 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
         .has_recursive = false,
         .wildcard_suffix = pattern,
         .max_depth = null,
-        .is_absolute = pattern.len > 0 and pattern[0] == '/',
+        .is_absolute = if (is_windows)
+            // Windows absolute paths: "C:\...", "\\...", or "/..."
+            (pattern.len >= 3 and pattern[1] == ':' and (pattern[2] == '\\' or pattern[2] == '/')) or
+                (pattern.len > 0 and (pattern[0] == '/' or pattern[0] == '\\'))
+        else
+            pattern.len > 0 and pattern[0] == '/',
         .fixed_component_count = 0,
         .simple_extension = null,
         .has_dir_wildcards = false,
         .directories_only = flags.onlydir,
     };
 
-    const enable_escape = !flags.noescape;
+    // On Windows, backslash is a path separator, not an escape character.
+    const enable_escape = !flags.noescape and !is_windows;
     var i: usize = 0;
     var last_slash: usize = 0;
     var component_count: usize = 0;
@@ -416,7 +441,7 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
             break;
         }
 
-        if (ch == '/') {
+        if (isSep(ch)) {
             last_slash = i;
             component_count += 1;
         }
@@ -440,7 +465,11 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
     }
 
     if (info.wildcard_suffix.len > 0) {
-        if (mem.lastIndexOf(u8, info.wildcard_suffix, "/")) |pos| {
+        const sep_pos = if (is_windows)
+            lastSepPos(info.wildcard_suffix)
+        else
+            mem.lastIndexOf(u8, info.wildcard_suffix, "/");
+        if (sep_pos) |pos| {
             const dir_part = info.wildcard_suffix[0..pos];
             info.has_dir_wildcards = pattern_context_internal.hasWildcards(dir_part, flags);
         }
@@ -450,7 +479,12 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
         info.wildcard_suffix.len >= 2 and info.wildcard_suffix[0] == '*')
     {
         const suffix = info.wildcard_suffix[1..];
-        if (!hasWildcardsBasic(suffix) and indexOfCharSIMD(suffix, '/') == null) {
+        const has_fwd_sep = indexOfCharSIMD(suffix, '/') != null;
+        const has_sep = if (is_windows)
+            has_fwd_sep or (indexOfCharSIMD(suffix, '\\') != null)
+        else
+            has_fwd_sep;
+        if (!hasWildcardsBasic(suffix) and !has_sep) {
             info.simple_extension = suffix;
         }
     }
@@ -458,9 +492,17 @@ pub fn analyzePattern(pattern: []const u8, flags: ZlobFlags) PatternInfo {
     if (!info.has_recursive) {
         var depth: usize = info.fixed_component_count;
         var remaining = info.wildcard_suffix;
-        while (indexOfCharSIMD(remaining, '/')) |pos| {
-            depth += 1;
-            remaining = remaining[pos + 1 ..];
+        while (true) {
+            const sep = indexOfCharSIMD(remaining, '/');
+            const bsep = if (is_windows) indexOfCharSIMD(remaining, '\\') else null;
+            const pos = if (sep != null and bsep != null)
+                @min(sep.?, bsep.?)
+            else
+                (sep orelse bsep);
+            if (pos) |p| {
+                depth += 1;
+                remaining = remaining[p + 1 ..];
+            } else break;
         }
         if (remaining.len > 0) depth += 1;
         info.max_depth = depth;
@@ -526,7 +568,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
 
     var start: usize = 0;
     for (effective_pattern, 0..) |ch, idx| {
-        if (ch == '/') {
+        if (isSep(ch)) {
             if (idx > start) {
                 components[component_count] = effective_pattern[start..idx];
                 component_count += 1;
@@ -684,7 +726,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     var effective_pattern = pattern;
     var flags = flags_in;
 
-    if (pattern.len > 0 and pattern[pattern.len - 1] == '/') {
+    if (pattern.len > 0 and isSep(pattern[pattern.len - 1])) {
         flags.onlydir = true;
         effective_pattern = pattern[0 .. pattern.len - 1];
 
@@ -784,7 +826,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
                 var i: usize = double_star_pos;
                 while (i > 0) {
                     i -= 1;
-                    if (effective_pattern[i] == '/') {
+                    if (isSep(effective_pattern[i])) {
                         last_slash_before = i;
                         break;
                     }
@@ -814,7 +856,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     var i: usize = effective_pattern.len;
     while (i > 0) {
         i -= 1;
-        if (effective_pattern[i] == '/') {
+        if (isSep(effective_pattern[i])) {
             last_slash_pos = i;
             break;
         }
@@ -845,7 +887,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     i = effective_pattern.len;
     while (i > 0) {
         i -= 1;
-        if (effective_pattern[i] == '/') {
+        if (isSep(effective_pattern[i])) {
             dir_end = i;
             break;
         }
@@ -1161,7 +1203,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
 
     var after_double_star = pattern[double_star_pos + 2 ..];
 
-    if (after_double_star.len > 0 and after_double_star[0] == '/') {
+    if (after_double_star.len > 0 and isSep(after_double_star[0])) {
         after_double_star = after_double_star[1..];
     }
 
@@ -1267,13 +1309,17 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
         }
 
         // Parse dir components from after_double_star
-        if (mem.lastIndexOf(u8, after_double_star, "/")) |last_slash| {
+        const last_slash_in_ads = if (is_windows)
+            lastSepPos(after_double_star)
+        else
+            mem.lastIndexOf(u8, after_double_star, "/");
+        if (last_slash_in_ads) |last_slash| {
             file_pattern = after_double_star[last_slash + 1 ..];
             const dir_path = after_double_star[0..last_slash];
 
             var start: usize = 0;
             for (dir_path, 0..) |ch, i| {
-                if (ch == '/') {
+                if (isSep(ch)) {
                     if (i > start and post_ds_count < 32) {
                         post_ds_components_buf[post_ds_count] = dir_path[start..i];
                         post_ds_alternatives_buf[post_ds_count] = null;
@@ -1868,7 +1914,7 @@ fn matchDirComponents(
     var end = path.len;
     var i = path.len;
     while (i > 0) : (i -= 1) {
-        if (path[i - 1] == '/') {
+        if (isSep(path[i - 1])) {
             if (i < end and path_count < 64) {
                 path_components[path_count] = path[i..end];
                 path_count += 1;

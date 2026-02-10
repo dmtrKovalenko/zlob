@@ -14,7 +14,7 @@ zlob is a C library, zig library and a rust crate that makes globbing fast. Why?
 In short libc's glob is unusable, so I wanted to make a library that is 100% POSIX and glibc compatible, that supports all the features modern glob implementation needed and is faster than glibc. So here is zlob, a little bit about it:
 
 - 100% POSIX and glibc compatible with all the flags and features supported
-- absolutely cross platform (does not yet support backslashes on windows but works under cygwin)
+- absolutely cross platform (yes even windows support, windows users should use forward slashes)
 - Faster than glibc up to 10x in certain cases and for general cases 1.2-1.7x faster
 - In addition to standard globbing supportes `**` recursive patterns, braces `*.{c,h}`, `gitignore` and bash `extglob` patterns
 - SIMD first implementaion where needed
@@ -25,7 +25,7 @@ In short libc's glob is unusable, so I wanted to make a library that is 100% POS
 
 ## Why it is faster?
 
-zlob is using SIMD first implementation. It is a primary reason it is written in zig to have a native portable SIMD support, somewhere it signficantly improves certain bottlenecks. But the primary reason it is faster is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directories and making lef matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
+zlob is using SIMD first implementation. It is a primary reason it is written in zig to have a native portable SIMD support at a langauges level, it significanlty reduces certain bottlnecks. But the primary reason of speed is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directories and making lef matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
 
 One of my favourite optimizations for this project is patterns like `./**/*.{c,rs,zig}` this is usually the main reason glob is used and this pattern is the most optimized in the zlob implementation:
 

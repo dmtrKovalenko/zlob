@@ -107,7 +107,6 @@ fn printHelp(w: *Io.Writer, program_name: []const u8) void {
 
 fn parseArgs(allocator: std.mem.Allocator, stderr: *Io.Writer) !Options {
     var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
 
     var opts = Options{};
     const program_name = args.next() orelse "zlob";
@@ -210,8 +209,9 @@ pub fn main() !void {
 
     var full_pattern: []const u8 = undefined;
     if (opts.path) |path| {
-        // Combine path and pattern
-        const trimmed_path = std.mem.trimRight(u8, path, "/");
+        // Combine path and pattern: trim trailing separators (/ on all platforms, \ on Windows)
+        const sep_chars = if (builtin.os.tag == .windows) "/\\" else "/";
+        const trimmed_path = std.mem.trimRight(u8, path, sep_chars);
         full_pattern = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ trimmed_path, pattern });
     } else {
         full_pattern = pattern;
@@ -256,6 +256,8 @@ pub fn main() !void {
             stderr_writer.flush();
         }
     } else {
+        stderr.print("No matches found for pattern: {s}\n", .{full_pattern}) catch {};
+        stderr_writer.flush();
         std.process.exit(1);
     }
 }
