@@ -59,8 +59,35 @@ jobs:
       - name: Make test
         run: make test
 
+
+  linux-musl:
+    name: Linux (musl)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build for x86_64-linux-musl
+        run: zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast
+
+      - name: Verify static binary
+        run: |
+          file zig-out/bin/zlob
+          ldd zig-out/bin/zlob 2>&1 | grep -q "not a dynamic executable" || ldd zig-out/bin/zlob 2>&1 | grep -q "statically linked"
+
+      - name: Test CLI
+        run: |
+          ./zig-out/bin/zlob --version
+          ./zig-out/bin/zlob "*.zig" src/
+          ./zig-out/bin/zlob "**/*.zig" .
+
   cross-compile:
-    name: Cross-compile (Linux -> macOS ${{ matrix.target }})
+    name: Cross-compile (Linux -> ${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -69,9 +96,19 @@ jobs:
           - target: x86_64-macos
             rust_target: x86_64-apple-darwin
             artifact: zlob-macos-x86_64
+            name: macOS x86_64
           - target: aarch64-macos
             rust_target: aarch64-apple-darwin
             artifact: zlob-macos-aarch64
+            name: macOS aarch64
+          - target: x86_64-windows
+            rust_target: x86_64-pc-windows-msvc
+            artifact: zlob-windows-x86_64
+            name: Windows x86_64
+          - target: aarch64-windows
+            rust_target: aarch64-pc-windows-msvc
+            artifact: zlob-windows-aarch64
+            name: Windows aarch64
 
     steps:
       - uses: actions/checkout@v4
@@ -95,14 +132,18 @@ jobs:
       - name: Cross-compile Rust library
         working-directory: rust
         run: cargo zigbuild --target ${{ matrix.rust_target }} --release
+        continue-on-error: true  # Rust cross-compile to Windows may fail
 
       - name: Package artifacts
         run: |
           mkdir -p dist
-          cp zig-out/bin/zlob dist/ || true
-          cp zig-out/lib/libzlob.a dist/ || true
-          cp zig-out/lib/libzlob.dylib dist/ || true
-          cp rust/target/${{ matrix.rust_target }}/release/libzlob.rlib dist/ || true
+          cp zig-out/bin/zlob dist/ 2>/dev/null || true
+          cp zig-out/bin/zlob.exe dist/ 2>/dev/null || true
+          cp zig-out/lib/libzlob.a dist/ 2>/dev/null || true
+          cp zig-out/lib/libzlob.dylib dist/ 2>/dev/null || true
+          cp zig-out/lib/zlob.lib dist/ 2>/dev/null || true
+          cp zig-out/lib/zlob.dll dist/ 2>/dev/null || true
+          cp rust/target/${{ matrix.rust_target }}/release/libzlob.rlib dist/ 2>/dev/null || true
           tar -czvf ${{ matrix.artifact }}.tar.gz -C dist .
 
       - name: Upload cross-compiled artifacts
@@ -146,6 +187,38 @@ jobs:
         run: |
           file libzlob.a
           ar -t libzlob.a
+
+  windows-test-cross:
+    name: Windows test cross-compiled (${{ matrix.arch }})
+    needs: cross-compile
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            artifact: zlob-windows-x86_64
+          # aarch64 can only be tested on ARM Windows runners (not available)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download cross-compiled artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+
+      - name: Extract artifacts
+        run: tar -xzvf ${{ matrix.artifact }}.tar.gz
+        shell: bash
+
+      - name: Test CLI
+        run: |
+          .\zlob.exe --version
+          .\zlob.exe "*.zig" src/
+          .\zlob.exe "**/*.zig" .
+          .\zlob.exe "*.{zig,zon}" .
+        shell: pwsh
 
   macos-native:
     name: macOS native

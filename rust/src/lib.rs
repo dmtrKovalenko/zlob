@@ -146,33 +146,43 @@ mod flags;
 mod match_paths;
 mod zlob;
 
-// Raw FFI bindings generated from include/zlob.h by bindgen
+// Raw FFI bindings - use stub for docs.rs, generated bindings otherwise
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
 #[allow(dead_code)]
 #[allow(clippy::all)]
+#[cfg(docsrs)]
+#[path = "ffi_stub.rs"]
+mod ffi;
+
+#[allow(non_upper_case_globals)]
+#[allow(non_camel_case_types)]
+#[allow(non_snake_case)]
+#[allow(dead_code)]
+#[allow(clippy::all)]
+#[cfg(not(docsrs))]
 mod ffi {
     include!(concat!(env!("OUT_DIR"), "/zlob_bindings.rs"));
+}
 
-    impl Default for zlob_t {
-        fn default() -> Self {
-            Self {
-                zlo_pathc: 0,
-                zlo_pathv: std::ptr::null_mut(),
-                zlo_offs: 0,
-                zlo_pathlen: std::ptr::null_mut(),
-                zlo_flags: 0,
-                zlo_opendir: None,
-                zlo_readdir: None,
-                zlo_closedir: None,
-            }
+impl Default for ffi::zlob_t {
+    fn default() -> Self {
+        Self {
+            zlo_pathc: 0,
+            zlo_pathv: std::ptr::null_mut(),
+            zlo_offs: 0,
+            zlo_pathlen: std::ptr::null_mut(),
+            zlo_flags: 0,
+            zlo_opendir: None,
+            zlo_readdir: None,
+            zlo_closedir: None,
         }
     }
-
-    // Safety: zlob_t is safe to send across threads
-    unsafe impl Send for zlob_t {}
 }
+
+// Safety: zlob_t is safe to send across threads
+unsafe impl Send for ffi::zlob_t {}
 
 pub use error::*;
 pub use flags::*;

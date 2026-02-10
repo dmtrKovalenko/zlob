@@ -2,7 +2,31 @@ const std = @import("std");
 const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
-const posix = std.posix;
+// std.posix is not available on Windows
+const posix = if (builtin.os.tag != .windows) std.posix else struct {
+    // Stubs for Windows - provide errno values for compatibility
+    pub const fd_t = std.os.windows.HANDLE;
+    pub const E = enum(c_int) {
+        ACCES = 13,
+        NOENT = 2,
+        NOTDIR = 20,
+        LOOP = 40,
+        NAMETOOLONG = 36,
+        NOMEM = 12,
+        INVAL = 22,
+        IO = 5,
+    };
+    pub fn close(_: anytype) void {}
+    pub fn open(_: anytype, _: anytype, _: anytype) !fd_t {
+        return error.Unsupported;
+    }
+    pub fn openat(_: anytype, _: anytype, _: anytype, _: anytype) !fd_t {
+        return error.Unsupported;
+    }
+    pub fn openatZ(_: anytype, _: anytype, _: anytype, _: anytype) !fd_t {
+        return error.Unsupported;
+    }
+};
 
 pub const ErrCallbackFn = *const fn (epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int;
 
@@ -790,13 +814,41 @@ pub const StdDirIterator = struct {
 };
 
 pub const DirIterator = struct {
-    const c = std.c;
+    // std.c is only available on POSIX systems
+    const has_libc = builtin.os.tag != .windows and builtin.link_libc;
+    const c = if (has_libc) std.c else struct {
+        // Stubs for non-libc platforms
+        pub const DIR = opaque {};
+        pub const dirent = extern struct {
+            name: [256]u8,
+            type: u8,
+        };
+        pub const DT = struct {
+            pub const REG: u8 = 8;
+            pub const DIR: u8 = 4;
+            pub const LNK: u8 = 10;
+        };
+        pub fn opendir(_: anytype) ?*DIR {
+            return null;
+        }
+        pub fn readdir(_: anytype) ?*anyopaque {
+            return null;
+        }
+        pub fn closedir(_: anytype) c_int {
+            return 0;
+        }
+    };
 
-    /// Internal state - either real fs or ALTDIRFUNC mode
+    /// Internal state - either real fs, std_fs (for Windows), or ALTDIRFUNC mode
     mode: union(enum) {
-        /// Real filesystem using C's opendir/readdir
+        /// Real filesystem using C's opendir/readdir (POSIX only)
         real_fs: struct {
             dir: ?*c.DIR,
+        },
+        /// Zig std.fs based iteration (Windows and fallback)
+        std_fs: struct {
+            dir: std.fs.Dir,
+            iter: std.fs.Dir.Iterator,
         },
         /// ALTDIRFUNC custom callbacks
         alt_dirfunc: struct {
@@ -815,6 +867,7 @@ pub const DirIterator = struct {
     /// Platform-specific d_name buffer size:
     /// - Linux: 256 bytes
     /// - macOS (64-bit inodes): 1024 bytes (__DARWIN_MAXPATHLEN)
+    /// - Windows: 256 bytes (not used, but defined for consistency)
     const DIRENT_NAME_LEN: usize = switch (builtin.os.tag) {
         .macos => 1024,
         else => 256,
@@ -861,6 +914,19 @@ pub const DirIterator = struct {
                     .handle = handle,
                     .readdir = fs.readdir.?,
                     .closedir = fs.closedir.?,
+                } },
+                .hidden = hidden_config,
+            };
+        }
+
+        // On Windows or when libc is not available, use std.fs
+        if (builtin.os.tag == .windows or !has_libc) {
+            const root = base_dir orelse std.fs.cwd();
+            var dir = try root.openDir(path, .{ .iterate = true });
+            return DirIterator{
+                .mode = .{ .std_fs = .{
+                    .dir = dir,
+                    .iter = dir.iterate(),
                 } },
                 .hidden = hidden_config,
             };
@@ -926,11 +992,16 @@ pub const DirIterator = struct {
 
     pub fn close(self: *DirIterator) void {
         switch (self.mode) {
-            .real_fs => |*fs| {
-                if (fs.dir) |d| {
-                    _ = c.closedir(d);
-                    fs.dir = null;
+            .real_fs => |*fs_mode| {
+                if (has_libc) {
+                    if (fs_mode.dir) |d| {
+                        _ = c.closedir(d);
+                        fs_mode.dir = null;
+                    }
                 }
+            },
+            .std_fs => |*std_mode| {
+                std_mode.dir.close();
             },
             .alt_dirfunc => |*alt| {
                 alt.closedir(alt.handle);
@@ -941,8 +1012,10 @@ pub const DirIterator = struct {
 
     pub fn next(self: *DirIterator) ?IterEntry {
         switch (self.mode) {
-            .real_fs => |fs| {
-                const dir = fs.dir orelse return null;
+            .real_fs => |fs_mode| {
+                if (!has_libc) return null;
+
+                const dir = fs_mode.dir orelse return null;
 
                 while (c.readdir(dir)) |entry_raw| {
                     const entry: *const c.dirent = @ptrCast(@alignCast(entry_raw));
@@ -961,6 +1034,18 @@ pub const DirIterator = struct {
                     return IterEntry{ .name = name, .kind = kind };
                 }
 
+                return null;
+            },
+            .std_fs => |*std_mode| {
+                while (std_mode.iter.next() catch null) |entry| {
+                    // Unified filtering for ".", "..", and hidden files
+                    if (shouldSkipEntry(entry.name, self.hidden)) continue;
+
+                    return IterEntry{
+                        .name = entry.name,
+                        .kind = entry.kind,
+                    };
+                }
                 return null;
             },
             .alt_dirfunc => |alt| {

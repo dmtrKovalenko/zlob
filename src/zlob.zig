@@ -8,7 +8,20 @@ const zlob_flags = @import("zlob_flags");
 const walker = @import("walker");
 const fnmatch_impl = @import("fnmatch.zig");
 const utils = @import("utils.zig");
-const c = std.c;
+// std.c is only available on POSIX systems with libc
+const has_libc = builtin.os.tag != .windows and builtin.link_libc;
+const c = if (has_libc) std.c else struct {
+    // Stubs for non-libc platforms (Windows)
+    pub const dirent = extern struct {
+        name: [256]u8,
+        type: u8,
+    };
+    pub const DT = struct {
+        pub const UNKNOWN: u8 = 0;
+        pub const DIR: u8 = 4;
+        pub const REG: u8 = 8;
+    };
+};
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 

@@ -1,7 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zlob = @import("zlob");
 const build_options = @import("build_options");
-const posix = std.posix;
 const fs = std.fs;
 const Io = std.Io;
 
@@ -26,8 +26,7 @@ const Options = struct {
 const BufferedWriter = struct {
     file_writer: fs.File.Writer,
 
-    fn init(handle: posix.fd_t, buf: []u8) BufferedWriter {
-        const file = fs.File{ .handle = handle };
+    fn init(file: fs.File, buf: []u8) BufferedWriter {
         return .{ .file_writer = file.writer(buf) };
     }
 
@@ -39,6 +38,24 @@ const BufferedWriter = struct {
         self.file_writer.interface.flush() catch {};
     }
 };
+
+/// Get stdout file handle cross-platform
+fn getStdOutFile() fs.File {
+    if (builtin.os.tag == .windows) {
+        return fs.File{ .handle = std.os.windows.GetStdHandle(std.os.windows.STD_OUTPUT_HANDLE) catch unreachable };
+    } else {
+        return fs.File{ .handle = std.posix.STDOUT_FILENO };
+    }
+}
+
+/// Get stderr file handle cross-platform
+fn getStdErrFile() fs.File {
+    if (builtin.os.tag == .windows) {
+        return fs.File{ .handle = std.os.windows.GetStdHandle(std.os.windows.STD_ERROR_HANDLE) catch unreachable };
+    } else {
+        return fs.File{ .handle = std.posix.STDERR_FILENO };
+    }
+}
 
 fn printVersion(w: *Io.Writer) void {
     w.print("zlob {s}\n", .{version}) catch {};
@@ -160,16 +177,15 @@ pub fn main() !void {
     // Buffered writers for stdout and stderr
     var stdout_buf: [8192]u8 = undefined;
     var stderr_buf: [4096]u8 = undefined;
-    var stdout_writer = BufferedWriter.init(posix.STDOUT_FILENO, &stdout_buf);
-    var stderr_writer = BufferedWriter.init(posix.STDERR_FILENO, &stderr_buf);
+    const stdout_file = getStdOutFile();
+    const stderr_file = getStdErrFile();
+    var stdout_writer = BufferedWriter.init(stdout_file, &stdout_buf);
+    var stderr_writer = BufferedWriter.init(stderr_file, &stderr_buf);
     const stdout = stdout_writer.writer();
     const stderr = stderr_writer.writer();
 
     const opts = parseArgs(allocator, stderr) catch |err| {
-        switch (err) {
-            error.MissingArgument => stderr.print("error: option requires an argument\n", .{}) catch {},
-            error.InvalidNumber => stderr.print("error: invalid number for --limit\n", .{}) catch {},
-        }
+        stderr.print("error: {}\n", .{err}) catch {};
         stderr_writer.flush();
         std.process.exit(1);
     };

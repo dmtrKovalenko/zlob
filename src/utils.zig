@@ -1,13 +1,21 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const zlob_flags = @import("zlob_flags");
 
 pub const ZlobFlags = zlob_flags.ZlobFlags;
 
-const pwd = @cImport({
+// pwd.h is only available on POSIX systems
+const pwd = if (builtin.os.tag != .windows) @cImport({
     @cInclude("pwd.h");
-});
+}) else struct {
+    // Stub for Windows - these functions don't exist
+    pub const passwd = opaque {};
+    pub fn getpwnam(_: anytype) ?*passwd {
+        return null;
+    }
+};
 
 /// Build a path from directory and name components into the provided buffer.
 pub fn buildPathInBuffer(buf: []u8, dir: []const u8, name: []const u8) []const u8 {
@@ -80,11 +88,35 @@ pub fn expandTilde(allocator: Allocator, pattern: [:0]const u8, flags: ZlobFlags
     }
 
     var username_end: usize = 1;
-    while (username_end < pattern.len and pattern[username_end] != '/') : (username_end += 1) {}
+    while (username_end < pattern.len and pattern[username_end] != '/' and pattern[username_end] != '\\') : (username_end += 1) {}
 
-    const home_dir = if (username_end == 1) blk: {
-        break :blk std.posix.getenv("HOME");
-    } else blk: {
+    // Handle ~ (current user's home) vs ~username (other user's home)
+    if (username_end == 1) {
+        // Simple ~ expansion - get current user's home directory
+        const home_dir = getHomeDirectory(allocator);
+        if (home_dir) |home| {
+            defer if (builtin.os.tag == .windows) allocator.free(home);
+            const rest = pattern[username_end..];
+            const new_pattern = try allocator.allocSentinel(u8, home.len + rest.len, 0);
+            @memcpy(new_pattern[0..home.len], home);
+            @memcpy(new_pattern[home.len..][0..rest.len], rest);
+            return new_pattern;
+        } else {
+            if (flags.tilde_check) {
+                return null;
+            }
+            return pattern;
+        }
+    } else {
+        // ~username expansion - only supported on POSIX systems
+        if (builtin.os.tag == .windows) {
+            // Windows doesn't support ~username expansion
+            if (flags.tilde_check) {
+                return null;
+            }
+            return pattern;
+        }
+
         const username = pattern[1..username_end];
 
         var username_z: [256]u8 = undefined;
@@ -92,7 +124,7 @@ pub fn expandTilde(allocator: Allocator, pattern: [:0]const u8, flags: ZlobFlags
             if (flags.tilde_check) {
                 return null;
             }
-            break :blk null;
+            return pattern;
         }
         @memcpy(username_z[0..username.len], username);
         username_z[username.len] = 0;
@@ -102,7 +134,7 @@ pub fn expandTilde(allocator: Allocator, pattern: [:0]const u8, flags: ZlobFlags
             if (flags.tilde_check) {
                 return null;
             }
-            break :blk null;
+            return pattern;
         }
 
         const home_cstr = pw_entry.*.pw_dir;
@@ -110,18 +142,40 @@ pub fn expandTilde(allocator: Allocator, pattern: [:0]const u8, flags: ZlobFlags
             if (flags.tilde_check) {
                 return null;
             }
-            break :blk null;
+            return pattern;
         }
-        break :blk mem.sliceTo(home_cstr, 0);
-    };
 
-    if (home_dir) |home| {
+        const home = mem.sliceTo(home_cstr, 0);
         const rest = pattern[username_end..];
         const new_pattern = try allocator.allocSentinel(u8, home.len + rest.len, 0);
         @memcpy(new_pattern[0..home.len], home);
         @memcpy(new_pattern[home.len..][0..rest.len], rest);
         return new_pattern;
     }
+}
 
-    return pattern;
+/// Get the current user's home directory.
+/// On Windows, returns an allocated string that must be freed.
+/// On POSIX, returns a borrowed slice from the environment.
+fn getHomeDirectory(allocator: Allocator) ?[]const u8 {
+    if (builtin.os.tag == .windows) {
+        // On Windows, try USERPROFILE first, then HOMEDRIVE+HOMEPATH
+        if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |user_profile| {
+            return user_profile;
+        } else |_| {
+            // Try HOMEDRIVE + HOMEPATH
+            const home_drive = std.process.getEnvVarOwned(allocator, "HOMEDRIVE") catch return null;
+            defer allocator.free(home_drive);
+            const home_path = std.process.getEnvVarOwned(allocator, "HOMEPATH") catch return null;
+            defer allocator.free(home_path);
+
+            // Concatenate HOMEDRIVE and HOMEPATH
+            const combined = allocator.alloc(u8, home_drive.len + home_path.len) catch return null;
+            @memcpy(combined[0..home_drive.len], home_drive);
+            @memcpy(combined[home_drive.len..], home_path);
+            return combined;
+        }
+    } else {
+        return std.posix.getenv("HOME");
+    }
 }
