@@ -117,6 +117,7 @@ fn main() {
         .arg("--global-cache-dir")
         .arg(&zig_global_cache_dir)
         .arg("-Dskip-bench=true")
+        .arg("-Dstatic-only=true")
         .arg("-p")
         .arg(out_dir.as_os_str());
 

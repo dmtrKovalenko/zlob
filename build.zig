@@ -37,6 +37,10 @@ pub fn build(b: *std.Build) void {
     // Skip benchmarks option - useful for Rust crate builds that don't include bench/
     const skip_bench = b.option(bool, "skip-bench", "Skip building benchmark executables") orelse false;
 
+    // Static-only option - skip building dynamic library. Useful for Rust crate builds
+    // to avoid providing both dynamic and static libraries, force the build to only produce a single static lib
+    const static_only = b.option(bool, "static-only", "Only build static library, skip dynamic library") orelse false;
+
     // Helper to create source paths
     const srcPath = struct {
         fn get(builder: *std.Build, dir: []const u8, file: []const u8) std.Build.LazyPath {
@@ -127,23 +131,28 @@ pub fn build(b: *std.Build) void {
 
     // C-compatible shared library (libzlob.so/.dylib/.dll)
     // Provides POSIX glob() and globfree() functions with C header
-    const c_lib = b.addLibrary(.{
-        .name = "zlob",
-        .linkage = .dynamic,
-        .root_module = b.createModule(.{
-            .root_source_file = srcPath(b, src_dir, "c_lib.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = use_libc,
-            .imports = &.{
-                .{ .name = "zlob", .module = zlob_core_mod },
-                .{ .name = "zlob_flags", .module = flags_mod },
-            },
-        }),
-    });
-    // Install C header
-    c_lib.installHeader(b.path("include/zlob.h"), "zlob.h");
-    b.installArtifact(c_lib);
+    // Skipped when static_only is set to avoid import lib / static lib name collision
+    // on Windows MSVC (both produce zlob.lib, causing the linker to pick the import lib
+    // and creating an unintended runtime dependency on zlob.dll).
+    if (!static_only) {
+        const c_lib = b.addLibrary(.{
+            .name = "zlob",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .root_source_file = srcPath(b, src_dir, "c_lib.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = use_libc,
+                .imports = &.{
+                    .{ .name = "zlob", .module = zlob_core_mod },
+                    .{ .name = "zlob_flags", .module = flags_mod },
+                },
+            }),
+        });
+        // Install C header
+        c_lib.installHeader(b.path("include/zlob.h"), "zlob.h");
+        b.installArtifact(c_lib);
+    }
 
     // C-compatible static library (libzlob.a) for Rust FFI and static linking
     const c_lib_static = b.addLibrary(.{
@@ -162,6 +171,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // Install C header alongside static library when dynamic lib is skipped
+    if (static_only) {
+        c_lib_static.installHeader(b.path("include/zlob.h"), "zlob.h");
+    }
 
     b.installArtifact(c_lib_static);
 

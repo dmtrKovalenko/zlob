@@ -47,6 +47,12 @@ build:
 	@echo "  CLI:     zig-out/bin/zlob"
 	@echo "  Header:  zig-out/include/zlob.h"
 
+build-static:
+	@echo "Building zlob static library..."
+	$(ZIG) build -Doptimize=ReleaseFast -Dstatic-only=true
+	@echo ""
+	@echo "Static library built: zig-out/lib/libzlob.a"
+
 # Install library and headers
 install: build
 	@echo "Installing zlob library to $(PREFIX)..."
