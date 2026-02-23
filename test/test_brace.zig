@@ -1343,6 +1343,31 @@ test "ZLOB_BRACE - mixed nested {a,b,{c,d}}.txt" {
     }.assert, @src());
 }
 
+test "ZLOB_BRACE filesystem - absolute path with recursive brace expansion" {
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createBraceTestFiles(allocator, tmp_dir);
+    defer cleanupBraceTestFiles(allocator, tmp_dir) catch {};
+
+    // Use absolute path with braces and **: /tmp/test_brace/{src,lib}/**/*.c
+    // This exercises the globRecursive brace-parsed start_dir construction
+    // which must preserve the leading "/" for absolute paths.
+    const pattern = try allocator.dupeZ(u8, "/tmp/test_brace/{src,lib}/**/*.c");
+    defer allocator.free(pattern);
+
+    var pzlob: zlob.zlob_t = undefined;
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE | zlob_flags.ZLOB_NOSORT, null, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(@as(c_int, 0), result);
+    // src/main.c, src/test.c, src/utils.c, src/core/engine.c, src/utils/helper.c
+    // lib/lib.c, lib/common/shared.c
+    try testing.expect(pzlob.zlo_pathc >= 7);
+    try testing.expect(countResultsWithSubstring(&pzlob, "/src/") >= 1);
+    try testing.expect(countResultsWithSubstring(&pzlob, "/lib/") >= 1);
+}
+
 test "combined flags - BRACE and NOCHECK" {
     const files = [_][]const u8{
         "a.txt",

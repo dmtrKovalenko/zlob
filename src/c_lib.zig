@@ -7,12 +7,13 @@ const mem = std.mem;
 const ZlobFlags = zlob_flags.ZlobFlags;
 const pattern_context = zlob_impl.pattern_context;
 
-// On Windows without libc, use page_allocator (backed by VirtualAlloc).
-// On POSIX, use c_allocator (backed by malloc/free) for better small-alloc performance.
-const allocator = if (builtin.os.tag == .windows and !builtin.link_libc)
-    std.heap.page_allocator
+// When libc is linked (most POSIX targets), use c_allocator (backed by malloc/free)
+// for better small-alloc performance. Otherwise (Windows MSVC, Android, etc.)
+// fall back to page_allocator (backed by VirtualAlloc / mmap).
+const allocator = if (builtin.link_libc)
+    std.heap.c_allocator
 else
-    std.heap.c_allocator;
+    std.heap.page_allocator;
 
 pub const zlob_t = zlob_impl.zlob_t;
 pub const zlob_dirent_t = zlob_impl.zlob_dirent_t;
