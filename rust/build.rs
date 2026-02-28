@@ -175,21 +175,45 @@ fn main() {
 
 fn rust_target_to_zig(target: &str) -> &'static str {
     match target {
+        // Linux - GNU
         "x86_64-unknown-linux-gnu" => "x86_64-linux-gnu",
-        "x86_64-unknown-linux-musl" => "x86_64-linux-musl",
         "aarch64-unknown-linux-gnu" => "aarch64-linux-gnu",
-        "aarch64-unknown-linux-musl" => "aarch64-linux-musl",
         "i686-unknown-linux-gnu" => "x86-linux-gnu",
         "armv7-unknown-linux-gnueabihf" => "arm-linux-gnueabihf",
+        "armv7-unknown-linux-gnueabi" => "arm-linux-gnueabi",
+        "powerpc64le-unknown-linux-gnu" => "powerpc64le-linux-gnu",
+        "riscv64gc-unknown-linux-gnu" => "riscv64-linux-gnu",
+        "s390x-unknown-linux-gnu" => "s390x-linux-gnu",
+        "loongarch64-unknown-linux-gnu" => "loongarch64-linux-gnu",
+        // Linux - musl
+        "x86_64-unknown-linux-musl" => "x86_64-linux-musl",
+        "aarch64-unknown-linux-musl" => "aarch64-linux-musl",
+        "i686-unknown-linux-musl" => "x86-linux-musl",
+        "armv7-unknown-linux-musleabihf" => "arm-linux-musleabihf",
+        "armv7-unknown-linux-musleabi" => "arm-linux-musleabi",
+        // macOS
         "x86_64-apple-darwin" => "x86_64-macos",
         "aarch64-apple-darwin" => "aarch64-macos",
+        // iOS
+        "aarch64-apple-ios" => "aarch64-ios",
+        "aarch64-apple-ios-sim" => "aarch64-ios-simulator",
+        "x86_64-apple-ios" => "x86_64-ios-simulator",
+        // Windows
         "x86_64-pc-windows-gnu" => "x86_64-windows-gnu",
         "x86_64-pc-windows-msvc" => "x86_64-windows-msvc",
         "i686-pc-windows-gnu" => "x86-windows-gnu",
         "i686-pc-windows-msvc" => "x86-windows-msvc",
         "aarch64-pc-windows-msvc" => "aarch64-windows-msvc",
+        // FreeBSD
         "x86_64-unknown-freebsd" => "x86_64-freebsd",
         "aarch64-unknown-freebsd" => "aarch64-freebsd",
+        // NetBSD
+        "x86_64-unknown-netbsd" => "x86_64-netbsd",
+        // Android
+        "aarch64-linux-android" => "aarch64-linux-android",
+        "armv7-linux-androideabi" => "arm-linux-androideabi",
+        "x86_64-linux-android" => "x86_64-linux-android",
+        "i686-linux-android" => "x86-linux-android",
         _ if target.contains("windows") => panic!(
             "Unsupported Windows target: '{}'. \
              Please add a mapping for this target in rust_target_to_zig(). \

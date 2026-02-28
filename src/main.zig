@@ -18,6 +18,7 @@ const Options = struct {
     no_gitignore: bool = false,
     hidden: bool = false,
     dirs_only: bool = false,
+    count_only: bool = false,
     show_help: bool = false,
     show_version: bool = false,
     limit: usize = 100,
@@ -76,6 +77,7 @@ fn printHelp(w: *Io.Writer, program_name: []const u8) void {
         \\    -a, --all            Show all results (default: first 100)
         \\    -n, --limit <NUM>    Limit results to NUM entries (default: 100)
         \\    -H, --hidden         Include hidden files (match files starting with '.')
+        \\    -c, --count          Print only the count of matched files
         \\    -d, --dirs-only      Only match directories
         \\    -m, --mark           Append '/' to directory names
         \\    -E, --no-escape      Treat backslash as literal character
@@ -139,6 +141,8 @@ fn parseArgs(allocator: std.mem.Allocator, stderr: *Io.Writer) !Options {
                 opts.no_gitignore = true;
             } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--hidden")) {
                 opts.hidden = true;
+            } else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--count")) {
+                opts.count_only = true;
             } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dirs-only")) {
                 opts.dirs_only = true;
             } else {
@@ -239,21 +243,27 @@ pub fn main() !void {
         defer result.deinit();
 
         const total = result.len();
-        const display_limit = if (opts.show_all) total else @min(opts.limit, total);
 
-        var displayed: usize = 0;
-        var it = result.iterator();
-        while (it.next()) |path| {
-            if (displayed >= display_limit) break;
-            stdout.print("{s}\n", .{path}) catch {};
-            displayed += 1;
-        }
+        if (opts.count_only) {
+            stdout.print("{d}\n", .{total}) catch {};
+            stdout_writer.flush();
+        } else {
+            const display_limit = if (opts.show_all) total else @min(opts.limit, total);
 
-        stdout_writer.flush();
+            var displayed: usize = 0;
+            var it = result.iterator();
+            while (it.next()) |path| {
+                if (displayed >= display_limit) break;
+                stdout.print("{s}\n", .{path}) catch {};
+                displayed += 1;
+            }
 
-        if (!opts.show_all and total > opts.limit) {
-            stderr.print("\n... and {d} more ({d} total). Use -a to show all.\n", .{ total - opts.limit, total }) catch {};
-            stderr_writer.flush();
+            stdout_writer.flush();
+
+            if (!opts.show_all and total > opts.limit) {
+                stderr.print("\n... and {d} more ({d} total). Use -a to show all.\n", .{ total - opts.limit, total }) catch {};
+                stderr_writer.flush();
+            }
         }
     } else {
         stderr.print("No matches found for pattern: {s}\n", .{full_pattern}) catch {};

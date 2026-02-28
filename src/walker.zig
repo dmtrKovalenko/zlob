@@ -867,9 +867,12 @@ pub const DirIterator = struct {
     /// Platform-specific d_name buffer size:
     /// - Linux: 256 bytes
     /// - macOS (64-bit inodes): 1024 bytes (__DARWIN_MAXPATHLEN)
+    /// - FreeBSD: 256 bytes (255 + sentinel)
+    /// - NetBSD: 512 bytes (511 + sentinel)
     /// - Windows: 256 bytes (not used, but defined for consistency)
     const DIRENT_NAME_LEN: usize = switch (builtin.os.tag) {
         .macos => 1024,
+        .netbsd => 512,
         else => 256,
     };
 
@@ -1019,7 +1022,9 @@ pub const DirIterator = struct {
 
                 while (c.readdir(dir)) |entry_raw| {
                     const entry: *const c.dirent = @ptrCast(@alignCast(entry_raw));
-                    const name = direntNameSlice(&entry.name);
+                    // @ptrCast handles platforms where d_name is sentinel-terminated
+                    // (e.g., FreeBSD [255:0]u8, NetBSD [511:0]u8) vs plain arrays
+                    const name = direntNameSlice(@ptrCast(&entry.name));
 
                     // Unified filtering for ".", "..", and hidden files
                     if (shouldSkipEntry(name, self.hidden)) continue;

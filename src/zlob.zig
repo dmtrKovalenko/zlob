@@ -1248,14 +1248,22 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
                 literal_prefix_end = i + 1;
             }
 
-            // Build start directory from literal prefix components
             if (literal_prefix_end > 0) {
-                // Build full path from literal components
                 var path_len: usize = 0;
+                const is_absolute = dirname.len > 0 and dirname[0] == '/';
+
+                // For absolute paths, restore the leading "/"
+                if (is_absolute) {
+                    start_dir_buf[0] = '/';
+                    path_len = 1;
+                }
+
                 for (parsed.components[0..literal_prefix_end], 0..) |comp, i| {
-                    if (i > 0) {
-                        start_dir_buf[path_len] = '/';
-                        path_len += 1;
+                    if (i > 0 or (i == 0 and is_absolute)) {
+                        if (path_len > 1 or (path_len == 1 and !is_absolute)) {
+                            start_dir_buf[path_len] = '/';
+                            path_len += 1;
+                        }
                     }
                     @memcpy(start_dir_buf[path_len..][0..comp.text.len], comp.text);
                     path_len += comp.text.len;

@@ -6,11 +6,18 @@ const zlob_flags = @import("zlob_flags");
 
 pub const ZlobFlags = zlob_flags.ZlobFlags;
 
-// pwd.h is only available on POSIX systems
-const pwd = if (builtin.os.tag != .windows) @cImport({
+// pwd.h is only available on POSIX systems where libc headers are present.
+// Excluded on: Windows (no pwd.h), Android (Zig can't provide bionic headers),
+// and Apple mobile platforms (iOS/tvOS/watchOS/visionOS — Zig doesn't ship their SDK headers).
+// Note: Zig force-enables link_libc for Darwin-based targets, so we must check os.tag directly.
+const has_pwd = switch (builtin.os.tag) {
+    .windows, .ios, .tvos, .watchos, .visionos => false,
+    else => builtin.link_libc,
+};
+const pwd = if (has_pwd) @cImport({
     @cInclude("pwd.h");
 }) else struct {
-    // Stub for Windows - these functions don't exist
+    // Stub for platforms without pwd.h (Windows, Android, Apple mobile, no-libc builds)
     pub const passwd = opaque {};
     pub fn getpwnam(_: anytype) ?*passwd {
         return null;
@@ -108,9 +115,9 @@ pub fn expandTilde(allocator: Allocator, pattern: [:0]const u8, flags: ZlobFlags
             return pattern;
         }
     } else {
-        // ~username expansion - only supported on POSIX systems
-        if (builtin.os.tag == .windows) {
-            // Windows doesn't support ~username expansion
+        // ~username expansion - only supported on POSIX systems with libc (pwd.h)
+        if (!has_pwd) {
+            // No pwd.h support (Windows, Android, no-libc builds)
             if (flags.tilde_check) {
                 return null;
             }
