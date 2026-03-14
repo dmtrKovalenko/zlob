@@ -922,8 +922,9 @@ pub const DirIterator = struct {
             };
         }
 
-        // On Windows or when libc is not available, use std.fs
-        if (builtin.os.tag == .windows or !has_libc) {
+        // When base_dir is set (need relative opens) or on Windows or when libc
+        // is not available, use std.fs
+        if (base_dir != null or builtin.os.tag == .windows or !has_libc) {
             const root = base_dir orelse std.fs.cwd();
             var dir = try root.openDir(path, .{ .iterate = true });
             return DirIterator{
