@@ -1,7 +1,9 @@
 #include "zlob.h"
 #include <assert.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #define TEST(name) printf("  [TEST] %s\n", name)
 #define PASS() printf("    ✓ PASS\n")
@@ -76,6 +78,57 @@ int main(void) {
     } else {
       FAIL("zlob() returned error");
     }
+  }
+
+  printf("\nzlob_at() - Filesystem Walking Relative to Base Directory\n");
+  TEST("Match relative patterns from absolute base path");
+  {
+    char src_base[4096];
+    char repo_root[4096];
+
+    if (realpath("src", src_base) == NULL)
+      FAIL("realpath(src) failed");
+    if (realpath(".", repo_root) == NULL)
+      FAIL("realpath(.) failed");
+
+    zlob_t pzlob;
+    int result = zlob_at(src_base, "*.zig", 0, NULL, &pzlob);
+
+    if (result != 0)
+      FAIL("zlob_at() failed for *.zig");
+    if (pzlob.zlo_pathc == 0)
+      FAIL("Expected at least one match for *.zig");
+
+    int found_walker = 0;
+    int found_flags = 0;
+    for (size_t i = 0; i < pzlob.zlo_pathc; i++) {
+      if (strcmp(pzlob.zlo_pathv[i], "walker.zig") == 0)
+        found_walker = 1;
+      if (strcmp(pzlob.zlo_pathv[i], "flags.zig") == 0)
+        found_flags = 1;
+    }
+    if (!found_walker || !found_flags)
+      FAIL("Expected relative matches walker.zig and flags.zig");
+
+    zlobfree(&pzlob);
+
+    result = zlob_at(repo_root, "src/*.zig", 0, NULL, &pzlob);
+    if (result != 0)
+      FAIL("zlob_at() failed for src/*.zig");
+
+    found_walker = 0;
+    found_flags = 0;
+    for (size_t i = 0; i < pzlob.zlo_pathc; i++) {
+      if (strcmp(pzlob.zlo_pathv[i], "src/walker.zig") == 0)
+        found_walker = 1;
+      if (strcmp(pzlob.zlo_pathv[i], "src/flags.zig") == 0)
+        found_flags = 1;
+    }
+    if (!found_walker || !found_flags)
+      FAIL("Expected relative matches src/walker.zig and src/flags.zig");
+
+    zlobfree(&pzlob);
+    PASS();
   }
 
   // zlob_match_paths() - Path filtering (no filesystem)
