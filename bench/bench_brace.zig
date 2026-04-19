@@ -1,9 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c_lib = @import("c_lib");
 const zlob_flags = @import("zlob_flags");
 const zlob_t = c_lib.zlob_t;
-
-const Timer = std.time.Timer;
 
 const TestCase = struct {
     name: []const u8,
@@ -44,16 +43,21 @@ const BenchmarkResult = struct {
 };
 
 fn getRepoPath(allocator: std.mem.Allocator) ![]const u8 {
-    // Try PROFILE_BIG_REPO env var first
-    if (std.process.getEnvVarOwned(allocator, "PROFILE_BIG_REPO")) |path| {
-        return path;
-    } else |_| {
-        // Fallback to default path
-        return try allocator.dupe(u8, "/Users/neogoose/dev/lightsource");
+    // Try PROFILE_BIG_REPO env var first (via libc getenv)
+    if (builtin.link_libc) {
+        const name_z = try allocator.dupeZ(u8, "PROFILE_BIG_REPO");
+        defer allocator.free(name_z);
+        if (std.c.getenv(name_z.ptr)) |val| {
+            const slice = std.mem.sliceTo(val, 0);
+            return try allocator.dupe(u8, slice);
+        }
     }
+    // Fallback to default path
+    return try allocator.dupe(u8, "/Users/neogoose/dev/lightsource");
 }
 
 fn runBenchmark(tc: TestCase, warmup_iterations: usize) !BenchmarkResult {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const flags: c_int = zlob_flags.ZLOB_RECOMMENDED | zlob_flags.ZLOB_GITIGNORE;
     var matches: usize = 0;
     for (0..warmup_iterations) |_| {
@@ -66,8 +70,7 @@ fn runBenchmark(tc: TestCase, warmup_iterations: usize) !BenchmarkResult {
     }
 
     // Timed benchmark runs
-    var timer = try Timer.start();
-    const start = timer.read();
+    const start = std.Io.Timestamp.now(io, .awake);
 
     for (0..tc.iterations) |_| {
         var pzlob: zlob_t = undefined;
@@ -78,8 +81,8 @@ fn runBenchmark(tc: TestCase, warmup_iterations: usize) !BenchmarkResult {
         }
     }
 
-    const end = timer.read();
-    const elapsed_ns = end - start;
+    const end = std.Io.Timestamp.now(io, .awake);
+    const elapsed_ns: u64 = @intCast(start.durationTo(end).nanoseconds);
     const avg_ns = elapsed_ns / tc.iterations;
 
     return BenchmarkResult{
@@ -109,6 +112,7 @@ fn printResult(result: BenchmarkResult) void {
 }
 
 pub fn main() !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const allocator = std.heap.c_allocator;
 
     // Get repository path
@@ -116,7 +120,7 @@ pub fn main() !void {
     defer allocator.free(repo_path);
 
     // Change to repository directory
-    std.posix.chdir(repo_path) catch |err| {
+    std.process.setCurrentPath(io, repo_path) catch |err| {
         std.debug.print("Error: Cannot change to directory '{s}': {}\n", .{ repo_path, err });
         std.debug.print("\nSet PROFILE_BIG_REPO environment variable to a valid repository path.\n", .{});
         std.debug.print("Example: PROFILE_BIG_REPO=/path/to/repo zig build bench-brace -Doptimize=ReleaseFast\n", .{});
@@ -237,7 +241,7 @@ pub fn main() !void {
         printResult(results[i]);
 
         // Small pause between tests
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        std.Io.sleep(io, std.Io.Duration.fromNanoseconds(50 * std.time.ns_per_ms), .awake) catch {};
     }
 
     std.debug.print("\n========================================\n", .{});

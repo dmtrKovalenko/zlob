@@ -78,6 +78,7 @@ fn runBenchmark(
     comptime name: []const u8,
     comptime patterns: []const []const u8,
 ) void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const contexts = createContexts(patterns);
     const unified = suffix_match.UnifiedMultiSuffix.init(&contexts);
 
@@ -95,24 +96,24 @@ fn runBenchmark(
     matches_unified = 0;
 
     // Benchmark original approach
-    const start1 = std.time.nanoTimestamp();
+    const start1 = std.Io.Timestamp.now(io, .awake);
     for (0..ITERATIONS) |_| {
         for (test_filenames) |filename| {
             if (matchOriginal(filename, &contexts)) matches_original += 1;
         }
     }
-    const end1 = std.time.nanoTimestamp();
-    const original_ns: u64 = @intCast(end1 - start1);
+    const end1 = std.Io.Timestamp.now(io, .awake);
+    const original_ns: u64 = @intCast(start1.durationTo(end1).nanoseconds);
 
     // Benchmark unified approach
-    const start2 = std.time.nanoTimestamp();
+    const start2 = std.Io.Timestamp.now(io, .awake);
     for (0..ITERATIONS) |_| {
         for (test_filenames) |filename| {
             if (matchUnified(filename, &unified)) matches_unified += 1;
         }
     }
-    const end2 = std.time.nanoTimestamp();
-    const unified_ns: u64 = @intCast(end2 - start2);
+    const end2 = std.Io.Timestamp.now(io, .awake);
+    const unified_ns: u64 = @intCast(start2.durationTo(end2).nanoseconds);
 
     const total_ops = ITERATIONS * test_filenames.len;
     const original_ns_per_op = @as(f64, @floatFromInt(original_ns)) / @as(f64, @floatFromInt(total_ops));

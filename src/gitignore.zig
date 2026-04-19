@@ -72,20 +72,11 @@ pub const GitIgnore = struct {
 
     /// Load and parse .gitignore from current working directory
     /// Returns null if no .gitignore file exists
-    pub fn loadFromCwd(allocator: Allocator) !?Self {
-        const cwd = std.fs.cwd();
-        const file = cwd.openFile(".gitignore", .{}) catch |err| {
-            if (err == error.FileNotFound) {
-                return null;
-            }
-            return err;
-        };
-        defer file.close();
-
-        const content = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
-            if (err == error.StreamTooLong) {
-                return null;
-            }
+    pub fn loadFromCwd(allocator: Allocator, io: std.Io) !?Self {
+        const cwd = std.Io.Dir.cwd();
+        const content = cwd.readFileAlloc(io, ".gitignore", allocator, .limited(1024 * 1024)) catch |err| {
+            if (err == error.FileNotFound) return null;
+            if (err == error.StreamTooLong) return null;
             return err;
         };
 
@@ -94,26 +85,17 @@ pub const GitIgnore = struct {
 
     /// Load and parse .gitignore from a specific directory
     /// Returns null if no .gitignore file exists
-    pub fn loadFromDir(allocator: Allocator, dir_path: []const u8) !?Self {
+    pub fn loadFromDir(allocator: Allocator, io: std.Io, dir_path: []const u8) !?Self {
         var path_buf: [4096]u8 = undefined;
         const gitignore_path = if (dir_path.len > 0 and !mem.eql(u8, dir_path, "."))
             std.fmt.bufPrint(&path_buf, "{s}/.gitignore", .{dir_path}) catch return null
         else
             ".gitignore";
 
-        const cwd = std.fs.cwd();
-        const file = cwd.openFile(gitignore_path, .{}) catch |err| {
-            if (err == error.FileNotFound) {
-                return null;
-            }
-            return err;
-        };
-        defer file.close();
-
-        const content = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
-            if (err == error.StreamTooLong) {
-                return null;
-            }
+        const cwd = std.Io.Dir.cwd();
+        const content = cwd.readFileAlloc(io, gitignore_path, allocator, .limited(1024 * 1024)) catch |err| {
+            if (err == error.FileNotFound) return null;
+            if (err == error.StreamTooLong) return null;
             return err;
         };
 

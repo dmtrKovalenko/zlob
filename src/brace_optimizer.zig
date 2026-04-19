@@ -21,7 +21,7 @@ pub fn findClosingBrace(pattern: []const u8, start: usize) ?usize {
 }
 
 pub fn expandBraces(allocator: Allocator, pattern: []const u8) ![][]const u8 {
-    var results = std.ArrayList([]const u8){};
+    var results = std.ArrayList([]const u8).empty;
     errdefer {
         for (results.items) |item| allocator.free(item);
         results.deinit(allocator);
@@ -140,7 +140,7 @@ pub const BracedPattern = struct {
     }
 
     pub fn parse(allocator: Allocator, pattern: []const u8) !BracedPattern {
-        var components = std.ArrayList(BracedComponent){};
+        var components = std.ArrayList(BracedComponent).empty;
         errdefer {
             for (components.items) |comp| {
                 if (comp.pattern_contexts) |contexts| allocator.free(contexts);

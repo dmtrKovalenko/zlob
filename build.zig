@@ -391,12 +391,12 @@ pub fn build(b: *std.Build) void {
                     .root_source_file = b.path("bench/compare_libc.zig"),
                     .target = target,
                     .optimize = optimize,
+                    .link_libc = true, // for glob()
                     .imports = &.{
                         .{ .name = "c_lib", .module = c_lib_mod },
                     },
                 }),
             });
-            compare_libc.linkLibC(); // Link against libc for glob()
             b.installArtifact(compare_libc);
 
             // libc comparison run step
@@ -418,13 +418,13 @@ pub fn build(b: *std.Build) void {
                     .root_source_file = b.path("bench/perf_test_libc.zig"),
                     .target = target,
                     .optimize = optimize,
+                    .link_libc = true,
                     .imports = &.{
                         .{ .name = "zlob", .module = mod },
                         .{ .name = "c_lib", .module = c_lib_mod },
                     },
                 }),
             });
-            perf_test_libc.linkLibC();
             b.installArtifact(perf_test_libc);
 
             const perf_test_libc_cmd = b.addRunArtifact(perf_test_libc);
@@ -439,6 +439,7 @@ pub fn build(b: *std.Build) void {
                     .root_source_file = b.path("bench/profile_big_repo.zig"),
                     .target = target,
                     .optimize = optimize,
+                    .link_libc = true,
                     .imports = &.{
                         .{ .name = "zlob", .module = mod },
                         .{ .name = "c_lib", .module = c_lib_mod },
@@ -446,7 +447,6 @@ pub fn build(b: *std.Build) void {
                     },
                 }),
             });
-            profile_big_repo.linkLibC();
             b.installArtifact(profile_big_repo);
 
             const profile_big_repo_cmd = b.addRunArtifact(profile_big_repo);
@@ -460,6 +460,7 @@ pub fn build(b: *std.Build) void {
                     .root_source_file = b.path("bench/bench_brace.zig"),
                     .target = target,
                     .optimize = optimize,
+                    .link_libc = true,
                     .imports = &.{
                         .{ .name = "zlob", .module = mod },
                         .{ .name = "c_lib", .module = c_lib_mod },
@@ -467,7 +468,6 @@ pub fn build(b: *std.Build) void {
                     },
                 }),
             });
-            bench_brace.linkLibC();
             b.installArtifact(bench_brace);
 
             const bench_brace_cmd = b.addRunArtifact(bench_brace);
@@ -482,12 +482,12 @@ pub fn build(b: *std.Build) void {
                     .root_source_file = b.path("bench/compare_walker.zig"),
                     .target = target,
                     .optimize = optimize,
+                    .link_libc = true,
                     .imports = &.{
                         .{ .name = "walker", .module = walker_mod },
                     },
                 }),
             });
-            compare_walker.linkLibC();
             b.installArtifact(compare_walker);
 
             const compare_walker_cmd = b.addRunArtifact(compare_walker);
@@ -502,13 +502,13 @@ pub fn build(b: *std.Build) void {
                     .root_source_file = b.path("bench/test_recursive.zig"),
                     .target = target,
                     .optimize = optimize,
+                    .link_libc = true,
                     .imports = &.{
                         .{ .name = "zlob", .module = mod },
                         .{ .name = "c_lib", .module = c_lib_mod },
                     },
                 }),
             });
-            test_recursive.linkLibC();
             b.installArtifact(test_recursive);
 
             const test_recursive_cmd = b.addRunArtifact(test_recursive);
@@ -523,13 +523,13 @@ pub fn build(b: *std.Build) void {
                     .root_source_file = b.path("bench/perf_recursive.zig"),
                     .target = target,
                     .optimize = optimize,
+                    .link_libc = true,
                     .imports = &.{
                         .{ .name = "zlob", .module = mod },
                         .{ .name = "c_lib", .module = c_lib_mod },
                     },
                 }),
             });
-            perf_recursive.linkLibC();
             b.installArtifact(perf_recursive);
         }
 
@@ -541,13 +541,13 @@ pub fn build(b: *std.Build) void {
                     .root_source_file = b.path("bench/bench_tree_sizes.zig"),
                     .target = target,
                     .optimize = .ReleaseFast,
+                    .link_libc = true,
                     .imports = &.{
                         .{ .name = "c_lib", .module = c_lib_mod },
                         .{ .name = "zlob_flags", .module = flags_mod },
                     },
                 }),
             });
-            bench_tree_sizes.linkLibC();
             b.installArtifact(bench_tree_sizes);
 
             const bench_tree_sizes_cmd = b.addRunArtifact(bench_tree_sizes);

@@ -5,17 +5,18 @@ const zlob_flags = @import("zlob_flags");
 
 test "ZLOB_APPEND - basic append two patterns" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    try std.fs.cwd().makePath("test_append_basic");
-    defer std.fs.cwd().deleteTree("test_append_basic") catch {};
-    var test_dir = try std.fs.cwd().openDir("test_append_basic", .{});
-    defer test_dir.close();
+    try std.Io.Dir.cwd().createDirPath(io, "test_append_basic");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_append_basic") catch {};
+    var test_dir = try std.Io.Dir.cwd().openDir(io, "test_append_basic", .{});
+    defer test_dir.close(io);
 
     // Create test files
-    try test_dir.writeFile(.{ .sub_path = "file1.txt", .data = "" });
-    try test_dir.writeFile(.{ .sub_path = "file2.txt", .data = "" });
-    try test_dir.writeFile(.{ .sub_path = "file3.log", .data = "" });
-    try test_dir.writeFile(.{ .sub_path = "file4.log", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "file1.txt", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "file2.txt", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "file3.log", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "file4.log", .data = "" });
 
     var pzlob: c_lib.zlob_t = undefined;
 
@@ -57,16 +58,17 @@ test "ZLOB_APPEND - basic append two patterns" {
 
 test "ZLOB_APPEND - three consecutive appends" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    try std.fs.cwd().makePath("test_append_three");
-    defer std.fs.cwd().deleteTree("test_append_three") catch {};
-    var test_dir = try std.fs.cwd().openDir("test_append_three", .{});
-    defer test_dir.close();
+    try std.Io.Dir.cwd().createDirPath(io, "test_append_three");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_append_three") catch {};
+    var test_dir = try std.Io.Dir.cwd().openDir(io, "test_append_three", .{});
+    defer test_dir.close(io);
 
     // Create test files
-    try test_dir.writeFile(.{ .sub_path = "a.c", .data = "" });
-    try test_dir.writeFile(.{ .sub_path = "b.h", .data = "" });
-    try test_dir.writeFile(.{ .sub_path = "c.zig", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "a.c", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "b.h", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "c.zig", .data = "" });
 
     var pzlob: c_lib.zlob_t = undefined;
 
@@ -93,13 +95,14 @@ test "ZLOB_APPEND - three consecutive appends" {
 
 test "ZLOB_APPEND - append to empty results" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    try std.fs.cwd().makePath("test_append_empty");
-    defer std.fs.cwd().deleteTree("test_append_empty") catch {};
-    var test_dir = try std.fs.cwd().openDir("test_append_empty", .{});
-    defer test_dir.close();
+    try std.Io.Dir.cwd().createDirPath(io, "test_append_empty");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_append_empty") catch {};
+    var test_dir = try std.Io.Dir.cwd().openDir(io, "test_append_empty", .{});
+    defer test_dir.close(io);
 
-    try test_dir.writeFile(.{ .sub_path = "file.txt", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "file.txt", .data = "" });
 
     var pzlob: c_lib.zlob_t = undefined;
 
@@ -121,16 +124,17 @@ test "ZLOB_APPEND - append to empty results" {
 
 test "ZLOB_APPEND - preserve order with sorting" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    try std.fs.cwd().makePath("test_append_order");
-    defer std.fs.cwd().deleteTree("test_append_order") catch {};
-    var test_dir = try std.fs.cwd().openDir("test_append_order", .{});
-    defer test_dir.close();
+    try std.Io.Dir.cwd().createDirPath(io, "test_append_order");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_append_order") catch {};
+    var test_dir = try std.Io.Dir.cwd().openDir(io, "test_append_order", .{});
+    defer test_dir.close(io);
 
-    try test_dir.writeFile(.{ .sub_path = "z.txt", .data = "" });
-    try test_dir.writeFile(.{ .sub_path = "a.txt", .data = "" });
-    try test_dir.writeFile(.{ .sub_path = "m.log", .data = "" });
-    try test_dir.writeFile(.{ .sub_path = "b.log", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "z.txt", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "a.txt", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "m.log", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "b.log", .data = "" });
 
     var pzlob: c_lib.zlob_t = undefined;
 
@@ -163,21 +167,22 @@ test "ZLOB_APPEND - preserve order with sorting" {
 
 test "ZLOB_APPEND - with subdirectories" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    try std.fs.cwd().makePath("test_append_dirs/dir1");
-    try std.fs.cwd().makePath("test_append_dirs/dir2");
-    defer std.fs.cwd().deleteTree("test_append_dirs") catch {};
+    try std.Io.Dir.cwd().createDirPath(io, "test_append_dirs/dir1");
+    try std.Io.Dir.cwd().createDirPath(io, "test_append_dirs/dir2");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_append_dirs") catch {};
 
-    var test_dir = try std.fs.cwd().openDir("test_append_dirs", .{});
-    defer test_dir.close();
+    var test_dir = try std.Io.Dir.cwd().openDir(io, "test_append_dirs", .{});
+    defer test_dir.close(io);
 
-    var dir1 = try test_dir.openDir("dir1", .{});
-    defer dir1.close();
-    var dir2 = try test_dir.openDir("dir2", .{});
-    defer dir2.close();
+    var dir1 = try test_dir.openDir(io, "dir1", .{});
+    defer dir1.close(io);
+    var dir2 = try test_dir.openDir(io, "dir2", .{});
+    defer dir2.close(io);
 
-    try dir1.writeFile(.{ .sub_path = "file.txt", .data = "" });
-    try dir2.writeFile(.{ .sub_path = "file.txt", .data = "" });
+    try dir1.writeFile(io, .{ .sub_path = "file.txt", .data = "" });
+    try dir2.writeFile(io, .{ .sub_path = "file.txt", .data = "" });
 
     var pzlob: c_lib.zlob_t = undefined;
 
@@ -198,23 +203,24 @@ test "ZLOB_APPEND - with subdirectories" {
 
 test "ZLOB_APPEND - append many results" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    try std.fs.cwd().makePath("test_append_many");
-    defer std.fs.cwd().deleteTree("test_append_many") catch {};
-    var test_dir = try std.fs.cwd().openDir("test_append_many", .{});
-    defer test_dir.close();
+    try std.Io.Dir.cwd().createDirPath(io, "test_append_many");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_append_many") catch {};
+    var test_dir = try std.Io.Dir.cwd().openDir(io, "test_append_many", .{});
+    defer test_dir.close(io);
 
     // Create many files
     for (0..50) |i| {
         const name = try std.fmt.allocPrint(allocator, "file{d}.txt", .{i});
         defer allocator.free(name);
-        try test_dir.writeFile(.{ .sub_path = name, .data = "" });
+        try test_dir.writeFile(io, .{ .sub_path = name, .data = "" });
     }
 
     for (0..50) |i| {
         const name = try std.fmt.allocPrint(allocator, "data{d}.log", .{i});
         defer allocator.free(name);
-        try test_dir.writeFile(.{ .sub_path = name, .data = "" });
+        try test_dir.writeFile(io, .{ .sub_path = name, .data = "" });
     }
 
     var pzlob: c_lib.zlob_t = undefined;
@@ -236,13 +242,14 @@ test "ZLOB_APPEND - append many results" {
 
 test "ZLOB_APPEND - without initial glob should work" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    try std.fs.cwd().makePath("test_append_first");
-    defer std.fs.cwd().deleteTree("test_append_first") catch {};
-    var test_dir = try std.fs.cwd().openDir("test_append_first", .{});
-    defer test_dir.close();
+    try std.Io.Dir.cwd().createDirPath(io, "test_append_first");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_append_first") catch {};
+    var test_dir = try std.Io.Dir.cwd().openDir(io, "test_append_first", .{});
+    defer test_dir.close(io);
 
-    try test_dir.writeFile(.{ .sub_path = "file.txt", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "file.txt", .data = "" });
 
     var pzlob: c_lib.zlob_t = undefined;
     pzlob.zlo_pathc = 0;
@@ -263,15 +270,16 @@ test "ZLOB_APPEND - without initial glob should work" {
 
 test "ZLOB_APPEND - combined with ZLOB_NOSORT" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    try std.fs.cwd().makePath("test_append_nosort");
-    defer std.fs.cwd().deleteTree("test_append_nosort") catch {};
-    var test_dir = try std.fs.cwd().openDir("test_append_nosort", .{});
-    defer test_dir.close();
+    try std.Io.Dir.cwd().createDirPath(io, "test_append_nosort");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_append_nosort") catch {};
+    var test_dir = try std.Io.Dir.cwd().openDir(io, "test_append_nosort", .{});
+    defer test_dir.close(io);
 
-    try test_dir.writeFile(.{ .sub_path = "z.txt", .data = "" });
-    try test_dir.writeFile(.{ .sub_path = "a.txt", .data = "" });
-    try test_dir.writeFile(.{ .sub_path = "m.log", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "z.txt", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "a.txt", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "m.log", .data = "" });
 
     var pzlob: c_lib.zlob_t = undefined;
 

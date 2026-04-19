@@ -5,12 +5,13 @@ const std = @import("std");
 const walker_mod = @import("walker");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = debug_allocator.deinit();
+    const allocator = debug_allocator.allocator();
 
     // Try to use Linux kernel source as test directory
-    std.process.changeCurDir("/home/neogoose/dev/fff.nvim/big-repo") catch {
+    std.process.setCurrentPath(io, "/home/neogoose/dev/fff.nvim/big-repo") catch {
         std.debug.print("Cannot find big-repo, using current directory\n", .{});
     };
 
@@ -24,36 +25,37 @@ pub fn main() !void {
     };
 
     for (test_cases) |tc| {
-        try runBenchmark(allocator, tc.path, tc.name);
+        try runBenchmark(io, allocator, tc.path, tc.name);
     }
 
     std.debug.print("Benchmark complete.\n", .{});
 }
 
-fn runBenchmark(allocator: std.mem.Allocator, test_path: []const u8, name: []const u8) !void {
+fn runBenchmark(io: std.Io, allocator: std.mem.Allocator, test_path: []const u8, name: []const u8) !void {
     const iterations: usize = 10;
 
     std.debug.print("{s}\n", .{name});
     std.debug.print("{s}\n", .{"-" ** 50});
 
     // Verify directory exists
-    std.fs.cwd().access(test_path, .{}) catch {
+    std.Io.Dir.cwd().access(io, test_path, .{}) catch {
         std.debug.print("  Directory not found, skipping\n\n", .{});
         return;
     };
 
-    // Benchmark std.fs.Dir.walk
+    // Benchmark std.Io.Dir.walk
     var total_std: u64 = 0;
     var count_std: usize = 0;
     for (0..iterations) |_| {
-        var timer = try std.time.Timer.start();
-        var dir = try std.fs.cwd().openDir(test_path, .{ .iterate = true });
-        defer dir.close();
+        const start = std.Io.Timestamp.now(io, .awake);
+        var dir = try std.Io.Dir.cwd().openDir(io, test_path, .{ .iterate = true });
+        defer dir.close(io);
         var w = try dir.walk(allocator);
         defer w.deinit();
         var count: usize = 0;
-        while (try w.next()) |_| count += 1;
-        total_std += timer.read();
+        while (try w.next(io)) |_| count += 1;
+        const end = std.Io.Timestamp.now(io, .awake);
+        total_std += @intCast(start.durationTo(end).nanoseconds);
         count_std = count;
     }
 
@@ -61,12 +63,13 @@ fn runBenchmark(allocator: std.mem.Allocator, test_path: []const u8, name: []con
     var total_optimized: u64 = 0;
     var count_optimized: usize = 0;
     for (0..iterations) |_| {
-        var timer = try std.time.Timer.start();
-        var w = try walker_mod.DefaultWalker.init(allocator, test_path, .{});
+        const start = std.Io.Timestamp.now(io, .awake);
+        var w = try walker_mod.DefaultWalker.init(allocator, io, test_path, .{});
         defer w.deinit();
         var count: usize = 0;
         while (try w.next()) |_| count += 1;
-        total_optimized += timer.read();
+        const end = std.Io.Timestamp.now(io, .awake);
+        total_optimized += @intCast(start.durationTo(end).nanoseconds);
         count_optimized = count;
     }
 

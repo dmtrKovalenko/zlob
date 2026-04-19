@@ -1,8 +1,6 @@
 const std = @import("std");
 const c_lib = @import("c_lib");
 
-const Timer = std.time.Timer;
-
 // libc glob types and functions
 extern "c" fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: ?*const anyopaque, pzlob: *GlobT) c_int;
 extern "c" fn globfree(pzlob: *GlobT) void;
@@ -13,9 +11,8 @@ const GlobT = extern struct {
     offs: usize,
 };
 
-fn benchmarkLibcGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
-    var timer = try Timer.start();
-    const start = timer.lap();
+fn benchmarkLibcGlob(io: std.Io, pattern: [*:0]const u8, iterations: usize) !u64 {
+    const start = std.Io.Timestamp.now(io, .awake);
 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
@@ -26,13 +23,12 @@ fn benchmarkLibcGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
         }
     }
 
-    const end = timer.read();
-    return end - start;
+    const end = std.Io.Timestamp.now(io, .awake);
+    return @intCast(start.durationTo(end).nanoseconds);
 }
 
-fn benchmarkZlobGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
-    var timer = try Timer.start();
-    const start = timer.lap();
+fn benchmarkZlobGlob(io: std.Io, pattern: [*:0]const u8, iterations: usize) !u64 {
+    const start = std.Io.Timestamp.now(io, .awake);
 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
@@ -43,21 +39,35 @@ fn benchmarkZlobGlob(pattern: [*:0]const u8, iterations: usize) !u64 {
         }
     }
 
-    const end = timer.read();
-    return end - start;
+    const end = std.Io.Timestamp.now(io, .awake);
+    return @intCast(start.durationTo(end).nanoseconds);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     // Use C allocator for fair comparison - it's just malloc/free like libc uses
     const allocator = std.heap.c_allocator;
 
-    // Parse command-line arguments
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // Parse command-line arguments via juicy main's Args iterator
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer args_iter.deinit();
+
+    var argv_list: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (argv_list.items) |a| allocator.free(a);
+        argv_list.deinit(allocator);
+    }
+
+    while (args_iter.next()) |arg| {
+        const dup = try allocator.dupe(u8, arg);
+        try argv_list.append(allocator, dup);
+    }
+
+    const args = argv_list.items;
 
     if (args.len != 3) {
-        std.debug.print("Usage: {s} <path> <pattern>\n", .{args[0]});
-        std.debug.print("Example: {s} /home/user/big-repo './**/*.c'\n", .{args[0]});
+        std.debug.print("Usage: {s} <path> <pattern>\n", .{if (args.len > 0) args[0] else "compare_libc"});
+        std.debug.print("Example: {s} /home/user/big-repo './**/*.c'\n", .{if (args.len > 0) args[0] else "compare_libc"});
         std.process.exit(1);
     }
 
@@ -66,7 +76,7 @@ pub fn main() !void {
     const iterations: usize = 1000;
 
     // Change to the specified directory
-    std.posix.chdir(path) catch |err| {
+    std.process.setCurrentPath(io, path) catch |err| {
         std.debug.print("Error: Cannot change to directory '{s}': {}\n", .{ path, err });
         std.process.exit(1);
     };
@@ -100,13 +110,13 @@ pub fn main() !void {
     std.debug.print("Match count: libc={d}, zlob={d}\n\n", .{ libc_count, zlob_count });
 
     // Benchmark libc glob
-    const libc_time = try benchmarkLibcGlob(pattern_z.ptr, iterations);
+    const libc_time = try benchmarkLibcGlob(io, pattern_z.ptr, iterations);
     const libc_avg_ns = libc_time / iterations;
     const libc_avg_us = @as(f64, @floatFromInt(libc_avg_ns)) / 1000.0;
     const libc_total_ms = @as(f64, @floatFromInt(libc_time)) / 1_000_000.0;
 
     // Benchmark zlob glob
-    const zlob_time = try benchmarkZlobGlob(pattern_z.ptr, iterations);
+    const zlob_time = try benchmarkZlobGlob(io, pattern_z.ptr, iterations);
     const zlob_avg_ns = zlob_time / iterations;
     const zlob_avg_us = @as(f64, @floatFromInt(zlob_avg_ns)) / 1000.0;
     const zlob_total_ms = @as(f64, @floatFromInt(zlob_time)) / 1_000_000.0;

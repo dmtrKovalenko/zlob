@@ -1,5 +1,4 @@
 const std = @import("std");
-const time = std.time;
 
 const zlob = @import("zlob");
 
@@ -13,6 +12,8 @@ fn benchmark(
     pattern: []const u8,
     paths: []const []const u8,
 ) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+
     // Warmup
     for (0..WARMUP_ITERATIONS) |_| {
         var result = try zlob.matchPaths(allocator, pattern, paths, zlob.ZlobFlags.recommended());
@@ -20,14 +21,14 @@ fn benchmark(
     }
 
     // Actual benchmark
-    const start = time.nanoTimestamp();
+    const start = std.Io.Timestamp.now(io, .awake);
     for (0..ITERATIONS) |_| {
         var result = try zlob.matchPaths(allocator, pattern, paths, 0);
         result.deinit();
     }
-    const end = time.nanoTimestamp();
+    const end = std.Io.Timestamp.now(io, .awake);
 
-    const total_ns = @as(u64, @intCast(end - start));
+    const total_ns: u64 = @intCast(start.durationTo(end).nanoseconds);
     const avg_ns = total_ns / ITERATIONS;
     const avg_us = avg_ns / 1000;
 
@@ -48,6 +49,7 @@ fn benchmarkWithBrace(
     pattern: []const u8,
     paths: []const []const u8,
 ) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const flags = zlob.ZlobFlags.recommended().with(.{ .brace = true });
 
     // Warmup
@@ -57,14 +59,14 @@ fn benchmarkWithBrace(
     }
 
     // Actual benchmark
-    const start = time.nanoTimestamp();
+    const start = std.Io.Timestamp.now(io, .awake);
     for (0..ITERATIONS) |_| {
         var result = try zlob.matchPaths(allocator, pattern, paths, flags);
         result.deinit();
     }
-    const end = time.nanoTimestamp();
+    const end = std.Io.Timestamp.now(io, .awake);
 
-    const total_ns = @as(u64, @intCast(end - start));
+    const total_ns: u64 = @intCast(start.durationTo(end).nanoseconds);
     const avg_ns = total_ns / ITERATIONS;
     const avg_us = avg_ns / 1000;
 
@@ -80,9 +82,9 @@ fn benchmarkWithBrace(
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = debug_allocator.deinit();
+    const allocator = debug_allocator.allocator();
 
     std.debug.print("\n=== Pattern Matching Benchmarks ===\n\n", .{});
     std.debug.print("{s:50} | {s:13} | {s}\n", .{ "Benchmark", "Time", "Matches" });

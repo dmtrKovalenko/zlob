@@ -35,14 +35,16 @@ fn testErrorCallbackAbort(epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_in
 test "errfunc is called on directory access error" {
     const allocator = testing.allocator;
 
+    const io = std.Io.Threaded.global_single_threaded.io();
+
     // Create a directory structure with a restricted directory
     const test_dir = "/tmp/test_errfunc_access";
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    std.Io.Dir.cwd().createDir(io, test_dir, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, test_dir) catch {};
 
     // Create a subdirectory
     const restricted_dir = test_dir ++ "/restricted";
-    std.fs.cwd().makeDir(restricted_dir) catch {};
+    std.Io.Dir.cwd().createDir(io, restricted_dir, .default_dir) catch {};
 
     // Remove read permissions
     var perm_buf: [256:0]u8 = undefined;
@@ -52,14 +54,14 @@ test "errfunc is called on directory access error" {
 
     // Create a file we can access
     const accessible_file = test_dir ++ "/test.txt";
-    var f = try std.fs.cwd().createFile(accessible_file, .{});
-    f.close();
+    var f = try std.Io.Dir.cwd().createFile(io, accessible_file, .{});
+    f.close(io);
 
     // Change to test directory
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir);
-    defer std.posix.chdir(old_cwd) catch {};
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Try to glob with errfunc
     const pattern = try allocator.dupeZ(u8, "*/*");
@@ -77,15 +79,16 @@ test "errfunc is called on directory access error" {
 
 test "errfunc returning non-zero causes ZLOB_ABORTED" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Create a directory structure with a restricted directory
     const test_dir = "/tmp/test_errfunc_abort";
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    std.Io.Dir.cwd().createDir(io, test_dir, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, test_dir) catch {};
 
     // Create a subdirectory
     const restricted_dir = test_dir ++ "/restricted";
-    std.fs.cwd().makeDir(restricted_dir) catch {};
+    std.Io.Dir.cwd().createDir(io, restricted_dir, .default_dir) catch {};
 
     // Remove read permissions
     var perm_buf: [256:0]u8 = undefined;
@@ -97,10 +100,10 @@ test "errfunc returning non-zero causes ZLOB_ABORTED" {
     if (chmod_result != 0) return error.SkipZigTest;
 
     // Change to test directory
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir);
-    defer std.posix.chdir(old_cwd) catch {};
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Try to glob with errfunc that returns non-zero
     const pattern = try allocator.dupeZ(u8, "*/*");
@@ -118,15 +121,16 @@ test "errfunc returning non-zero causes ZLOB_ABORTED" {
 
 test "ZLOB_ERR flag causes abort on directory error" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Create a directory structure with a restricted directory
     const test_dir = "/tmp/test_zlob_err_flag";
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    std.Io.Dir.cwd().createDir(io, test_dir, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, test_dir) catch {};
 
     // Create a subdirectory
     const restricted_dir = test_dir ++ "/restricted";
-    std.fs.cwd().makeDir(restricted_dir) catch {};
+    std.Io.Dir.cwd().createDir(io, restricted_dir, .default_dir) catch {};
 
     // Remove read permissions
     var perm_buf: [256:0]u8 = undefined;
@@ -138,10 +142,10 @@ test "ZLOB_ERR flag causes abort on directory error" {
     if (chmod_result != 0) return error.SkipZigTest;
 
     // Change to test directory
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir);
-    defer std.posix.chdir(old_cwd) catch {};
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Try to glob with ZLOB_ERR flag
     const pattern = try allocator.dupeZ(u8, "*/*");
@@ -157,14 +161,15 @@ test "ZLOB_ERR flag causes abort on directory error" {
 
 test "errfunc NULL with ZLOB_ERR still aborts" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Create a directory structure with a restricted directory
     const test_dir = "/tmp/test_null_errfunc";
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    std.Io.Dir.cwd().createDir(io, test_dir, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, test_dir) catch {};
 
     const restricted_dir = test_dir ++ "/restricted";
-    std.fs.cwd().makeDir(restricted_dir) catch {};
+    std.Io.Dir.cwd().createDir(io, restricted_dir, .default_dir) catch {};
 
     var perm_buf: [256:0]u8 = undefined;
     const perm_path = try std.fmt.bufPrintZ(&perm_buf, "{s}", .{restricted_dir});
@@ -174,10 +179,10 @@ test "errfunc NULL with ZLOB_ERR still aborts" {
     // Skip test if chmod failed
     if (chmod_result != 0) return error.SkipZigTest;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir);
-    defer std.posix.chdir(old_cwd) catch {};
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*/*");
     defer allocator.free(pattern);

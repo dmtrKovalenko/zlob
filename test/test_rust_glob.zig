@@ -13,12 +13,13 @@ const fs = std.fs;
 
 const TestDir = struct {
     dir: std.testing.TmpDir,
-    path: []const u8,
+    path: [:0]const u8,
     allocator: std.mem.Allocator,
 
     fn init(allocator: std.mem.Allocator) !TestDir {
-        const tmp = std.testing.tmpDir(.{});
-        const path = try tmp.dir.realpathAlloc(allocator, ".");
+        const io = std.Io.Threaded.global_single_threaded.io();
+        var tmp = std.testing.tmpDir(.{});
+        const path = try tmp.dir.realPathFileAlloc(io, ".", allocator);
         return .{
             .dir = tmp,
             .path = path,
@@ -32,15 +33,16 @@ const TestDir = struct {
     }
 
     fn mkFile(self: *TestDir, path: []const u8, is_directory: bool) !void {
+        const io = std.Io.Threaded.global_single_threaded.io();
         if (is_directory) {
-            try self.dir.dir.makePath(path);
+            try self.dir.dir.createDirPath(io, path);
         } else {
             // Ensure parent directories exist
             if (fs.path.dirname(path)) |parent| {
-                try self.dir.dir.makePath(parent);
+                try self.dir.dir.createDirPath(io, parent);
             }
-            const file = try self.dir.dir.createFile(path, .{});
-            file.close();
+            var file = try self.dir.dir.createFile(io, path, .{});
+            file.close(io);
         }
     }
 
@@ -61,14 +63,15 @@ const TestDir = struct {
     }
 
     fn globVec(self: *TestDir, allocator: std.mem.Allocator, pattern: []const u8) ![][]const u8 {
+        const io = std.Io.Threaded.global_single_threaded.io();
         // Change to test directory
-        const old_cwd = try std.process.getCwdAlloc(allocator);
+        const old_cwd = try std.process.currentPathAlloc(io, allocator);
         defer allocator.free(old_cwd);
-        try std.posix.chdir(self.path);
-        defer std.posix.chdir(old_cwd) catch {};
+        try std.process.setCurrentPath(io, self.path);
+        defer std.process.setCurrentPath(io, old_cwd) catch {};
 
         // Use match API - returns ?ZlobResults
-        var result = try zlob.match(allocator, pattern, 0) orelse {
+        var result = try zlob.match(allocator, io, pattern, 0) orelse {
             // No matches - return empty array
             return try allocator.alloc([]const u8, 0);
         };

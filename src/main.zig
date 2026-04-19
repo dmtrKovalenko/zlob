@@ -2,8 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zlob = @import("zlob");
 const build_options = @import("build_options");
-const fs = std.fs;
 const Io = std.Io;
+const File = std.Io.File;
 
 const version = build_options.version;
 
@@ -25,10 +25,10 @@ const Options = struct {
 };
 
 const BufferedWriter = struct {
-    file_writer: fs.File.Writer,
+    file_writer: File.Writer,
 
-    fn init(file: fs.File, buf: []u8) BufferedWriter {
-        return .{ .file_writer = file.writer(buf) };
+    fn init(io: Io, file: File, buf: []u8) BufferedWriter {
+        return .{ .file_writer = file.writer(io, buf) };
     }
 
     fn writer(self: *BufferedWriter) *Io.Writer {
@@ -39,24 +39,6 @@ const BufferedWriter = struct {
         self.file_writer.interface.flush() catch {};
     }
 };
-
-/// Get stdout file handle cross-platform
-fn getStdOutFile() fs.File {
-    if (builtin.os.tag == .windows) {
-        return fs.File{ .handle = std.os.windows.GetStdHandle(std.os.windows.STD_OUTPUT_HANDLE) catch unreachable };
-    } else {
-        return fs.File{ .handle = std.posix.STDOUT_FILENO };
-    }
-}
-
-/// Get stderr file handle cross-platform
-fn getStdErrFile() fs.File {
-    if (builtin.os.tag == .windows) {
-        return fs.File{ .handle = std.os.windows.GetStdHandle(std.os.windows.STD_ERROR_HANDLE) catch unreachable };
-    } else {
-        return fs.File{ .handle = std.posix.STDERR_FILENO };
-    }
-}
 
 fn printVersion(w: *Io.Writer) void {
     w.print("zlob {s}\n", .{version}) catch {};
@@ -107,14 +89,11 @@ fn printHelp(w: *Io.Writer, program_name: []const u8) void {
     , .{ program_name, program_name, program_name, program_name, program_name, program_name, program_name, program_name }) catch {};
 }
 
-fn parseArgs(allocator: std.mem.Allocator, stderr: *Io.Writer) !Options {
-    var args = try std.process.argsWithAllocator(allocator);
-
+fn parseArgs(args_iter: *std.process.Args.Iterator, stderr: *Io.Writer) !Options {
     var opts = Options{};
-    const program_name = args.next() orelse "zlob";
-    _ = program_name;
+    _ = args_iter.next(); // program name
 
-    while (args.next()) |arg| {
+    while (args_iter.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "-")) {
             if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
                 opts.show_help = true;
@@ -123,7 +102,7 @@ fn parseArgs(allocator: std.mem.Allocator, stderr: *Io.Writer) !Options {
             } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--all")) {
                 opts.show_all = true;
             } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--limit")) {
-                const limit_str = args.next() orelse {
+                const limit_str = args_iter.next() orelse {
                     return error.MissingArgument;
                 };
                 opts.limit = std.fmt.parseInt(usize, limit_str, 10) catch {
@@ -169,25 +148,22 @@ fn parseArgs(allocator: std.mem.Allocator, stderr: *Io.Writer) !Options {
     return opts;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-    const allocator = arena.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.arena.allocator();
 
     // Buffered writers for stdout and stderr
     var stdout_buf: [8192]u8 = undefined;
     var stderr_buf: [4096]u8 = undefined;
-    const stdout_file = getStdOutFile();
-    const stderr_file = getStdErrFile();
-    var stdout_writer = BufferedWriter.init(stdout_file, &stdout_buf);
-    var stderr_writer = BufferedWriter.init(stderr_file, &stderr_buf);
+    var stdout_writer = BufferedWriter.init(io, File.stdout(), &stdout_buf);
+    var stderr_writer = BufferedWriter.init(io, File.stderr(), &stderr_buf);
     const stdout = stdout_writer.writer();
     const stderr = stderr_writer.writer();
 
-    const opts = parseArgs(allocator, stderr) catch |err| {
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer args_iter.deinit();
+
+    const opts = parseArgs(&args_iter, stderr) catch |err| {
         stderr.print("error: {}\n", .{err}) catch {};
         stderr_writer.flush();
         std.process.exit(1);
@@ -215,7 +191,7 @@ pub fn main() !void {
     if (opts.path) |path| {
         // Combine path and pattern: trim trailing separators (/ on all platforms, \ on Windows)
         const sep_chars = if (builtin.os.tag == .windows) "/\\" else "/";
-        const trimmed_path = std.mem.trimRight(u8, path, sep_chars);
+        const trimmed_path = std.mem.trimEnd(u8, path, sep_chars);
         full_pattern = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ trimmed_path, pattern });
     } else {
         full_pattern = pattern;
@@ -233,7 +209,7 @@ pub fn main() !void {
     flags.nomagic = false; // always enable magic, since we require a pattern argument
     _ = &flags; // suppress unused warning if match accepts anytype
 
-    var match_result = zlob.match(allocator, full_pattern, flags) catch |err| {
+    var match_result = zlob.match(allocator, io, full_pattern, flags) catch |err| {
         stderr.print("error: glob failed: {}\n", .{err}) catch {};
         stderr_writer.flush();
         std.process.exit(1);

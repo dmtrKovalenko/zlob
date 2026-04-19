@@ -13,6 +13,7 @@ fn naiveFind(haystack: []const u8, needle: u8) ?usize {
 }
 
 pub fn main() !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     std.debug.print("=== SIMD vs Naive Character Search Benchmark ===\n\n", .{});
 
     const test_cases = [_]struct {
@@ -51,15 +52,16 @@ pub fn main() !void {
 
         // Benchmark naive implementation
         {
-            const start = std.time.nanoTimestamp();
+            const start = std.Io.Timestamp.now(io, .awake);
             var result: ?usize = null;
             var i: usize = 0;
             while (i < ITERATIONS) : (i += 1) {
                 result = naiveFind(tc.haystack, tc.needle);
                 std.mem.doNotOptimizeAway(&result); // Prevent optimization
             }
-            const end = std.time.nanoTimestamp();
-            naive_elapsed = @as(f64, @floatFromInt(end - start)) / @as(f64, ITERATIONS);
+            const end = std.Io.Timestamp.now(io, .awake);
+            const elapsed_ns: u64 = @intCast(start.durationTo(end).nanoseconds);
+            naive_elapsed = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, ITERATIONS);
 
             std.debug.print("  Native:  {d:.2}ns per search", .{naive_elapsed});
             if (result) |pos| {
@@ -71,15 +73,16 @@ pub fn main() !void {
 
         // Benchmark SIMD implementation
         {
-            const start = std.time.nanoTimestamp();
+            const start = std.Io.Timestamp.now(io, .awake);
             var result: ?usize = null;
             var i: usize = 0;
             while (i < ITERATIONS) : (i += 1) {
                 result = zlob.simdFindChar(tc.haystack, tc.needle);
                 std.mem.doNotOptimizeAway(&result); // Prevent optimization
             }
-            const end = std.time.nanoTimestamp();
-            simd_elapsed = @as(f64, @floatFromInt(end - start)) / @as(f64, ITERATIONS);
+            const end = std.Io.Timestamp.now(io, .awake);
+            const elapsed_ns: u64 = @intCast(start.durationTo(end).nanoseconds);
+            simd_elapsed = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, ITERATIONS);
 
             std.debug.print("  SIMD:   {d:.2}ns per search", .{simd_elapsed});
             if (result) |pos| {

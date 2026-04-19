@@ -397,23 +397,25 @@ fn createBraceTestFiles(allocator: std.mem.Allocator, base_path: []const u8) !vo
         _ = c.mkdir(&path_z, 0o755);
     }
 
+    const io = std.Io.Threaded.global_single_threaded.io();
+
     // Create files
     for (files) |file| {
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_path, file });
         defer allocator.free(full_path);
 
-        const f = std.fs.cwd().createFile(full_path, .{}) catch continue;
-        defer f.close();
-        _ = f.write("test content\n") catch {};
+        var f = std.Io.Dir.cwd().createFile(io, full_path, .{}) catch continue;
+        defer f.close(io);
+        _ = f.writeStreamingAll(io, "test content\n") catch {};
     }
 }
 
 fn cleanupBraceTestFiles(allocator: std.mem.Allocator, base_path: []const u8) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const full_path_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{base_path});
     defer allocator.free(full_path_str);
 
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, io, .{
         .argv = &[_][]const u8{ "rm", "-rf", full_path_str },
     }) catch return;
     allocator.free(result.stdout);
@@ -421,10 +423,11 @@ fn cleanupBraceTestFiles(allocator: std.mem.Allocator, base_path: []const u8) !v
 }
 
 /// Helper to change to test directory and restore on defer
-fn withTestDir(allocator: std.mem.Allocator, base_path: []const u8, cwd_buf: *[4096]u8) ![]const u8 {
+fn withTestDir(allocator: std.mem.Allocator, base_path: []const u8) ![]const u8 {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{base_path});
-    const old_cwd = try std.posix.getcwd(cwd_buf);
-    try std.posix.chdir(test_dir_str);
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    try std.process.setCurrentPath(io, test_dir_str);
     return old_cwd;
 }
 
@@ -477,10 +480,11 @@ test "ZLOB_BRACE filesystem - simple extension alternatives" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*.{toml,lock}");
     defer allocator.free(pattern);
@@ -505,10 +509,11 @@ test "ZLOB_BRACE filesystem - wildcard with extension alternatives" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "config.{yaml,yml}");
     defer allocator.free(pattern);
@@ -533,10 +538,11 @@ test "ZLOB_BRACE filesystem - directory alternatives" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "{src,lib}/*.c");
     defer allocator.free(pattern);
@@ -560,10 +566,11 @@ test "ZLOB_BRACE filesystem - C source and header files" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "src/*.{c,h}");
     defer allocator.free(pattern);
@@ -596,10 +603,11 @@ test "ZLOB_BRACE filesystem - recursive with extension alternatives" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "**/*.{c,h}");
     defer allocator.free(pattern);
@@ -634,10 +642,11 @@ test "ZLOB_BRACE filesystem - recursive with directory alternatives" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "{src,lib}/**/*.c");
     defer allocator.free(pattern);
@@ -662,10 +671,11 @@ test "ZLOB_BRACE filesystem - complex pattern with multiple brace groups" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "{src,lib}/**/*.{c,h}");
     defer allocator.free(pattern);
@@ -693,10 +703,11 @@ test "ZLOB_BRACE filesystem - single alternative (should still work)" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*.{json}");
     defer allocator.free(pattern);
@@ -720,10 +731,11 @@ test "ZLOB_BRACE filesystem - many alternatives" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*.{json,yaml,yml,toml,lock,md,txt,css,js,ts}");
     defer allocator.free(pattern);
@@ -747,10 +759,11 @@ test "ZLOB_BRACE filesystem - no matches returns NOMATCH" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*.{xyz,abc,nonexistent}");
     defer allocator.free(pattern);
@@ -772,10 +785,11 @@ test "ZLOB_BRACE filesystem - without flag treats braces as literal" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Without ZLOB_BRACE, {toml,lock} is treated as literal
     const pattern = try allocator.dupeZ(u8, "*.{toml,lock}");
@@ -803,10 +817,11 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_MARK" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "{src,lib,docs}");
     defer allocator.free(pattern);
@@ -835,10 +850,11 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_NOSORT" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*.{toml,lock,json}");
     defer allocator.free(pattern);
@@ -862,10 +878,11 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_NOCHECK" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*.{nonexistent1,nonexistent2}");
     defer allocator.free(pattern);
@@ -890,10 +907,11 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_ONLYDIR" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Pattern that could match both files and directories
     const pattern = try allocator.dupeZ(u8, "{src,lib,docs,README.md}/");
@@ -922,10 +940,11 @@ test "ZLOB_BRACE filesystem - with ZLOB_APPEND" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     var pzlob: zlob.zlob_t = undefined;
 
@@ -961,10 +980,11 @@ test "ZLOB_BRACE filesystem - many files with brace pattern" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Pattern that will scan many directories
     const pattern = try allocator.dupeZ(u8, "**/*.{c,h,txt,md,json,yaml,yml,toml,lock,css,js,ts}");
@@ -993,10 +1013,11 @@ test "ZLOB_BRACE filesystem - Cargo pattern (Rust project)" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "Cargo.{toml,lock}");
     defer allocator.free(pattern);
@@ -1021,10 +1042,11 @@ test "ZLOB_BRACE filesystem - documentation pattern" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "**/*.{md,txt}");
     defer allocator.free(pattern);
@@ -1048,10 +1070,11 @@ test "ZLOB_BRACE filesystem - web assets pattern" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*.{js,ts,css}");
     defer allocator.free(pattern);
@@ -1075,10 +1098,11 @@ test "ZLOB_BRACE filesystem - config files pattern" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*.{json,yaml,yml,toml}");
     defer allocator.free(pattern);
@@ -1102,10 +1126,11 @@ test "ZLOB_BRACE filesystem - header files in multiple directories" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "{src,lib,include}/**/*.h");
     defer allocator.free(pattern);
@@ -1139,10 +1164,11 @@ test "ZLOB_BRACE filesystem - wildcard dir with brace extension" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*/*.{c,h}");
     defer allocator.free(pattern);
@@ -1180,10 +1206,11 @@ test "ZLOB_BRACE filesystem - literal prefix with wildcard dir and brace extensi
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "src/*/*.{c,h}");
     defer allocator.free(pattern);
@@ -1208,10 +1235,11 @@ test "ZLOB_BRACE filesystem - question mark wildcard with brace extension" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "src/????.{c,h}");
     defer allocator.free(pattern);
@@ -1236,10 +1264,11 @@ test "ZLOB_BRACE filesystem - multiple wildcard dirs with brace extension" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*/*/*.{c,h}");
     defer allocator.free(pattern);
@@ -1266,10 +1295,11 @@ test "ZLOB_BRACE filesystem - brace dir AND wildcard dir AND brace extension" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_brace", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "{src,lib}/*/*.{c,h}");
     defer allocator.free(pattern);

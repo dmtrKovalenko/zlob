@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 // std.posix is not available on Windows
 const posix = if (builtin.os.tag != .windows) std.posix else struct {
     // Stubs for Windows - provide errno values for compatibility
@@ -55,7 +56,7 @@ pub const default_backend: Backend = switch (builtin.os.tag) {
     else => .std_fs,
 };
 
-pub const EntryKind = std.fs.File.Kind;
+pub const EntryKind = std.Io.File.Kind;
 
 pub const Entry = struct {
     /// Path relative to the starting directory
@@ -150,7 +151,7 @@ pub const WalkerConfig = struct {
     dir_filter: ?DirFilter = null,
 
     /// Base directory to start from. If null, path is opened relative to cwd.
-    base_dir: ?std.fs.Dir = null,
+    base_dir: ?std.Io.Dir = null,
 
     /// Error callback for directory open failures.
     /// Called with null-terminated path and errno when a directory cannot be opened.
@@ -243,10 +244,11 @@ const RecursiveGetdents64Walker = struct {
         path_content: [256]u8,
     };
 
-    pub fn init(allocator: Allocator, start_path: []const u8, config: WalkerConfig) !RecursiveGetdents64Walker {
+    pub fn init(allocator: Allocator, io: Io, start_path: []const u8, config: WalkerConfig) !RecursiveGetdents64Walker {
         if (!is_linux) {
             @compileError("Getdents64Walker is only available on Linux");
         }
+        _ = io; // Linux getdents64 backend uses raw syscalls; accepted for API parity with StdFsWalker.
 
         // Use smaller buffer for single-directory iteration (max_depth=0)
         // since we won't be recursing and don't need as much buffering
@@ -255,7 +257,7 @@ const RecursiveGetdents64Walker = struct {
         errdefer allocator.free(buffer);
 
         const dir_stack = std.ArrayList(DirEntry).initCapacity(allocator, 16) catch
-            std.ArrayList(DirEntry){ .items = &.{}, .capacity = 0 };
+            std.ArrayList(DirEntry).empty;
 
         const start_fd = if (config.base_dir) |bd| open: {
             // Use openatZ to open relative to base_dir
@@ -264,7 +266,7 @@ const RecursiveGetdents64Walker = struct {
             @memcpy(path_z[0..start_path.len], start_path);
             path_z[start_path.len] = 0;
 
-            break :open posix.openatZ(bd.fd, &path_z, .{
+            break :open posix.openatZ(bd.handle, &path_z, .{
                 .ACCMODE = .RDONLY,
                 .DIRECTORY = true,
                 .CLOEXEC = true,
@@ -471,14 +473,15 @@ const RecursiveGetdents64Walker = struct {
 
 const StdFsWalker = struct {
     allocator: Allocator,
+    io: Io,
     config: WalkerConfig,
 
     // Stack of directories to process (LIFO order)
     dir_stack: std.ArrayList(StackEntry),
 
     // Current directory being iterated
-    current_dir: ?std.fs.Dir,
-    current_iter: ?std.fs.Dir.Iterator,
+    current_dir: ?std.Io.Dir,
+    current_iter: ?std.Io.Dir.Iterator,
     current_depth: usize,
 
     // Path tracking
@@ -492,7 +495,7 @@ const StdFsWalker = struct {
     finished: bool,
 
     const StackEntry = struct {
-        dir: std.fs.Dir,
+        dir: std.Io.Dir,
         depth: usize,
         path_len: usize,
         // Heap-allocated path prefix to restore when popping
@@ -501,15 +504,15 @@ const StdFsWalker = struct {
         path_prefix: []u8,
     };
 
-    pub fn init(allocator: Allocator, start_path: []const u8, config: WalkerConfig) !StdFsWalker {
-        const root = config.base_dir orelse std.fs.cwd();
-        var dir = root.openDir(start_path, .{ .iterate = true }) catch |err| {
+    pub fn init(allocator: Allocator, io: Io, start_path: []const u8, config: WalkerConfig) !StdFsWalker {
+        const root = config.base_dir orelse std.Io.Dir.cwd();
+        var dir = root.openDir(io, start_path, .{ .iterate = true }) catch |err| {
             try handleOpenErrorStd(start_path, err, config);
             return err;
         };
-        errdefer dir.close();
+        errdefer dir.close(io);
 
-        var dir_stack = std.ArrayList(StackEntry){};
+        var dir_stack = std.ArrayList(StackEntry).empty;
         // Only pre-allocate stack if we're doing recursion
         if (config.max_depth > 0) {
             dir_stack.ensureTotalCapacity(allocator, 64) catch {};
@@ -517,6 +520,7 @@ const StdFsWalker = struct {
 
         return StdFsWalker{
             .allocator = allocator,
+            .io = io,
             .config = config,
             .dir_stack = dir_stack,
             .current_dir = dir,
@@ -548,14 +552,15 @@ const StdFsWalker = struct {
     }
 
     pub fn deinit(self: *StdFsWalker) void {
+        const io = self.io;
         // Close current directory if still open
         if (self.current_dir) |*dir| {
-            dir.close();
+            dir.close(io);
         }
 
         // Close any remaining stacked directories and free path prefixes
         for (self.dir_stack.items) |*entry| {
-            entry.dir.close();
+            entry.dir.close(io);
             if (entry.path_prefix.len > 0) {
                 self.allocator.free(entry.path_prefix);
             }
@@ -565,11 +570,12 @@ const StdFsWalker = struct {
 
     pub fn next(self: *StdFsWalker) !?Entry {
         if (self.finished) return null;
+        const io = self.io;
 
         while (true) {
             // Try to get next entry from current directory
             if (self.current_iter) |*iter| {
-                if (iter.next() catch null) |entry| {
+                if (iter.next(io) catch null) |entry| {
                     // Unified filtering for ".", "..", and hidden files
                     if (shouldSkipEntry(entry.name, self.config.hidden)) continue;
 
@@ -595,11 +601,11 @@ const StdFsWalker = struct {
                             true;
 
                         if (should_descend) {
-                            if (self.current_dir.?.openDir(entry.name, .{ .iterate = true })) |subdir| {
+                            if (self.current_dir.?.openDir(io, entry.name, .{ .iterate = true })) |subdir| {
                                 // Allocate path prefix - only what we need
                                 const path_copy = self.allocator.alloc(u8, self.path_len) catch {
                                     var sd = subdir;
-                                    sd.close();
+                                    sd.close(io);
                                     continue;
                                 };
                                 @memcpy(path_copy, self.path_buffer[0..self.path_len]);
@@ -612,7 +618,7 @@ const StdFsWalker = struct {
                                 }) catch {
                                     self.allocator.free(path_copy);
                                     var sd = subdir;
-                                    sd.close();
+                                    sd.close(io);
                                 };
                             } else |_| {}
                         }
@@ -634,7 +640,7 @@ const StdFsWalker = struct {
 
             // Current directory exhausted - close it and pop from stack
             if (self.current_dir) |*dir| {
-                dir.close();
+                dir.close(io);
                 self.current_dir = null;
                 self.current_iter = null;
             }
@@ -686,7 +692,7 @@ pub const SingleDirIterator = struct {
     /// Open a directory for single-level iteration using raw syscalls.
     /// If base_dir is provided, opens path relative to it; otherwise relative to cwd.
     /// hidden_config controls filtering of ".", "..", and hidden files.
-    pub fn open(path: []const u8, base_dir: ?std.fs.Dir, hidden_config: HiddenConfig) !SingleDirIterator {
+    pub fn open(path: []const u8, base_dir: ?std.Io.Dir, hidden_config: HiddenConfig) !SingleDirIterator {
         if (!is_linux) {
             @compileError("SingleDirIterator.open requires Linux");
         }
@@ -701,7 +707,7 @@ pub const SingleDirIterator = struct {
 
         // Use raw syscall for maximum performance
         const fd: i32 = if (base_dir) |bd| blk: {
-            const rc = linux.openat(bd.fd, &path_z, flags, 0);
+            const rc = linux.openat(bd.handle, &path_z, flags, 0);
             const signed: isize = @bitCast(rc);
             if (signed < 0) return error.AccessDenied;
             break :blk @intCast(rc);
@@ -774,8 +780,9 @@ pub const SingleDirIterator = struct {
 };
 
 pub const StdDirIterator = struct {
-    dir: std.fs.Dir,
-    iter: std.fs.Dir.Iterator,
+    io: Io,
+    dir: std.Io.Dir,
+    iter: std.Io.Dir.Iterator,
     hidden: HiddenConfig,
 
     pub const IterEntry = struct {
@@ -783,10 +790,11 @@ pub const StdDirIterator = struct {
         kind: EntryKind,
     };
 
-    pub fn open(path: []const u8, base_dir: ?std.fs.Dir, hidden_config: HiddenConfig) !StdDirIterator {
-        const root = base_dir orelse std.fs.cwd();
-        var dir = try root.openDir(path, .{ .iterate = true });
+    pub fn open(io: Io, path: []const u8, base_dir: ?std.Io.Dir, hidden_config: HiddenConfig) !StdDirIterator {
+        const root = base_dir orelse std.Io.Dir.cwd();
+        var dir = try root.openDir(io, path, .{ .iterate = true });
         return StdDirIterator{
+            .io = io,
             .dir = dir,
             .iter = dir.iterate(),
             .hidden = hidden_config,
@@ -794,12 +802,12 @@ pub const StdDirIterator = struct {
     }
 
     pub fn close(self: *StdDirIterator) void {
-        self.dir.close();
+        self.dir.close(self.io);
     }
 
     pub fn next(self: *StdDirIterator) ?IterEntry {
         while (true) {
-            const entry = self.iter.next() catch return null;
+            const entry = self.iter.next(self.io) catch return null;
             if (entry) |e| {
                 // Unified filtering for ".", "..", and hidden files
                 if (shouldSkipEntry(e.name, self.hidden)) continue;
@@ -839,16 +847,17 @@ pub const DirIterator = struct {
         }
     };
 
+    io: Io,
     /// Internal state - either real fs, std_fs (for Windows), or ALTDIRFUNC mode
     mode: union(enum) {
         /// Real filesystem using C's opendir/readdir (POSIX only)
         real_fs: struct {
             dir: ?*c.DIR,
         },
-        /// Zig std.fs based iteration (Windows and fallback)
+        /// Zig std.Io based iteration (Windows and fallback)
         std_fs: struct {
-            dir: std.fs.Dir,
-            iter: std.fs.Dir.Iterator,
+            dir: std.Io.Dir,
+            iter: std.Io.Dir.Iterator,
         },
         /// ALTDIRFUNC custom callbacks
         alt_dirfunc: struct {
@@ -900,7 +909,7 @@ pub const DirIterator = struct {
     /// If base_dir is provided, opens path relative to it; otherwise relative to cwd.
     /// hidden_config controls filtering of ".", "..", and hidden files.
     /// fs allows using ALTDIRFUNC callbacks for virtual filesystem support.
-    pub fn openWithProvider(path: []const u8, base_dir: ?std.fs.Dir, hidden_config: HiddenConfig, fs: AltFs) !DirIterator {
+    pub fn openWithProvider(io: Io, path: []const u8, base_dir: ?std.Io.Dir, hidden_config: HiddenConfig, fs: AltFs) !DirIterator {
         if (path.len >= 4096) return error.NameTooLong;
 
         if (fs.isAltDirFunc()) {
@@ -913,6 +922,7 @@ pub const DirIterator = struct {
             if (handle == null) return error.FileNotFound;
 
             return DirIterator{
+                .io = io,
                 .mode = .{ .alt_dirfunc = .{
                     .handle = handle,
                     .readdir = fs.readdir.?,
@@ -923,11 +933,12 @@ pub const DirIterator = struct {
         }
 
         // When base_dir is set (need relative opens) or on Windows or when libc
-        // is not available, use std.fs
+        // is not available, use std.Io
         if (base_dir != null or builtin.os.tag == .windows or !has_libc) {
-            const root = base_dir orelse std.fs.cwd();
-            var dir = try root.openDir(path, .{ .iterate = true });
+            const root = base_dir orelse std.Io.Dir.cwd();
+            var dir = try root.openDir(io, path, .{ .iterate = true });
             return DirIterator{
+                .io = io,
                 .mode = .{ .std_fs = .{
                     .dir = dir,
                     .iter = dir.iterate(),
@@ -951,6 +962,7 @@ pub const DirIterator = struct {
         }
 
         return DirIterator{
+            .io = io,
             .mode = .{ .real_fs = .{ .dir = dir } },
             .hidden = hidden_config,
         };
@@ -959,8 +971,8 @@ pub const DirIterator = struct {
     /// Open a directory for single-level iteration (backward compatible).
     /// If base_dir is provided, opens path relative to it; otherwise relative to cwd.
     /// hidden_config controls filtering of ".", "..", and hidden files.
-    pub fn open(path: []const u8, base_dir: ?std.fs.Dir, hidden_config: HiddenConfig) !DirIterator {
-        return openWithProvider(path, base_dir, hidden_config, AltFs.real_fs);
+    pub fn open(io: Io, path: []const u8, base_dir: ?std.Io.Dir, hidden_config: HiddenConfig) !DirIterator {
+        return openWithProvider(io, path, base_dir, hidden_config, AltFs.real_fs);
     }
 
     /// Configuration for error handling when opening a directory fails.
@@ -973,13 +985,14 @@ pub const DirIterator = struct {
     /// On failure, invokes err_callback (if set) and returns null instead of an error.
     /// Returns error.Aborted only when the callback requests abort or abort_on_error is set.
     pub fn openHandled(
+        io: Io,
         path: []const u8,
-        base_dir: ?std.fs.Dir,
+        base_dir: ?std.Io.Dir,
         hidden_config: HiddenConfig,
         fs: AltFs,
         err_config: OpenErrorConfig,
     ) error{Aborted}!?DirIterator {
-        return openWithProvider(path, base_dir, hidden_config, fs) catch |err| {
+        return openWithProvider(io, path, base_dir, hidden_config, fs) catch |err| {
             if (err_config.err_callback) |cb| {
                 var path_z: [4096:0]u8 = undefined;
                 const len = @min(path.len, 4095);
@@ -1005,7 +1018,7 @@ pub const DirIterator = struct {
                 }
             },
             .std_fs => |*std_mode| {
-                std_mode.dir.close();
+                std_mode.dir.close(self.io);
             },
             .alt_dirfunc => |*alt| {
                 alt.closedir(alt.handle);
@@ -1043,7 +1056,7 @@ pub const DirIterator = struct {
                 return null;
             },
             .std_fs => |*std_mode| {
-                while (std_mode.iter.next() catch null) |entry| {
+                while (std_mode.iter.next(self.io) catch null) |entry| {
                     // Unified filtering for ".", "..", and hidden files
                     if (shouldSkipEntry(entry.name, self.hidden)) continue;
 
@@ -1128,11 +1141,11 @@ test "walker basic" {
     try std.testing.expect(count > 0);
 }
 
-test "EntryKind is std.fs.File.Kind" {
+test "EntryKind is std.Io.File.Kind" {
     // EntryKind is a direct alias — verify the variants we rely on exist
-    try std.testing.expectEqual(EntryKind.file, std.fs.File.Kind.file);
-    try std.testing.expectEqual(EntryKind.directory, std.fs.File.Kind.directory);
-    try std.testing.expectEqual(EntryKind.sym_link, std.fs.File.Kind.sym_link);
+    try std.testing.expectEqual(EntryKind.file, std.Io.File.Kind.file);
+    try std.testing.expectEqual(EntryKind.directory, std.Io.File.Kind.directory);
+    try std.testing.expectEqual(EntryKind.sym_link, std.Io.File.Kind.sym_link);
 }
 
 // ============================================================================

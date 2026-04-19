@@ -49,20 +49,23 @@ fn createTestDirStructure(allocator: std.mem.Allocator, base_path: []const u8) !
         _ = c.mkdir(&path_z, 0o755);
     }
 
+    const io = std.Io.Threaded.global_single_threaded.io();
+
     // Create all files
     for (files) |file| {
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_path, file });
         defer allocator.free(full_path);
 
-        const f = std.fs.cwd().createFile(full_path, .{}) catch continue;
-        defer f.close();
+        var f = std.Io.Dir.cwd().createFile(io, full_path, .{}) catch continue;
+        defer f.close(io);
         const content = "test content\n";
-        _ = f.write(content) catch {};
+        _ = f.writeStreamingAll(io, content) catch {};
     }
 }
 
 // Helper to cleanup test directory structure
 fn cleanupTestDirStructure(allocator: std.mem.Allocator, base_path: []const u8) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const full_path_str = try std.fmt.allocPrint(allocator, "{s}/test_zlob_recursive", .{base_path});
     defer allocator.free(full_path_str);
 
@@ -71,8 +74,7 @@ fn cleanupTestDirStructure(allocator: std.mem.Allocator, base_path: []const u8) 
     full_path[full_path_str.len] = 0;
 
     // Use system rm -rf to recursively delete
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, io, .{
         .argv = &[_][]const u8{ "rm", "-rf", full_path_str },
     }) catch return;
     allocator.free(result.stdout);
@@ -96,12 +98,13 @@ test "recursive glob - **/*.c finds all C files" {
     test_dir[test_dir_str.len] = 0;
 
     // Save current directory
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
 
     // Change to test directory
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "**/*.c");
     defer allocator.free(pattern);
@@ -131,10 +134,11 @@ test "recursive glob - dir1/**/*.c finds C files in dir1" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "dir1/**/*.c");
     defer allocator.free(pattern);
@@ -162,10 +166,11 @@ test "recursive glob - **/*.h finds all header files" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "**/*.h");
     defer allocator.free(pattern);
@@ -193,10 +198,11 @@ test "recursive glob - dir2/**/*.c finds files in dir2 subdirectories" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "dir2/**/*.c");
     defer allocator.free(pattern);
@@ -224,10 +230,11 @@ test "recursive glob - **/*.txt finds all text files" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "**/*.txt");
     defer allocator.free(pattern);
@@ -255,10 +262,11 @@ test "recursive glob - no matches returns ZLOB_NOMATCH" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "**/*.nonexistent");
     defer allocator.free(pattern);
@@ -284,10 +292,11 @@ test "recursive glob - ZLOB_APPEND correctly accumulates results" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     var pzlob: glob.zlob_t = undefined;
 
@@ -324,10 +333,11 @@ test "recursive glob - empty pattern component" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "**/");
     defer allocator.free(pattern);
@@ -354,10 +364,11 @@ test "glibc compatible - ** treated as * without ZLOB_DOUBLESTAR_RECURSIVE" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test: Pattern "**/*.c" WITHOUT ZLOB_DOUBLESTAR_RECURSIVE flag
     // Expected behavior (matching glibc):

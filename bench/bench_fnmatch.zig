@@ -16,18 +16,21 @@ const ITERATIONS = 1_000_000;
 const WARMUP = 100;
 
 fn benchmark(comptime label: []const u8, comptime func: anytype) void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+
     // Warmup
     for (0..WARMUP) |_| {
         std.mem.doNotOptimizeAway(func());
     }
 
-    const start = std.time.nanoTimestamp();
+    const start = std.Io.Timestamp.now(io, .awake);
     for (0..ITERATIONS) |_| {
         std.mem.doNotOptimizeAway(func());
     }
-    const end = std.time.nanoTimestamp();
+    const end = std.Io.Timestamp.now(io, .awake);
 
-    const elapsed_ns: f64 = @floatFromInt(end - start);
+    const elapsed_u64: u64 = @intCast(start.durationTo(end).nanoseconds);
+    const elapsed_ns: f64 = @floatFromInt(elapsed_u64);
     const per_op = elapsed_ns / @as(f64, ITERATIONS);
     const ops_per_sec = @as(f64, ITERATIONS) / (elapsed_ns / 1_000_000_000.0);
     std.debug.print("  {s:<45} {d:>8.1}ns/op  {d:>10.0} ops/s\n", .{ label, per_op, ops_per_sec });

@@ -161,28 +161,36 @@ pub fn expandTilde(allocator: Allocator, pattern: [:0]const u8, flags: ZlobFlags
     }
 }
 
+/// Look up an environment variable via libc's `getenv`, returning a borrowed
+/// slice. Returns null if libc is not available, the variable is unset, or
+/// the name cannot be null-terminated.
+fn getEnvVarBorrowed(allocator: Allocator, name: []const u8) ?[]const u8 {
+    if (!builtin.link_libc) return null;
+    const name_z = allocator.dupeZ(u8, name) catch return null;
+    defer allocator.free(name_z);
+    const ptr = std.c.getenv(name_z.ptr) orelse return null;
+    return mem.sliceTo(ptr, 0);
+}
+
 /// Get the current user's home directory.
 /// On Windows, returns an allocated string that must be freed.
 /// On POSIX, returns a borrowed slice from the environment.
 fn getHomeDirectory(allocator: Allocator) ?[]const u8 {
     if (builtin.os.tag == .windows) {
         // On Windows, try USERPROFILE first, then HOMEDRIVE+HOMEPATH
-        if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |user_profile| {
-            return user_profile;
-        } else |_| {
-            // Try HOMEDRIVE + HOMEPATH
-            const home_drive = std.process.getEnvVarOwned(allocator, "HOMEDRIVE") catch return null;
-            defer allocator.free(home_drive);
-            const home_path = std.process.getEnvVarOwned(allocator, "HOMEPATH") catch return null;
-            defer allocator.free(home_path);
-
-            // Concatenate HOMEDRIVE and HOMEPATH
-            const combined = allocator.alloc(u8, home_drive.len + home_path.len) catch return null;
-            @memcpy(combined[0..home_drive.len], home_drive);
-            @memcpy(combined[home_drive.len..], home_path);
-            return combined;
+        if (getEnvVarBorrowed(allocator, "USERPROFILE")) |user_profile| {
+            return allocator.dupe(u8, user_profile) catch null;
         }
+
+        const home_drive = getEnvVarBorrowed(allocator, "HOMEDRIVE") orelse return null;
+        const home_path = getEnvVarBorrowed(allocator, "HOMEPATH") orelse return null;
+
+        // Concatenate HOMEDRIVE and HOMEPATH
+        const combined = allocator.alloc(u8, home_drive.len + home_path.len) catch return null;
+        @memcpy(combined[0..home_drive.len], home_drive);
+        @memcpy(combined[home_drive.len..], home_path);
+        return combined;
     } else {
-        return std.posix.getenv("HOME");
+        return getEnvVarBorrowed(allocator, "HOME");
     }
 }

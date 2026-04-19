@@ -11,8 +11,10 @@ const TestCase = struct {
 };
 
 pub fn main() !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+
     // Change to big repo
-    try std.process.changeCurDir("/home/neogoose/dev/fff.nvim/big-repo");
+    try std.process.setCurrentPath(io, "/home/neogoose/dev/fff.nvim/big-repo");
     std.debug.print("Changed to big-repo directory\n", .{});
     std.debug.print("Profiling glob.zig implementation\n", .{});
     std.debug.print("========================================\n\n", .{});
@@ -73,8 +75,7 @@ pub fn main() !void {
         }
 
         // Timed run
-        var timer = try std.time.Timer.start();
-        const start = timer.read();
+        const start = std.Io.Timestamp.now(io, .awake);
 
         var i: usize = 0;
         var matches_this_test: usize = 0;
@@ -87,8 +88,8 @@ pub fn main() !void {
             }
         }
 
-        const end = timer.read();
-        const elapsed_ns = end - start;
+        const end = std.Io.Timestamp.now(io, .awake);
+        const elapsed_ns: u64 = @intCast(start.durationTo(end).nanoseconds);
         const avg_ns = elapsed_ns / tc.iterations;
         const avg_us = @as(f64, @floatFromInt(avg_ns)) / 1000.0;
         const avg_ms = avg_us / 1000.0;
@@ -103,7 +104,7 @@ pub fn main() !void {
         std.debug.print("\n", .{});
 
         // Small sleep between tests to let system settle
-        std.Thread.sleep(100 * std.time.ns_per_ms); // 100ms
+        std.Io.sleep(io, std.Io.Duration.fromNanoseconds(100 * std.time.ns_per_ms), .awake) catch {}; // 100ms
     }
 
     std.debug.print("========================================\n", .{});

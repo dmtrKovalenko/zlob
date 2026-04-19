@@ -1,8 +1,6 @@
 const std = @import("std");
 const c_lib = @import("c_lib");
 const zlob_flags = @import("zlob_flags");
-const posix = std.posix;
-const Timer = std.time.Timer;
 
 // libc glob types and functions
 extern "c" fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: ?*const anyopaque, pglob: *LibcGlobT) c_int;
@@ -16,17 +14,17 @@ const LibcGlobT = extern struct {
 
 // --- Tree creation helpers ---
 
-fn createFile(dir: std.fs.Dir, path: []const u8) void {
+fn createFile(io: std.Io, dir: std.Io.Dir, path: []const u8) void {
     // Create parent directories if needed
     if (std.fs.path.dirname(path)) |parent| {
-        dir.makePath(parent) catch {};
+        dir.createDirPath(io, parent) catch {};
     }
-    const f = dir.createFile(path, .{}) catch return;
-    f.close();
+    const f = dir.createFile(io, path, .{}) catch return;
+    f.close(io);
 }
 
-fn createDir(dir: std.fs.Dir, path: []const u8) void {
-    dir.makePath(path) catch {};
+fn createDir(io: std.Io, dir: std.Io.Dir, path: []const u8) void {
+    dir.createDirPath(io, path) catch {};
 }
 
 const TreeConfig = struct {
@@ -133,17 +131,17 @@ const medium_tree = TreeConfig{
     .files = &medium_files_array,
 };
 
-fn buildTree(base: std.fs.Dir, config: TreeConfig) void {
+fn buildTree(io: std.Io, base: std.Io.Dir, config: TreeConfig) void {
     for (config.dirs) |d| {
-        createDir(base, d);
+        createDir(io, base, d);
     }
     for (config.files) |f| {
-        createFile(base, f);
+        createFile(io, base, f);
     }
 }
 
 /// Build a large tree programmatically: ~5000 files across ~200 dirs
-fn buildLargeTree(base: std.fs.Dir) void {
+fn buildLargeTree(io: std.Io, base: std.Io.Dir) void {
     const top_dirs = [_][]const u8{
         "src", "lib", "test", "docs", "bench", "tools", "scripts", "config", "data", "assets",
     };
@@ -164,11 +162,11 @@ fn buildLargeTree(base: std.fs.Dir) void {
 
     // Create directory structure
     for (top_dirs) |top| {
-        createDir(base, top);
+        createDir(io, base, top);
         for (sub_dirs) |sub| {
             var buf: [256]u8 = undefined;
             const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ top, sub }) catch continue;
-            createDir(base, path);
+            createDir(io, base, path);
         }
     }
 
@@ -180,7 +178,7 @@ fn buildLargeTree(base: std.fs.Dir) void {
                 const ext = exts[count % exts.len];
                 var buf: [512]u8 = undefined;
                 const path = std.fmt.bufPrint(&buf, "{s}/{s}/{s}{s}", .{ top, sub, name, ext }) catch continue;
-                createFile(base, path);
+                createFile(io, base, path);
                 count += 1;
             }
         }
@@ -196,7 +194,7 @@ const BenchResult = struct {
     zlob_count: usize,
 };
 
-fn benchmarkPattern(pattern_z: [*:0]const u8, iterations: usize) !BenchResult {
+fn benchmarkPattern(io: std.Io, pattern_z: [*:0]const u8, iterations: usize) !BenchResult {
     // Warmup: 3 rounds to populate OS caches and stabilize
     for (0..3) |_| {
         var g: LibcGlobT = undefined;
@@ -224,20 +222,22 @@ fn benchmarkPattern(pattern_z: [*:0]const u8, iterations: usize) !BenchResult {
     }
 
     // Benchmark libc
-    var libc_timer = try Timer.start();
+    const libc_start = std.Io.Timestamp.now(io, .awake);
     for (0..iterations) |_| {
         var g: LibcGlobT = undefined;
         if (glob(pattern_z, 0, null, &g) == 0) globfree(&g);
     }
-    const libc_ns = libc_timer.read();
+    const libc_end = std.Io.Timestamp.now(io, .awake);
+    const libc_ns: u64 = @intCast(libc_start.durationTo(libc_end).nanoseconds);
 
     // Benchmark zlob
-    var zlob_timer = try Timer.start();
+    const zlob_start = std.Io.Timestamp.now(io, .awake);
     for (0..iterations) |_| {
         var z: c_lib.zlob_t = undefined;
         if (c_lib.zlob(pattern_z, 0, null, &z) == 0) c_lib.zlobfree(&z);
     }
-    const zlob_ns = zlob_timer.read();
+    const zlob_end = std.Io.Timestamp.now(io, .awake);
+    const zlob_ns: u64 = @intCast(zlob_start.durationTo(zlob_end).nanoseconds);
 
     return .{
         .libc_ns = libc_ns,
@@ -248,7 +248,7 @@ fn benchmarkPattern(pattern_z: [*:0]const u8, iterations: usize) !BenchResult {
 }
 
 /// Benchmark zlob-only with custom flags (for recursive ** patterns that libc doesn't support)
-fn benchmarkZlobOnly(pattern_z: [*:0]const u8, flags: c_int, iterations: usize) !BenchResult {
+fn benchmarkZlobOnly(io: std.Io, pattern_z: [*:0]const u8, flags: c_int, iterations: usize) !BenchResult {
     // Warmup
     for (0..3) |_| {
         var z: c_lib.zlob_t = undefined;
@@ -266,12 +266,13 @@ fn benchmarkZlobOnly(pattern_z: [*:0]const u8, flags: c_int, iterations: usize) 
     }
 
     // Benchmark zlob
-    var zlob_timer = try Timer.start();
+    const zlob_start = std.Io.Timestamp.now(io, .awake);
     for (0..iterations) |_| {
         var z: c_lib.zlob_t = undefined;
         if (c_lib.zlob(pattern_z, flags, null, &z) == 0) c_lib.zlobfree(&z);
     }
-    const zlob_ns = zlob_timer.read();
+    const zlob_end = std.Io.Timestamp.now(io, .awake);
+    const zlob_ns: u64 = @intCast(zlob_start.durationTo(zlob_end).nanoseconds);
 
     return .{
         .libc_ns = 0,
@@ -314,12 +315,13 @@ fn printZlobOnly(label: []const u8, pattern: []const u8, r: BenchResult, iterati
 }
 
 pub fn main() !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const allocator = std.heap.c_allocator;
     _ = allocator;
 
     // Create temp directory for all test trees
     var tmp_buf: [256]u8 = undefined;
-    const pid = std.os.linux.getpid();
+    const pid = std.c.getpid();
     const tmp_base = std.fmt.bufPrint(&tmp_buf, "/tmp/zlob_bench_{d}", .{pid}) catch unreachable;
 
     var tmp_base_z: [256:0]u8 = undefined;
@@ -327,21 +329,21 @@ pub fn main() !void {
     tmp_base_z[tmp_base.len] = 0;
 
     // Create base and subtree directories
-    const cwd = std.fs.cwd();
-    cwd.makePath(tmp_base) catch |e| {
+    const cwd = std.Io.Dir.cwd();
+    cwd.createDirPath(io, tmp_base) catch |e| {
         std.debug.print("Error creating temp dir: {}\n", .{e});
         return;
     };
 
-    var base_dir = cwd.openDir(tmp_base, .{}) catch |e| {
+    var base_dir = cwd.openDir(io, tmp_base, .{}) catch |e| {
         std.debug.print("Error opening temp dir: {}\n", .{e});
         return;
     };
-    defer base_dir.close();
+    defer base_dir.close(io);
 
     // Cleanup on exit
     defer {
-        cwd.deleteTree(tmp_base) catch {};
+        cwd.deleteTree(io, tmp_base) catch {};
     }
 
     std.debug.print("\n", .{});
@@ -351,15 +353,15 @@ pub fn main() !void {
     // --- Small tree ---
     std.debug.print("--- Small tree (10 files, 3 dirs) ---\n", .{});
     {
-        base_dir.makePath("small") catch {};
-        var small_dir = base_dir.openDir("small", .{}) catch return;
-        defer small_dir.close();
-        buildTree(small_dir, small_tree);
+        base_dir.createDirPath(io, "small") catch {};
+        var small_dir = base_dir.openDir(io, "small", .{}) catch return;
+        defer small_dir.close(io);
+        buildTree(io, small_dir, small_tree);
 
         var path_buf: [512:0]u8 = undefined;
         const prefix = std.fmt.bufPrint(&path_buf, "{s}/small/", .{tmp_base}) catch unreachable;
 
-        posix.chdir(prefix) catch return;
+        std.process.setCurrentPath(io, prefix) catch return;
 
         const small_iters: usize = 10000;
         const patterns = [_][]const u8{ "*.zig", "src/*.zig", "*", "*.md" };
@@ -367,7 +369,7 @@ pub fn main() !void {
             var pat_z: [64:0]u8 = undefined;
             @memcpy(pat_z[0..pat.len], pat);
             pat_z[pat.len] = 0;
-            const r = try benchmarkPattern(&pat_z, small_iters);
+            const r = try benchmarkPattern(io, &pat_z, small_iters);
             printResult("small", pat, r, small_iters);
         }
     }
@@ -375,15 +377,15 @@ pub fn main() !void {
     // --- Medium tree ---
     std.debug.print("\n--- Medium tree (100 files, 20 dirs) ---\n", .{});
     {
-        base_dir.makePath("medium") catch {};
-        var medium_dir = base_dir.openDir("medium", .{}) catch return;
-        defer medium_dir.close();
-        buildTree(medium_dir, medium_tree);
+        base_dir.createDirPath(io, "medium") catch {};
+        var medium_dir = base_dir.openDir(io, "medium", .{}) catch return;
+        defer medium_dir.close(io);
+        buildTree(io, medium_dir, medium_tree);
 
         var path_buf: [512:0]u8 = undefined;
         const prefix = std.fmt.bufPrint(&path_buf, "{s}/medium/", .{tmp_base}) catch unreachable;
 
-        posix.chdir(prefix) catch return;
+        std.process.setCurrentPath(io, prefix) catch return;
 
         const medium_iters: usize = 5000;
         const patterns = [_][]const u8{ "*.zig", "src/*.zig", "src/core/*.zig", "test/*/*.zig", "*" };
@@ -391,7 +393,7 @@ pub fn main() !void {
             var pat_z: [64:0]u8 = undefined;
             @memcpy(pat_z[0..pat.len], pat);
             pat_z[pat.len] = 0;
-            const r = try benchmarkPattern(&pat_z, medium_iters);
+            const r = try benchmarkPattern(io, &pat_z, medium_iters);
             printResult("medium", pat, r, medium_iters);
         }
     }
@@ -399,15 +401,15 @@ pub fn main() !void {
     // --- Large tree ---
     std.debug.print("\n--- Large tree (~5000 files, ~200 dirs) ---\n", .{});
     {
-        base_dir.makePath("large") catch {};
-        var large_dir = base_dir.openDir("large", .{}) catch return;
-        defer large_dir.close();
-        buildLargeTree(large_dir);
+        base_dir.createDirPath(io, "large") catch {};
+        var large_dir = base_dir.openDir(io, "large", .{}) catch return;
+        defer large_dir.close(io);
+        buildLargeTree(io, large_dir);
 
         var path_buf: [512:0]u8 = undefined;
         const prefix = std.fmt.bufPrint(&path_buf, "{s}/large/", .{tmp_base}) catch unreachable;
 
-        posix.chdir(prefix) catch return;
+        std.process.setCurrentPath(io, prefix) catch return;
 
         const large_iters: usize = 1000;
         const patterns = [_][]const u8{ "src/core/*.zig", "src/*/*.zig", "*.zig", "src/core/*.c", "*" };
@@ -415,7 +417,7 @@ pub fn main() !void {
             var pat_z: [64:0]u8 = undefined;
             @memcpy(pat_z[0..pat.len], pat);
             pat_z[pat.len] = 0;
-            const r = try benchmarkPattern(&pat_z, large_iters);
+            const r = try benchmarkPattern(io, &pat_z, large_iters);
             printResult("large", pat, r, large_iters);
         }
     }
@@ -429,7 +431,7 @@ pub fn main() !void {
         {
             var path_buf: [512:0]u8 = undefined;
             const prefix = std.fmt.bufPrint(&path_buf, "{s}/small/", .{tmp_base}) catch unreachable;
-            posix.chdir(prefix) catch return;
+            std.process.setCurrentPath(io, prefix) catch return;
 
             const iters: usize = 10000;
             const rec_patterns = [_][]const u8{ "**/*.zig", "**/*", "**/*.md" };
@@ -437,7 +439,7 @@ pub fn main() !void {
                 var pat_z: [64:0]u8 = undefined;
                 @memcpy(pat_z[0..pat.len], pat);
                 pat_z[pat.len] = 0;
-                const r = try benchmarkZlobOnly(&pat_z, ds_flag, iters);
+                const r = try benchmarkZlobOnly(io, &pat_z, ds_flag, iters);
                 printZlobOnly("small-recursive", pat, r, iters);
             }
         }
@@ -446,7 +448,7 @@ pub fn main() !void {
         {
             var path_buf: [512:0]u8 = undefined;
             const prefix = std.fmt.bufPrint(&path_buf, "{s}/medium/", .{tmp_base}) catch unreachable;
-            posix.chdir(prefix) catch return;
+            std.process.setCurrentPath(io, prefix) catch return;
 
             const iters: usize = 5000;
             const rec_patterns = [_][]const u8{ "**/*.zig", "**/*", "**/*.md" };
@@ -454,7 +456,7 @@ pub fn main() !void {
                 var pat_z: [64:0]u8 = undefined;
                 @memcpy(pat_z[0..pat.len], pat);
                 pat_z[pat.len] = 0;
-                const r = try benchmarkZlobOnly(&pat_z, ds_flag, iters);
+                const r = try benchmarkZlobOnly(io, &pat_z, ds_flag, iters);
                 printZlobOnly("medium-recursive", pat, r, iters);
             }
         }
@@ -463,7 +465,7 @@ pub fn main() !void {
         {
             var path_buf: [512:0]u8 = undefined;
             const prefix = std.fmt.bufPrint(&path_buf, "{s}/large/", .{tmp_base}) catch unreachable;
-            posix.chdir(prefix) catch return;
+            std.process.setCurrentPath(io, prefix) catch return;
 
             const iters: usize = 200;
             const rec_patterns = [_][]const u8{ "**/*.zig", "**/*.c", "**/*" };
@@ -471,7 +473,7 @@ pub fn main() !void {
                 var pat_z: [64:0]u8 = undefined;
                 @memcpy(pat_z[0..pat.len], pat);
                 pat_z[pat.len] = 0;
-                const r = try benchmarkZlobOnly(&pat_z, ds_flag, iters);
+                const r = try benchmarkZlobOnly(io, &pat_z, ds_flag, iters);
                 printZlobOnly("large-recursive", pat, r, iters);
             }
         }

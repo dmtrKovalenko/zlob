@@ -15,6 +15,13 @@ const allocator = if (builtin.link_libc)
 else
     std.heap.page_allocator;
 
+/// C callers can't hand us an `Io`, so the C ABI wrappers below use the
+/// stdlib's pre-initialized single-threaded Io. Zig callers should instead
+/// use the `zlob` module directly and pass their own `Io`.
+inline fn cIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 pub const zlob_t = zlob_impl.zlob_t;
 pub const zlob_dirent_t = zlob_impl.zlob_dirent_t;
 pub const DirIterator = zlob_impl.DirIterator;
@@ -31,7 +38,7 @@ pub const zlob_slice_t = extern struct {
 };
 
 pub export fn zlob(pattern: [*:0]const u8, flags: c_int, errfunc: zlob_impl.zlob_errfunc_t, pzlob: *zlob_t) callconv(.c) c_int {
-    if (zlob_impl.glob(allocator, pattern, flags, errfunc, pzlob)) |opt_result| {
+    if (zlob_impl.glob(allocator, cIo(), pattern, flags, errfunc, pzlob)) |opt_result| {
         if (opt_result) |_| {
             return 0; // Success with matches
         } else {
@@ -61,7 +68,7 @@ pub export fn zlob_at(
 ) callconv(.c) c_int {
     const base_slice = mem.sliceTo(base_path, 0);
 
-    if (zlob_impl.globAt(allocator, base_slice, pattern, flags, errfunc, pzlob)) |opt_result| {
+    if (zlob_impl.globAt(allocator, cIo(), base_slice, pattern, flags, errfunc, pzlob)) |opt_result| {
         if (opt_result) |_| {
             return 0; // Success with matches
         } else {

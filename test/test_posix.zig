@@ -5,6 +5,16 @@ const zlob_flags = @import("zlob_flags");
 const c_lib = @import("c_lib");
 const c = std.c;
 
+/// Look up an environment variable via libc's getenv.
+fn getenv(name: []const u8) ?[]const u8 {
+    var name_buf: [256]u8 = undefined;
+    if (name.len + 1 > name_buf.len) return null;
+    @memcpy(name_buf[0..name.len], name);
+    name_buf[name.len] = 0;
+    const ptr = std.c.getenv(@ptrCast(&name_buf)) orelse return null;
+    return std.mem.sliceTo(ptr, 0);
+}
+
 // Test structure helper
 fn createTestFiles(allocator: std.mem.Allocator, base_path: []const u8) !void {
     const dirs = [_][]const u8{
@@ -34,24 +44,26 @@ fn createTestFiles(allocator: std.mem.Allocator, base_path: []const u8) !void {
         _ = c.mkdir(&path_z, 0o755);
     }
 
+    const io = std.Io.Threaded.global_single_threaded.io();
+
     // Create files
     for (files) |file| {
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_path, file });
         defer allocator.free(full_path);
 
-        const f = std.fs.cwd().createFile(full_path, .{}) catch continue;
-        defer f.close();
+        var f = std.Io.Dir.cwd().createFile(io, full_path, .{}) catch continue;
+        defer f.close(io);
         const content = "test content\n";
-        _ = f.write(content) catch {};
+        _ = f.writeStreamingAll(io, content) catch {};
     }
 }
 
 fn cleanupTestFiles(allocator: std.mem.Allocator, base_path: []const u8) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const full_path_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{base_path});
     defer allocator.free(full_path_str);
 
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, io, .{
         .argv = &[_][]const u8{ "rm", "-rf", full_path_str },
     }) catch return;
     allocator.free(result.stdout);
@@ -76,10 +88,11 @@ test "ZLOB_MARK - appends slash to directories" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*");
     defer allocator.free(pattern);
@@ -119,10 +132,11 @@ test "ZLOB_MARK - does not append slash to files" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*.txt");
     defer allocator.free(pattern);
@@ -155,10 +169,11 @@ test "ZLOB_MARK - works with recursive glob" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "**/");
     defer allocator.free(pattern);
@@ -195,10 +210,11 @@ test "ZLOB_DOOFFS - reserves offset slots at beginning" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*.txt");
     defer allocator.free(pattern);
@@ -239,10 +255,11 @@ test "ZLOB_DOOFFS - works with ZLOB_APPEND" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     var pzlob: glob.zlob_t = undefined;
     pzlob.zlo_offs = 2;
@@ -286,10 +303,11 @@ test "ZLOB_PERIOD - matches hidden files with wildcard" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Define ZLOB_PERIOD
     const ZLOB_PERIOD = zlob_flags.ZLOB_PERIOD;
@@ -330,10 +348,11 @@ test "ZLOB_PERIOD - without flag does not match hidden files" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "*");
     defer allocator.free(pattern);
@@ -365,10 +384,11 @@ test "ZLOB_PERIOD - explicit dot still matches" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, ".*");
     defer allocator.free(pattern);
@@ -396,17 +416,18 @@ test "ZLOB_PERIOD - explicit dot still matches" {
 
 test "ZLOB_TILDE - expands tilde to home directory" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Get $HOME environment variable
-    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    const home = getenv("HOME") orelse return error.SkipZigTest;
 
     // Create a test file in home directory
     const test_file = try std.fmt.allocPrint(allocator, "{s}/.zlob_test_tilde_12345.txt", .{home});
     defer allocator.free(test_file);
 
-    const f = std.fs.cwd().createFile(test_file, .{}) catch return error.SkipZigTest;
-    f.close();
-    defer std.fs.cwd().deleteFile(test_file) catch {};
+    var f = std.Io.Dir.cwd().createFile(io, test_file, .{}) catch return error.SkipZigTest;
+    f.close(io);
+    defer std.Io.Dir.cwd().deleteFile(io, test_file) catch {};
 
     const pattern = try allocator.dupeZ(u8, "~/.zlob_test_tilde_*.txt");
     defer allocator.free(pattern);
@@ -424,18 +445,19 @@ test "ZLOB_TILDE - expands tilde to home directory" {
 
 test "ZLOB_TILDE - expands ~username to user home" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Get current username
-    const username = std.posix.getenv("USER") orelse return error.SkipZigTest;
-    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    const username = getenv("USER") orelse return error.SkipZigTest;
+    const home = getenv("HOME") orelse return error.SkipZigTest;
 
     // Create test file
     const test_file = try std.fmt.allocPrint(allocator, "{s}/.zlob_test_user_12345.txt", .{home});
     defer allocator.free(test_file);
 
-    const f = std.fs.cwd().createFile(test_file, .{}) catch return error.SkipZigTest;
-    f.close();
-    defer std.fs.cwd().deleteFile(test_file) catch {};
+    var f = std.Io.Dir.cwd().createFile(io, test_file, .{}) catch return error.SkipZigTest;
+    f.close(io);
+    defer std.Io.Dir.cwd().deleteFile(io, test_file) catch {};
 
     const pattern_str = try std.fmt.allocPrint(allocator, "~{s}/.zlob_test_user_*.txt", .{username});
     defer allocator.free(pattern_str);
@@ -524,10 +546,11 @@ test "ZLOB_NOMAGIC - returns pattern for literal with no match" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Literal pattern (no wildcards) that doesn't exist - should return the
     // pattern itself as a result (BSD NOMAGIC acts like NOCHECK for literals)
@@ -558,10 +581,11 @@ test "ZLOB_NOMAGIC - returns NOMATCH for wildcard pattern with no match" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Pattern with wildcards that doesn't match - NOMAGIC does NOT help here,
     // because the pattern has magic characters. Returns NOMATCH.
@@ -588,10 +612,11 @@ test "ZLOB_NOMAGIC - succeeds normally for wildcard pattern with matches" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Wildcard pattern that matches - normal glob behavior, NOMAGIC irrelevant
     const pattern = try allocator.dupeZ(u8, "*.txt");
@@ -623,10 +648,11 @@ test "ZLOB_MARK and ZLOB_PERIOD together" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const ZLOB_PERIOD = zlob_flags.ZLOB_PERIOD;
 
@@ -652,21 +678,22 @@ test "ZLOB_MARK and ZLOB_PERIOD together" {
 
 test "ZLOB_TILDE with recursive glob" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    const home = getenv("HOME") orelse return error.SkipZigTest;
 
     // Create nested test directory in home
     const test_dir_path = try std.fmt.allocPrint(allocator, "{s}/.zlob_test_nested", .{home});
     defer allocator.free(test_dir_path);
 
-    std.fs.cwd().makeDir(test_dir_path) catch {};
-    defer std.fs.cwd().deleteTree(test_dir_path) catch {};
+    std.Io.Dir.cwd().createDir(io, test_dir_path, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, test_dir_path) catch {};
 
     const test_file = try std.fmt.allocPrint(allocator, "{s}/test.txt", .{test_dir_path});
     defer allocator.free(test_file);
 
-    const f = std.fs.cwd().createFile(test_file, .{}) catch return error.SkipZigTest;
-    f.close();
+    var f = std.Io.Dir.cwd().createFile(io, test_file, .{}) catch return error.SkipZigTest;
+    f.close(io);
 
     const pattern = try allocator.dupeZ(u8, "~/**/.zlob_test_nested/*.txt");
     defer allocator.free(pattern);
@@ -697,10 +724,11 @@ test "ZLOB_PERIOD - recursive glob should not match hidden files by default" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test with ** recursive pattern - should NOT match hidden files without ZLOB_PERIOD
     const pattern = try allocator.dupeZ(u8, "**/*");
@@ -749,10 +777,11 @@ test "ZLOB_PERIOD - recursive glob matches hidden files with flag" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const ZLOB_PERIOD = zlob_flags.ZLOB_PERIOD;
 
@@ -808,10 +837,11 @@ test "ZLOB_PERIOD - explicit dot pattern still matches without flag in recursive
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Pattern explicitly starts with . - should match even without ZLOB_PERIOD
     const pattern = try allocator.dupeZ(u8, "**/.hidden*");
@@ -848,10 +878,11 @@ test "literal path - file exists" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "file1.txt");
     defer allocator.free(pattern);
@@ -876,10 +907,11 @@ test "literal path - directory exists" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "dir1");
     defer allocator.free(pattern);
@@ -903,10 +935,11 @@ test "literal path - ZLOB_ONLYDIR with directory" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "dir1");
     defer allocator.free(pattern);
@@ -930,10 +963,11 @@ test "literal path - ZLOB_ONLYDIR with file (should fail)" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "file1.txt");
     defer allocator.free(pattern);
@@ -955,10 +989,11 @@ test "literal path - ZLOB_MARK with directory" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "dir1");
     defer allocator.free(pattern);
@@ -984,10 +1019,11 @@ test "literal path - ZLOB_MARK with file (no slash)" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "file1.txt");
     defer allocator.free(pattern);
@@ -1012,10 +1048,11 @@ test "literal path - ./ prefix normalization" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "./file1.txt");
     defer allocator.free(pattern);
@@ -1040,10 +1077,11 @@ test "literal path - ZLOB_NOCHECK returns pattern when not found" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
     defer allocator.free(pattern);
@@ -1068,10 +1106,11 @@ test "literal path - not found without ZLOB_NOCHECK" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
     defer allocator.free(pattern);
@@ -1093,10 +1132,11 @@ test "literal path - ZLOB_MARK and ZLOB_ONLYDIR together" {
     const test_dir_str = try std.fmt.allocPrint(allocator, "{s}/test_missing_flags", .{tmp_dir});
     defer allocator.free(test_dir_str);
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir_str);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir_str);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     const pattern = try allocator.dupeZ(u8, "dir1");
     defer allocator.free(pattern);
@@ -1315,10 +1355,11 @@ test "ZLOB_MAGCHAR - set when pattern has wildcards" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test with wildcard pattern - ZLOB_MAGCHAR should be set
     const pattern = try allocator.dupeZ(u8, "*.c");
@@ -1348,10 +1389,11 @@ test "ZLOB_MAGCHAR - not set when pattern has no wildcards" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test with literal pattern (no wildcards) - ZLOB_MAGCHAR should NOT be set
     const pattern = try allocator.dupeZ(u8, "file1.txt");
@@ -1381,10 +1423,11 @@ test "ZLOB_MAGCHAR - set with question mark wildcard" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test with ? wildcard - ZLOB_MAGCHAR should be set
     const pattern = try allocator.dupeZ(u8, "file?.txt");
@@ -1414,10 +1457,11 @@ test "ZLOB_MAGCHAR - set with brace expansion when ZLOB_BRACE enabled" {
     @memcpy(test_dir[0..test_dir_str.len], test_dir_str);
     test_dir[test_dir_str.len] = 0;
 
-    var cwd_buf: [4096]u8 = undefined;
-    const old_cwd = try std.posix.getcwd(&cwd_buf);
-    try std.posix.chdir(test_dir[0..test_dir_str.len :0]);
-    defer std.posix.chdir(old_cwd) catch {};
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const old_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(old_cwd);
+    try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
+    defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test with brace pattern and ZLOB_BRACE flag - ZLOB_MAGCHAR should be set
     const pattern = try allocator.dupeZ(u8, "file{1,2}.txt");

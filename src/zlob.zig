@@ -24,6 +24,7 @@ const c = if (has_libc) std.c else struct {
 };
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 const is_windows = builtin.os.tag == .windows;
 
@@ -154,9 +155,9 @@ pub const zlob_t = extern struct {
     }
 };
 
-fn globLiteralPath(allocator: Allocator, path: []const u8, flags: ZlobFlags, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !bool {
-    const root = base_dir orelse std.fs.cwd();
-    const stat = root.statFile(path) catch {
+fn globLiteralPath(allocator: Allocator, path: []const u8, flags: ZlobFlags, pzlob: *zlob_t, io: Io, base_dir: ?std.Io.Dir) !bool {
+    const root = base_dir orelse std.Io.Dir.cwd();
+    const stat = root.statFile(io, path, .{}) catch {
         return false;
     };
 
@@ -556,7 +557,7 @@ inline fn matchWithAlternativesPrecomputedExtglob(name: []const u8, patterns: []
 
 const buildPathInBuffer = utils.buildPathInBuffer;
 
-fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker.AltFs) !?void {
+fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const u8, info: *const PatternInfo, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
     // Note: gitignore filtering is not fully implemented in this path
     // The main recursive and filtered paths handle gitignore
     _ = gitignore_filter;
@@ -602,7 +603,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     else
         ".";
 
-    try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc, base_dir, fs_provider);
+    try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc, io, base_dir, fs_provider);
 
     if (result_paths.len() == 0) {
         if (flags.nocheck) {
@@ -639,7 +640,7 @@ fn expandWildcardComponents(
     directories_only: bool,
     flags: ZlobFlags,
     errfunc: zlob_errfunc_t,
-    base_dir: ?std.fs.Dir,
+    io: Io, base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
 ) !void {
     if (component_idx > 65536) {
@@ -673,7 +674,7 @@ fn expandWildcardComponents(
             flags.period,
         );
 
-        var iter = walker.DirIterator.openHandled(current_dir, base_dir, hidden_config, fs_provider, .{
+        var iter = walker.DirIterator.openHandled(io, current_dir, base_dir, hidden_config, fs_provider, .{
             .err_callback = errfunc,
             .abort_on_error = flags.err,
         }) catch return error.Aborted;
@@ -698,7 +699,7 @@ fn expandWildcardComponents(
                 const new_path = buildPathInBuffer(&new_path_buf, current_dir, name);
                 if (new_path.len >= 4096) continue;
 
-                try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir, fs_provider);
+                try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, io, base_dir, fs_provider);
             }
         }
     } else {
@@ -711,18 +712,18 @@ fn expandWildcardComponents(
         if (!is_final) {
             // For non-final literal components, skip the stat() syscall entirely.
             // Just try to recurse - if the path doesn't exist, the next opendir will fail gracefully.
-            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir, fs_provider);
+            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, io, base_dir, fs_provider);
         } else {
             // For final component, we need stat to check existence and directory-ness
-            const root = base_dir orelse std.fs.cwd();
-            const stat = root.statFile(new_path) catch return;
+            const root = base_dir orelse std.Io.Dir.cwd();
+            const stat = root.statFile(io, new_path, .{}) catch return;
             if (directories_only and stat.kind != .directory) return;
-            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, base_dir, fs_provider);
+            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, io, base_dir, fs_provider);
         }
     }
 }
 
-fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker.AltFs) !?void {
+fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
     var effective_pattern = pattern;
     var flags = flags_in;
 
@@ -746,8 +747,8 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     if (!hasWildcardsBasic(effective_pattern) and !needs_tilde_expansion and !has_brace_alternatives and !has_extglob_pattern) {
         // Check gitignore for literal path
         if (gitignore_filter) |gi| {
-            const root = base_dir orelse std.fs.cwd();
-            const stat = root.statFile(effective_pattern) catch null;
+            const root = base_dir orelse std.Io.Dir.cwd();
+            const stat = root.statFile(io, effective_pattern, .{}) catch null;
             const is_dir = if (stat) |s| s.kind == .directory else false;
             if (gi.isIgnored(effective_pattern, is_dir)) {
                 if (flags.nocheck) {
@@ -758,7 +759,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
         }
 
         // Try to match literal path
-        const found = try globLiteralPath(allocator, effective_pattern, flags, pzlob, base_dir);
+        const found = try globLiteralPath(allocator, effective_pattern, flags, pzlob, io, base_dir);
         if (found) return;
 
         if (flags.nocheck) {
@@ -802,14 +803,14 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
             }
 
             if (has_dir_alternatives or (has_file_alternatives and has_dir_wildcards)) {
-                return globWithBracedComponents(allocator, parsed, &info, flags, errfunc, pzlob, info.directories_only, gitignore_filter, base_dir, fs_provider);
+                return globWithBracedComponents(allocator, parsed, &info, flags, errfunc, pzlob, info.directories_only, gitignore_filter, io, base_dir, fs_provider);
             }
         }
     }
 
     // Fast path: simple pattern with literal prefix (e.g., "src/foo/*.txt")
     if (info.simple_extension != null and info.literal_prefix.len > 0) {
-        return globInSingleDirWithFnmatch(allocator, info.wildcard_suffix, info.literal_prefix, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
+        return globInSingleDirWithFnmatch(allocator, info.wildcard_suffix, info.literal_prefix, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, io, base_dir, fs_provider);
     }
 
     // Only use recursive glob handling if ZLOB_DOUBLESTAR_RECURSIVE is set
@@ -847,7 +848,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
                 }
             }
 
-            return globRecursive(allocator, pattern_from_doublestar, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, base_dir, fs_provider);
+            return globRecursive(allocator, pattern_from_doublestar, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, io, base_dir, fs_provider);
         }
     }
 
@@ -880,7 +881,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
 
     // But skip if pattern has ** (needs special recursive handling)
     if (has_wildcard_in_dir and !info.has_recursive) {
-        return globWithWildcardDirsOptimized(allocator, effective_pattern, &info, flags, errfunc, pzlob, info.directories_only, gitignore_filter, base_dir, fs_provider);
+        return globWithWildcardDirsOptimized(allocator, effective_pattern, &info, flags, errfunc, pzlob, info.directories_only, gitignore_filter, io, base_dir, fs_provider);
     }
 
     var dir_end: usize = 0;
@@ -905,10 +906,10 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     }
 
     if (flags.doublestar_recursive and info.has_recursive) {
-        return globRecursive(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, base_dir, fs_provider);
+        return globRecursive(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, brace_parsed, gitignore_filter, io, base_dir, fs_provider);
     }
 
-    return globInSingleDirWithFnmatch(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
+    return globInSingleDirWithFnmatch(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, io, base_dir, fs_provider);
 }
 
 fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, pzlob: *zlob_t) !?void {
@@ -935,31 +936,31 @@ const expandTilde = utils.expandTilde;
 
 /// Glob within a specific base directory.
 /// base_path must be an absolute path (starts with '/'), otherwise returns error.Aborted.
-pub fn globAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
+pub fn globAt(allocator: std.mem.Allocator, io: Io, base_path: []const u8, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
     // Validate that base_path is absolute
     if (base_path.len == 0 or base_path[0] != '/') {
         return error.Aborted;
     }
 
     // Open the base directory
-    var base_dir = std.fs.openDirAbsolute(base_path, .{ .iterate = true }) catch {
+    var base_dir = std.Io.Dir.openDirAbsolute(io, base_path, .{ .iterate = true }) catch {
         return error.Aborted;
     };
-    defer base_dir.close();
+    defer base_dir.close(io);
 
-    return globInternalZ(allocator, pattern, flags, errfunc, pzlob, base_dir);
+    return globInternalZ(allocator, pattern, flags, errfunc, pzlob, io, base_dir);
 }
 
-pub fn glob(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
-    return globInternalZ(allocator, pattern, flags, errfunc, pzlob, null);
+pub fn glob(allocator: std.mem.Allocator, io: Io, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
+    return globInternalZ(allocator, pattern, flags, errfunc, pzlob, io, null);
 }
 
-pub fn globSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
-    return globInternalSlice(allocator, pattern, flags, errfunc, pzlob, null);
+pub fn globSlice(allocator: std.mem.Allocator, io: Io, pattern: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
+    return globInternalSlice(allocator, pattern, flags, errfunc, pzlob, io, null);
 }
 
 /// Internal glob implementation that accepts a slice pattern
-fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !?void {
+fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, io: Io, base_dir: ?std.Io.Dir) !?void {
     const gf = ZlobFlags.fromInt(flags);
     if (!gf.append) {
         pzlob.zlo_pathc = 0;
@@ -1008,7 +1009,7 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
     defer if (gitignore_instance) |*gi| gi.deinit();
 
     if (gf.gitignore) {
-        gitignore_instance = GitIgnore.loadFromCwd(allocator) catch null;
+        gitignore_instance = GitIgnore.loadFromCwd(allocator, io) catch null;
     }
     const gitignore_ptr: ?*GitIgnore = if (gitignore_instance) |*gi| gi else null;
 
@@ -1016,7 +1017,7 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
     const result = blk: {
         if (gf.brace and brace_optimizer.containsBraces(pattern_slice)) {
             var opt = brace_optimizer.analyzeBracedPattern(allocator, pattern_slice) catch {
-                break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
+                break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
             };
             defer opt.deinit();
 
@@ -1030,20 +1031,21 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
                         errfunc,
                         pzlob,
                         gitignore_ptr,
+                        io,
                         base_dir,
                         fs_provider,
                     );
                 },
                 .fallback => {
-                    break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
+                    break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
                 },
                 .no_braces => {
-                    break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
+                    break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
                 },
             }
         }
 
-        break :blk try globSingle(allocator, pattern_slice, null, gf, errfunc, pzlob, gitignore_ptr, base_dir, fs_provider);
+        break :blk try globSingle(allocator, pattern_slice, null, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
     };
 
     if (has_magic) {
@@ -1060,11 +1062,11 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
     return result;
 }
 
-fn globInternalZ(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, base_dir: ?std.fs.Dir) !?void {
-    return globInternalSlice(allocator, mem.sliceTo(pattern, 0), flags, errfunc, pzlob, base_dir);
+fn globInternalZ(allocator: std.mem.Allocator, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t, io: Io, base_dir: ?std.Io.Dir) !?void {
+    return globInternalSlice(allocator, mem.sliceTo(pattern, 0), flags, errfunc, pzlob, io, base_dir);
 }
 
-fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker.AltFs) !?void {
+fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
     // Use brace_optimizer.expandBraces for consistent nested brace handling
     const expanded = try brace_optimizer.expandBraces(allocator, pattern);
     defer {
@@ -1087,7 +1089,7 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
         temp_pzlob.zlo_pathv = null;
         temp_pzlob.zlo_offs = 0;
 
-        _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true }), errfunc, &temp_pzlob, gitignore_filter, base_dir, fs_provider);
+        _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true }), errfunc, &temp_pzlob, gitignore_filter, io, base_dir, fs_provider);
 
         // Collect results from temp_pzlob
         if (temp_pzlob.zlo_pathc > 0) {
@@ -1195,11 +1197,11 @@ inline fn matchWithAlternativesPrecomputed(name: []const u8, contexts: []const P
     return false;
 }
 
-fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*GitIgnore, base_dir: ?std.fs.Dir, fs_provider: walker.AltFs) !?void {
+fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, brace_parsed: ?*const brace_optimizer.BracedPattern, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
     const info = analyzePattern(pattern, flags);
 
     // Split pattern at **
-    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInSingleDirWithFnmatch(allocator, pattern, dirname, flags, errfunc, pzlob, directories_only, gitignore_filter, brace_parsed, base_dir, fs_provider);
+    const double_star_pos = mem.indexOf(u8, pattern, "**") orelse return globInSingleDirWithFnmatch(allocator, pattern, dirname, flags, errfunc, pzlob, directories_only, gitignore_filter, brace_parsed, io, base_dir, fs_provider);
 
     var after_double_star = pattern[double_star_pos + 2 ..];
 
@@ -1381,12 +1383,13 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
             &all_results,
             &info,
             errfunc,
+            io,
             base_dir,
             fs_provider,
         );
     } else {
         // Use unified walker for both simple (**/*.txt) and complex (**/foo/*.txt) patterns
-        try globRecursiveWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc, base_dir, fs_provider);
+        try globRecursiveWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc, io, base_dir, fs_provider);
     }
 
     if (all_results.len() == 0) {
@@ -1409,7 +1412,7 @@ fn globWithBracedComponents(
     pzlob: *zlob_t,
     directories_only: bool,
     gitignore_filter: ?*GitIgnore,
-    base_dir: ?std.fs.Dir,
+    io: Io, base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
 ) !?void {
     _ = gitignore_filter; // TODO: Apply gitignore filtering
@@ -1471,8 +1474,8 @@ fn globWithBracedComponents(
     // If there are no wildcard/brace components left, just check if the path exists
     if (start_component_idx >= parsed.components.len) {
         // No wildcard components - just verify path exists and add it
-        const root = base_dir orelse std.fs.cwd();
-        _ = root.statFile(start_dir) catch return null;
+        const root = base_dir orelse std.Io.Dir.cwd();
+        _ = root.statFile(io, start_dir, .{}) catch return null;
         const path_copy = try allocator.allocSentinel(u8, start_dir.len, 0);
         @memcpy(path_copy[0..start_dir.len], start_dir);
         try all_results.append(@ptrCast(path_copy.ptr), start_dir.len);
@@ -1496,6 +1499,7 @@ fn globWithBracedComponents(
         &all_results,
         directories_only,
         errfunc,
+        io,
         base_dir,
         fs_provider,
         struct {
@@ -1571,7 +1575,7 @@ fn walkBracedComponents(
     results: *ResultsList,
     directories_only: bool,
     errfunc: zlob_errfunc_t,
-    base_dir: ?std.fs.Dir,
+    io: Io, base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
     comptime onComplete: fn (std.mem.Allocator, []const u8, *ResultsList, bool) error{ OutOfMemory, Aborted }!void,
 ) error{ OutOfMemory, Aborted }!void {
@@ -1592,7 +1596,7 @@ fn walkBracedComponents(
     };
 
     // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
-    var iter = walker.DirIterator.openHandled(current_dir, base_dir, hidden_config, fs_provider, .{
+    var iter = walker.DirIterator.openHandled(io, current_dir, base_dir, hidden_config, fs_provider, .{
         .err_callback = errfunc,
         .abort_on_error = flags.err,
     }) catch return error.Aborted;
@@ -1619,6 +1623,7 @@ fn walkBracedComponents(
                 results,
                 directories_only,
                 errfunc,
+                io,
                 base_dir,
                 fs_provider,
                 onComplete,
@@ -1638,13 +1643,13 @@ fn globRecursiveWithBracedPrefix(
     results: *ResultsList,
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
-    base_dir: ?std.fs.Dir,
+    io: Io, base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
 ) !void {
     // If we've matched all pre-doublestar components, start the recursive walk
     if (component_idx >= pre_ds_components.len) {
         // Use unified walker for both simple and complex patterns
-        try globRecursiveWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc, base_dir, fs_provider);
+        try globRecursiveWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc, io, base_dir, fs_provider);
         return;
     }
 
@@ -1663,7 +1668,7 @@ fn globRecursiveWithBracedPrefix(
     };
 
     // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
-    var iter = walker.DirIterator.openHandled(current_dir, base_dir, hidden_config, fs_provider, .{
+    var iter = walker.DirIterator.openHandled(io, current_dir, base_dir, hidden_config, fs_provider, .{
         .err_callback = errfunc,
         .abort_on_error = flags.err,
     }) catch return error.Aborted;
@@ -1690,6 +1695,7 @@ fn globRecursiveWithBracedPrefix(
                 results,
                 info,
                 errfunc,
+                io,
                 base_dir,
                 fs_provider,
             );
@@ -1779,7 +1785,7 @@ fn globRecursiveWalk(
     results: *ResultsList,
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
-    base_dir: ?std.fs.Dir,
+    io: Io, base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
 ) !void {
     const has_dir_components = rec_pattern.dir_components.len > 0;
@@ -1835,7 +1841,7 @@ fn globRecursiveWalk(
         };
     }
 
-    var dir_walker = walker.DefaultWalker.init(allocator, start_dir, walker_config) catch |err| {
+    var dir_walker = walker.DefaultWalker.init(allocator, io, start_dir, walker_config) catch |err| {
         return if (err == error.Aborted) error.Aborted else {};
     };
     defer dir_walker.deinit();
@@ -1970,7 +1976,7 @@ fn matchDirComponents(
 pub const PathBuildResult = utils.PathBuildResult;
 const buildFullPathWithMark = utils.buildFullPathWithMark;
 
-fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern, base_dir: ?std.fs.Dir, fs_provider: walker.AltFs) !?void {
+fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
     // If we have brace alternatives for the filename pattern, use them for matching
     // e.g., "*.{toml,lock}" -> alternatives = ["*.toml", "*.lock"]
     const file_alternatives: ?[]const PatternContext = if (brace_parsed) |bp| blk: {
@@ -2010,7 +2016,7 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
     );
 
     // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
-    var iter = walker.DirIterator.openHandled(dirname, base_dir, hidden_config, fs_provider, .{
+    var iter = walker.DirIterator.openHandled(io, dirname, base_dir, hidden_config, fs_provider, .{
         .err_callback = errfunc,
         .abort_on_error = flags.err,
     }) catch return error.Aborted;

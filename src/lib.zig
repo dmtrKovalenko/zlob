@@ -51,11 +51,11 @@ pub fn hasWildcards(s: []const u8) bool {
 ///
 /// You can also pass any integer type build from the ZLOB_* flags if you prefer
 /// or even struct literals like .{ .mark = true } for convenience
-pub fn match(allocator: std.mem.Allocator, pattern: []const u8, flags_param: anytype) !?ZlobResults {
+pub fn match(allocator: std.mem.Allocator, io: std.Io, pattern: []const u8, flags_param: anytype) !?ZlobResults {
     const zflags = flagsToZlobFlags(flags_param);
 
     var pzlob: zlob_t = undefined;
-    const opt_result = try zlob.globSlice(allocator, pattern, zflags.toInt(), null, &pzlob);
+    const opt_result = try zlob.globSlice(allocator, io, pattern, zflags.toInt(), null, &pzlob);
 
     if (opt_result) |_| {
         return ZlobResults{
@@ -168,13 +168,13 @@ pub fn matchPathsAt(allocator: std.mem.Allocator, base_path: []const u8, pattern
 /// ```
 ///
 /// Returns `error.Aborted` if `base_path` is not an absolute path (doesn't start with '/').
-pub fn matchAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, flags_param: anytype) !?ZlobResults {
+pub fn matchAt(allocator: std.mem.Allocator, io: std.Io, base_path: []const u8, pattern: []const u8, flags_param: anytype) !?ZlobResults {
     const zflags = flagsToZlobFlags(flags_param);
     const pattern_z = try allocator.dupeZ(u8, pattern);
     defer allocator.free(pattern_z);
 
     var pzlob: zlob_t = undefined;
-    const opt_result = try zlob.globAt(allocator, base_path, pattern_z.ptr, zflags.toInt(), null, &pzlob);
+    const opt_result = try zlob.globAt(allocator, io, base_path, pattern_z.ptr, zflags.toInt(), null, &pzlob);
 
     if (opt_result) |_| {
         return ZlobResults{

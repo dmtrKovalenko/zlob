@@ -47,6 +47,7 @@ pub const TestResult = struct {
 pub const AssertFn = *const fn (result: TestResult) anyerror!void;
 
 fn makeDirRecursive(path: []const u8) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     var path_buf: [4096]u8 = undefined;
     var pos: usize = 0;
 
@@ -54,12 +55,12 @@ fn makeDirRecursive(path: []const u8) !void {
         path_buf[pos] = char;
         pos += 1;
         if (char == '/' and pos > 1) {
-            std.fs.makeDirAbsolute(path_buf[0..pos]) catch |err| {
+            std.Io.Dir.createDirAbsolute(io, path_buf[0..pos], .default_dir) catch |err| {
                 if (err != error.PathAlreadyExists) continue;
             };
         }
     }
-    std.fs.makeDirAbsolute(path_buf[0..pos]) catch |err| {
+    std.Io.Dir.createDirAbsolute(io, path_buf[0..pos], .default_dir) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
 }
@@ -114,6 +115,8 @@ pub fn zlobIsomorphicTest(
     // Part 2: Test with filesystem match
     // ========================================
     {
+        const io = std.Io.Threaded.global_single_threaded.io();
+
         // Create temp directory with unique name based on test name (from @src())
         // This is deterministic and avoids race conditions between parallel tests
         var tmp_dir_buf: [512]u8 = undefined;
@@ -127,10 +130,10 @@ pub fn zlobIsomorphicTest(
         const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_test_{x}", .{hash});
 
         // Create the temp directory
-        std.fs.makeDirAbsolute(tmp_dir) catch |err| {
+        std.Io.Dir.createDirAbsolute(io, tmp_dir, .default_dir) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
-        defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+        defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
 
         // Create test files
         for (files) |file| {
@@ -143,8 +146,8 @@ pub fn zlobIsomorphicTest(
             }
 
             // Create the file
-            const f = try std.fs.createFileAbsolute(full_path, .{});
-            f.close();
+            const f = try std.Io.Dir.createFileAbsolute(io, full_path, .{});
+            f.close(io);
         }
 
         // Build full pattern with temp dir prefix
@@ -152,7 +155,7 @@ pub fn zlobIsomorphicTest(
         defer allocator.free(full_pattern);
 
         // Run filesystem glob
-        var fs_result_opt = try zlob.match(allocator, full_pattern, flags);
+        var fs_result_opt = try zlob.match(allocator, io, full_pattern, flags);
         if (fs_result_opt) |*fs_result| {
             defer fs_result.deinit();
 
@@ -217,12 +220,13 @@ pub fn testFilesystemOnly(
     assertFn: AssertFn,
 ) !void {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Build full pattern
     const full_pattern = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, pattern });
     defer allocator.free(full_pattern);
 
-    var fs_result_opt = try zlob.match(allocator, full_pattern, flags);
+    var fs_result_opt = try zlob.match(allocator, io, full_pattern, flags);
     if (fs_result_opt) |*fs_result| {
         defer fs_result.deinit();
 

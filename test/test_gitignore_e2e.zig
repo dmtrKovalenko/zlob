@@ -8,14 +8,15 @@ const ZlobFlags = zlob.ZlobFlags;
 // and verifies that glob correctly filters out ignored files and directories.
 test "gitignore e2e - target directory is filtered" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Create unique temp directory
     var tmp_dir_buf: [256]u8 = undefined;
-    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_e2e_{d}", .{std.time.milliTimestamp()});
+    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_e2e_{d}", .{std.Io.Timestamp.now(io, .real).toMilliseconds()});
 
     // Create temp directory
-    try std.fs.makeDirAbsolute(tmp_dir);
-    defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+    try std.Io.Dir.createDirAbsolute(io, tmp_dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
 
     // Create directory structure:
     // tmp/
@@ -41,7 +42,7 @@ test "gitignore e2e - target directory is filtered" {
     for (dirs) |dir| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, dir });
-        try std.fs.makeDirAbsolute(full_path);
+        try std.Io.Dir.createDirAbsolute(io, full_path, .default_dir);
     }
 
     // Create files
@@ -56,17 +57,17 @@ test "gitignore e2e - target directory is filtered" {
     for (files) |file| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, file });
-        const f = try std.fs.createFileAbsolute(full_path, .{});
-        f.close();
+        var f = try std.Io.Dir.createFileAbsolute(io, full_path, .{});
+        f.close(io);
     }
 
     // Create .gitignore file
     {
         var gitignore_path_buf: [512]u8 = undefined;
         const gitignore_path = try std.fmt.bufPrint(&gitignore_path_buf, "{s}/.gitignore", .{tmp_dir});
-        const gitignore_file = try std.fs.createFileAbsolute(gitignore_path, .{});
-        defer gitignore_file.close();
-        try gitignore_file.writeAll("target/\n");
+        var gitignore_file = try std.Io.Dir.createFileAbsolute(io, gitignore_path, .{});
+        defer gitignore_file.close(io);
+        try gitignore_file.writeStreamingAll(io, "target/\n");
     }
 
     // Test 1: Without gitignore flag - should find ALL .rs files including target/
@@ -77,7 +78,7 @@ test "gitignore e2e - target directory is filtered" {
         var flags = ZlobFlags.recommended();
         flags.gitignore = false; // Explicitly disable gitignore
 
-        var result = try zlob.match(allocator, pattern, flags);
+        var result = try zlob.match(allocator, io, pattern, flags);
         try testing.expect(result != null);
         defer result.?.deinit();
 
@@ -101,16 +102,15 @@ test "gitignore e2e - target directory is filtered" {
     // Test 2: With gitignore flag - should NOT find files in target/
     {
         // Change to temp dir to test gitignore loading from CWD
-        const original_cwd = std.fs.cwd();
-        var tmp_dir_handle = try std.fs.openDirAbsolute(tmp_dir, .{});
-        defer tmp_dir_handle.close();
-        try tmp_dir_handle.setAsCwd();
-        defer original_cwd.setAsCwd() catch {};
+        const original_cwd = try std.process.currentPathAlloc(io, allocator);
+        defer allocator.free(original_cwd);
+        try std.process.setCurrentPath(io, tmp_dir);
+        defer std.process.setCurrentPath(io, original_cwd) catch {};
 
         var flags = ZlobFlags.recommended();
         flags.gitignore = true; // Enable gitignore
 
-        var result = try zlob.match(allocator, "./**/*.rs", flags);
+        var result = try zlob.match(allocator, io, "./**/*.rs", flags);
         try testing.expect(result != null);
         defer result.?.deinit();
 
@@ -142,14 +142,15 @@ test "gitignore e2e - target directory is filtered" {
 
 test "gitignore e2e - node_modules directory is filtered" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Create unique temp directory
     var tmp_dir_buf: [256]u8 = undefined;
-    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_node_{d}", .{std.time.milliTimestamp()});
+    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_node_{d}", .{std.Io.Timestamp.now(io, .real).toMilliseconds()});
 
     // Create temp directory
-    try std.fs.makeDirAbsolute(tmp_dir);
-    defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+    try std.Io.Dir.createDirAbsolute(io, tmp_dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
 
     // Create directory structure for a Node.js project
     const dirs = [_][]const u8{
@@ -162,7 +163,7 @@ test "gitignore e2e - node_modules directory is filtered" {
     for (dirs) |dir| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, dir });
-        try std.fs.makeDirAbsolute(full_path);
+        try std.Io.Dir.createDirAbsolute(io, full_path, .default_dir);
     }
 
     // Create files
@@ -176,31 +177,30 @@ test "gitignore e2e - node_modules directory is filtered" {
     for (files_to_create) |file| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, file });
-        const f = try std.fs.createFileAbsolute(full_path, .{});
-        f.close();
+        var f = try std.Io.Dir.createFileAbsolute(io, full_path, .{});
+        f.close(io);
     }
 
     // Create .gitignore file
     {
         var gitignore_path_buf: [512]u8 = undefined;
         const gitignore_path = try std.fmt.bufPrint(&gitignore_path_buf, "{s}/.gitignore", .{tmp_dir});
-        const gitignore_file = try std.fs.createFileAbsolute(gitignore_path, .{});
-        defer gitignore_file.close();
-        try gitignore_file.writeAll("node_modules/\n");
+        var gitignore_file = try std.Io.Dir.createFileAbsolute(io, gitignore_path, .{});
+        defer gitignore_file.close(io);
+        try gitignore_file.writeStreamingAll(io, "node_modules/\n");
     }
 
     // Change to temp dir
-    const original_cwd = std.fs.cwd();
-    var tmp_dir_handle = try std.fs.openDirAbsolute(tmp_dir, .{});
-    defer tmp_dir_handle.close();
-    try tmp_dir_handle.setAsCwd();
-    defer original_cwd.setAsCwd() catch {};
+    const original_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(original_cwd);
+    try std.process.setCurrentPath(io, tmp_dir);
+    defer std.process.setCurrentPath(io, original_cwd) catch {};
 
     // Test with gitignore enabled
     var flags = ZlobFlags.recommended();
     flags.gitignore = true;
 
-    var result = try zlob.match(allocator, "./**/*.js", flags);
+    var result = try zlob.match(allocator, io, "./**/*.js", flags);
     try testing.expect(result != null);
     defer result.?.deinit();
 
@@ -218,14 +218,15 @@ test "gitignore e2e - node_modules directory is filtered" {
 
 test "gitignore e2e - wildcard patterns" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Create unique temp directory
     var tmp_dir_buf: [256]u8 = undefined;
-    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_wild_{d}", .{std.time.milliTimestamp()});
+    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_wild_{d}", .{std.Io.Timestamp.now(io, .real).toMilliseconds()});
 
     // Create temp directory
-    try std.fs.makeDirAbsolute(tmp_dir);
-    defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+    try std.Io.Dir.createDirAbsolute(io, tmp_dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
 
     // Create directory structure
     const dirs = [_][]const u8{
@@ -235,7 +236,7 @@ test "gitignore e2e - wildcard patterns" {
     for (dirs) |dir| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, dir });
-        try std.fs.makeDirAbsolute(full_path);
+        try std.Io.Dir.createDirAbsolute(io, full_path, .default_dir);
     }
 
     // Create files - mix of .o files and source files
@@ -249,31 +250,30 @@ test "gitignore e2e - wildcard patterns" {
     for (files_to_create) |file| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, file });
-        const f = try std.fs.createFileAbsolute(full_path, .{});
-        f.close();
+        var f = try std.Io.Dir.createFileAbsolute(io, full_path, .{});
+        f.close(io);
     }
 
     // Create .gitignore file with wildcard pattern
     {
         var gitignore_path_buf: [512]u8 = undefined;
         const gitignore_path = try std.fmt.bufPrint(&gitignore_path_buf, "{s}/.gitignore", .{tmp_dir});
-        const gitignore_file = try std.fs.createFileAbsolute(gitignore_path, .{});
-        defer gitignore_file.close();
-        try gitignore_file.writeAll("*.o\n");
+        var gitignore_file = try std.Io.Dir.createFileAbsolute(io, gitignore_path, .{});
+        defer gitignore_file.close(io);
+        try gitignore_file.writeStreamingAll(io, "*.o\n");
     }
 
     // Change to temp dir
-    const original_cwd = std.fs.cwd();
-    var tmp_dir_handle = try std.fs.openDirAbsolute(tmp_dir, .{});
-    defer tmp_dir_handle.close();
-    try tmp_dir_handle.setAsCwd();
-    defer original_cwd.setAsCwd() catch {};
+    const original_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(original_cwd);
+    try std.process.setCurrentPath(io, tmp_dir);
+    defer std.process.setCurrentPath(io, original_cwd) catch {};
 
     // Test with gitignore enabled - search for all files
     var flags = ZlobFlags.recommended();
     flags.gitignore = true;
 
-    var result = try zlob.match(allocator, "./**/*.*", flags);
+    var result = try zlob.match(allocator, io, "./**/*.*", flags);
     try testing.expect(result != null);
     defer result.?.deinit();
 
@@ -307,14 +307,15 @@ test "gitignore e2e - wildcard patterns" {
 // so files inside ignored directories are still returned.
 test "gitignore e2e - anchored directory patterns (rust/target/)" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Create unique temp directory
     var tmp_dir_buf: [256]u8 = undefined;
-    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_anchored_{d}", .{std.time.milliTimestamp()});
+    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_anchored_{d}", .{std.Io.Timestamp.now(io, .real).toMilliseconds()});
 
     // Create temp directory
-    try std.fs.makeDirAbsolute(tmp_dir);
-    defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+    try std.Io.Dir.createDirAbsolute(io, tmp_dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
 
     // Create directory structure similar to a monorepo with rust subproject:
     // tmp/
@@ -338,7 +339,7 @@ test "gitignore e2e - anchored directory patterns (rust/target/)" {
     for (dirs) |dir| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, dir });
-        try std.fs.makeDirAbsolute(full_path);
+        try std.Io.Dir.createDirAbsolute(io, full_path, .default_dir);
     }
 
     // Create files
@@ -351,32 +352,31 @@ test "gitignore e2e - anchored directory patterns (rust/target/)" {
     for (files_to_create) |file| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, file });
-        const f = try std.fs.createFileAbsolute(full_path, .{});
-        f.close();
+        var f = try std.Io.Dir.createFileAbsolute(io, full_path, .{});
+        f.close(io);
     }
 
     // Create .gitignore file with ANCHORED pattern (contains /)
     {
         var gitignore_path_buf: [512]u8 = undefined;
         const gitignore_path = try std.fmt.bufPrint(&gitignore_path_buf, "{s}/.gitignore", .{tmp_dir});
-        const gitignore_file = try std.fs.createFileAbsolute(gitignore_path, .{});
-        defer gitignore_file.close();
+        var gitignore_file = try std.Io.Dir.createFileAbsolute(io, gitignore_path, .{});
+        defer gitignore_file.close(io);
         // This pattern is anchored because it contains / before the trailing /
-        try gitignore_file.writeAll("rust/target/\n");
+        try gitignore_file.writeStreamingAll(io, "rust/target/\n");
     }
 
     // Change to temp dir
-    const original_cwd = std.fs.cwd();
-    var tmp_dir_handle = try std.fs.openDirAbsolute(tmp_dir, .{});
-    defer tmp_dir_handle.close();
-    try tmp_dir_handle.setAsCwd();
-    defer original_cwd.setAsCwd() catch {};
+    const original_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(original_cwd);
+    try std.process.setCurrentPath(io, tmp_dir);
+    defer std.process.setCurrentPath(io, original_cwd) catch {};
 
     // Test with gitignore enabled
     var flags = ZlobFlags.recommended();
     flags.gitignore = true;
 
-    var result = try zlob.match(allocator, "./**/*.rs", flags);
+    var result = try zlob.match(allocator, io, "./**/*.rs", flags);
     try testing.expect(result != null);
     defer result.?.deinit();
 
@@ -395,14 +395,15 @@ test "gitignore e2e - anchored directory patterns (rust/target/)" {
 
 test "gitignore e2e - negation patterns" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Create unique temp directory
     var tmp_dir_buf: [256]u8 = undefined;
-    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_neg_{d}", .{std.time.milliTimestamp()});
+    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_neg_{d}", .{std.Io.Timestamp.now(io, .real).toMilliseconds()});
 
     // Create temp directory
-    try std.fs.makeDirAbsolute(tmp_dir);
-    defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+    try std.Io.Dir.createDirAbsolute(io, tmp_dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
 
     // Create directory structure
     const dirs = [_][]const u8{
@@ -411,7 +412,7 @@ test "gitignore e2e - negation patterns" {
     for (dirs) |dir| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, dir });
-        try std.fs.makeDirAbsolute(full_path);
+        try std.Io.Dir.createDirAbsolute(io, full_path, .default_dir);
     }
 
     // Create files
@@ -424,32 +425,31 @@ test "gitignore e2e - negation patterns" {
     for (files_to_create) |file| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, file });
-        const f = try std.fs.createFileAbsolute(full_path, .{});
-        f.close();
+        var f = try std.Io.Dir.createFileAbsolute(io, full_path, .{});
+        f.close(io);
     }
 
     // Create .gitignore file with negation pattern
     {
         var gitignore_path_buf: [512]u8 = undefined;
         const gitignore_path = try std.fmt.bufPrint(&gitignore_path_buf, "{s}/.gitignore", .{tmp_dir});
-        const gitignore_file = try std.fs.createFileAbsolute(gitignore_path, .{});
-        defer gitignore_file.close();
+        var gitignore_file = try std.Io.Dir.createFileAbsolute(io, gitignore_path, .{});
+        defer gitignore_file.close(io);
         // Ignore all .log files except important.log
-        try gitignore_file.writeAll("*.log\n!important.log\n");
+        try gitignore_file.writeStreamingAll(io, "*.log\n!important.log\n");
     }
 
     // Change to temp dir
-    const original_cwd = std.fs.cwd();
-    var tmp_dir_handle = try std.fs.openDirAbsolute(tmp_dir, .{});
-    defer tmp_dir_handle.close();
-    try tmp_dir_handle.setAsCwd();
-    defer original_cwd.setAsCwd() catch {};
+    const original_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(original_cwd);
+    try std.process.setCurrentPath(io, tmp_dir);
+    defer std.process.setCurrentPath(io, original_cwd) catch {};
 
     // Test with gitignore enabled
     var flags = ZlobFlags.recommended();
     flags.gitignore = true;
 
-    var result = try zlob.match(allocator, "./**/*.log", flags);
+    var result = try zlob.match(allocator, io, "./**/*.log", flags);
     try testing.expect(result != null);
     defer result.?.deinit();
 
@@ -462,14 +462,15 @@ test "gitignore e2e - negation patterns" {
 
 test "gitignore e2e - negated subdirectory of ignored directory" {
     const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Create unique temp directory
     var tmp_dir_buf: [256]u8 = undefined;
-    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_negdir_{d}", .{std.time.milliTimestamp()});
+    const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_gitignore_negdir_{d}", .{std.Io.Timestamp.now(io, .real).toMilliseconds()});
 
     // Create temp directory
-    try std.fs.makeDirAbsolute(tmp_dir);
-    defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+    try std.Io.Dir.createDirAbsolute(io, tmp_dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
 
     // Create directory structure:
     // tmp/
@@ -494,7 +495,7 @@ test "gitignore e2e - negated subdirectory of ignored directory" {
     for (dirs) |dir| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, dir });
-        try std.fs.makeDirAbsolute(full_path);
+        try std.Io.Dir.createDirAbsolute(io, full_path, .default_dir);
     }
 
     // Create files
@@ -506,32 +507,31 @@ test "gitignore e2e - negated subdirectory of ignored directory" {
     for (files_to_create) |file| {
         var path_buf: [512]u8 = undefined;
         const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ tmp_dir, file });
-        const f = try std.fs.createFileAbsolute(full_path, .{});
-        f.close();
+        var f = try std.Io.Dir.createFileAbsolute(io, full_path, .{});
+        f.close(io);
     }
 
     // Create .gitignore file with negation for subdirectory
     {
         var gitignore_path_buf: [512]u8 = undefined;
         const gitignore_path = try std.fmt.bufPrint(&gitignore_path_buf, "{s}/.gitignore", .{tmp_dir});
-        const gitignore_file = try std.fs.createFileAbsolute(gitignore_path, .{});
-        defer gitignore_file.close();
+        var gitignore_file = try std.Io.Dir.createFileAbsolute(io, gitignore_path, .{});
+        defer gitignore_file.close(io);
         // Ignore rust/target/ but NOT rust/target/rust-analyzer/
-        try gitignore_file.writeAll("rust/target/\n!rust/target/rust-analyzer/\n");
+        try gitignore_file.writeStreamingAll(io, "rust/target/\n!rust/target/rust-analyzer/\n");
     }
 
     // Change to temp dir
-    const original_cwd = std.fs.cwd();
-    var tmp_dir_handle = try std.fs.openDirAbsolute(tmp_dir, .{});
-    defer tmp_dir_handle.close();
-    try tmp_dir_handle.setAsCwd();
-    defer original_cwd.setAsCwd() catch {};
+    const original_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(original_cwd);
+    try std.process.setCurrentPath(io, tmp_dir);
+    defer std.process.setCurrentPath(io, original_cwd) catch {};
 
     // Test with gitignore enabled
     var flags = ZlobFlags.recommended();
     flags.gitignore = true;
 
-    var result = try zlob.match(allocator, "./**/*.rs", flags);
+    var result = try zlob.match(allocator, io, "./**/*.rs", flags);
     try testing.expect(result != null);
     defer result.?.deinit();
 
