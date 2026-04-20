@@ -259,30 +259,19 @@ const RecursiveGetdents64Walker = struct {
         const dir_stack = std.ArrayList(DirEntry).initCapacity(allocator, 16) catch
             std.ArrayList(DirEntry).empty;
 
-        const start_fd = if (config.base_dir) |bd| open: {
-            // Use openatZ to open relative to base_dir
-            var path_z: [4096:0]u8 = undefined;
-            if (start_path.len >= 4096) return error.NameTooLong;
-            @memcpy(path_z[0..start_path.len], start_path);
-            path_z[start_path.len] = 0;
+        var path_z: [4096:0]u8 = undefined;
+        if (start_path.len >= 4096) return error.NameTooLong;
+        @memcpy(path_z[0..start_path.len], start_path);
+        path_z[start_path.len] = 0;
 
-            break :open posix.openatZ(bd.handle, &path_z, .{
-                .ACCMODE = .RDONLY,
-                .DIRECTORY = true,
-                .CLOEXEC = true,
-            }, 0) catch |err| {
-                try handleOpenError(start_path, err, config);
-                return err;
-            };
-        } else open: {
-            break :open posix.open(start_path, .{
-                .ACCMODE = .RDONLY,
-                .DIRECTORY = true,
-                .CLOEXEC = true,
-            }, 0) catch |err| {
-                try handleOpenError(start_path, err, config);
-                return err;
-            };
+        const dir_fd = if (config.base_dir) |bd| bd.handle else posix.AT.FDCWD;
+        const start_fd = posix.openatZ(dir_fd, &path_z, .{
+            .ACCMODE = .RDONLY,
+            .DIRECTORY = true,
+            .CLOEXEC = true,
+        }, 0) catch |err| {
+            try handleOpenError(start_path, err, config);
+            return err;
         };
 
         return RecursiveGetdents64Walker{
@@ -324,12 +313,12 @@ const RecursiveGetdents64Walker = struct {
 
         // Close current fd if still open
         if (!self.finished and self.current_fd >= 0) {
-            posix.close(self.current_fd);
+            _ = linux.close(self.current_fd);
         }
 
         // Close any remaining stacked fds
         for (self.dir_stack.items) |entry| {
-            posix.close(entry.fd);
+            _ = linux.close(entry.fd);
         }
 
         self.dir_stack.deinit(self.allocator);
@@ -356,7 +345,7 @@ const RecursiveGetdents64Walker = struct {
 
             if (@as(isize, @bitCast(bytes_read)) < 0 or bytes_read == 0) {
                 // Current directory exhausted or error - close it and pop next from stack
-                posix.close(self.current_fd);
+                _ = linux.close(self.current_fd);
 
                 // Pop next directory from stack
                 const next_dir = self.dir_stack.pop() orelse {
@@ -451,7 +440,7 @@ const RecursiveGetdents64Walker = struct {
                     @memcpy(entry.path_content[0..copy_len], self.path_buffer[0..copy_len]);
                     self.dir_stack.append(self.allocator, entry) catch {
                         // OOM — close the fd we just opened to avoid leak
-                        posix.close(subdir_fd);
+                        _ = linux.close(subdir_fd);
                     };
                 } else |_| {}
             }

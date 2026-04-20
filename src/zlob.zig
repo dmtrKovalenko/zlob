@@ -640,7 +640,8 @@ fn expandWildcardComponents(
     directories_only: bool,
     flags: ZlobFlags,
     errfunc: zlob_errfunc_t,
-    io: Io, base_dir: ?std.Io.Dir,
+    io: Io,
+    base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
 ) !void {
     if (component_idx > 65536) {
@@ -1412,7 +1413,8 @@ fn globWithBracedComponents(
     pzlob: *zlob_t,
     directories_only: bool,
     gitignore_filter: ?*GitIgnore,
-    io: Io, base_dir: ?std.Io.Dir,
+    io: Io,
+    base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
 ) !?void {
     _ = gitignore_filter; // TODO: Apply gitignore filtering
@@ -1575,7 +1577,8 @@ fn walkBracedComponents(
     results: *ResultsList,
     directories_only: bool,
     errfunc: zlob_errfunc_t,
-    io: Io, base_dir: ?std.Io.Dir,
+    io: Io,
+    base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
     comptime onComplete: fn (std.mem.Allocator, []const u8, *ResultsList, bool) error{ OutOfMemory, Aborted }!void,
 ) error{ OutOfMemory, Aborted }!void {
@@ -1643,7 +1646,8 @@ fn globRecursiveWithBracedPrefix(
     results: *ResultsList,
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
-    io: Io, base_dir: ?std.Io.Dir,
+    io: Io,
+    base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
 ) !void {
     // If we've matched all pre-doublestar components, start the recursive walk
@@ -1785,7 +1789,8 @@ fn globRecursiveWalk(
     results: *ResultsList,
     info: *const PatternInfo,
     errfunc: zlob_errfunc_t,
-    io: Io, base_dir: ?std.Io.Dir,
+    io: Io,
+    base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
 ) !void {
     const has_dir_components = rec_pattern.dir_components.len > 0;
