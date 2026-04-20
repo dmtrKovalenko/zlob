@@ -77,8 +77,8 @@ uninstall:
 	fi
 	@echo "Uninstall complete!"
 
-# Minimal test of C API
-test: build test/test_c_api.c
+test: build
+	zig build test --summary all
 	$(CC) $(CFLAGS) -I./zig-out/include -L./zig-out/lib \
 		-o test_c_api test/test_c_api.c -lzlob \
 		-Wl,-rpath,./zig-out/lib

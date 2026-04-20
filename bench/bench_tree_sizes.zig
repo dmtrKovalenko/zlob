@@ -6,10 +6,18 @@ const zlob_flags = @import("zlob_flags");
 extern "c" fn glob(pattern: [*:0]const u8, flags: c_int, errfunc: ?*const anyopaque, pglob: *LibcGlobT) c_int;
 extern "c" fn globfree(pglob: *LibcGlobT) void;
 
+// Must match glibc's full `glob_t` layout so `glob()` does not overwrite
+// adjacent stack slots. See /usr/include/glob.h.
 const LibcGlobT = extern struct {
     pathc: usize,
     pathv: [*c][*c]u8,
     offs: usize,
+    flags: c_int,
+    closedir: ?*const anyopaque,
+    readdir: ?*const anyopaque,
+    opendir: ?*const anyopaque,
+    lstat: ?*const anyopaque,
+    stat: ?*const anyopaque,
 };
 
 // --- Tree creation helpers ---
@@ -194,7 +202,7 @@ const BenchResult = struct {
     zlob_count: usize,
 };
 
-fn benchmarkPattern(io: std.Io, pattern_z: [*:0]const u8, iterations: usize) !BenchResult {
+fn benchmarkPattern(io: std.Io, pattern_z: [*:0]const u8, iterations: usize) BenchResult {
     // Warmup: 3 rounds to populate OS caches and stabilize
     for (0..3) |_| {
         var g: LibcGlobT = undefined;
@@ -248,7 +256,7 @@ fn benchmarkPattern(io: std.Io, pattern_z: [*:0]const u8, iterations: usize) !Be
 }
 
 /// Benchmark zlob-only with custom flags (for recursive ** patterns that libc doesn't support)
-fn benchmarkZlobOnly(io: std.Io, pattern_z: [*:0]const u8, flags: c_int, iterations: usize) !BenchResult {
+fn benchmarkZlobOnly(io: std.Io, pattern_z: [*:0]const u8, flags: c_int, iterations: usize) BenchResult {
     // Warmup
     for (0..3) |_| {
         var z: c_lib.zlob_t = undefined;
@@ -314,7 +322,7 @@ fn printZlobOnly(label: []const u8, pattern: []const u8, r: BenchResult, iterati
     });
 }
 
-pub fn main() !void {
+pub fn main() void {
     const io = std.Io.Threaded.global_single_threaded.io();
     const allocator = std.heap.c_allocator;
     _ = allocator;
@@ -369,7 +377,7 @@ pub fn main() !void {
             var pat_z: [64:0]u8 = undefined;
             @memcpy(pat_z[0..pat.len], pat);
             pat_z[pat.len] = 0;
-            const r = try benchmarkPattern(io, &pat_z, small_iters);
+            const r = benchmarkPattern(io, &pat_z, small_iters);
             printResult("small", pat, r, small_iters);
         }
     }
@@ -393,7 +401,7 @@ pub fn main() !void {
             var pat_z: [64:0]u8 = undefined;
             @memcpy(pat_z[0..pat.len], pat);
             pat_z[pat.len] = 0;
-            const r = try benchmarkPattern(io, &pat_z, medium_iters);
+            const r = benchmarkPattern(io, &pat_z, medium_iters);
             printResult("medium", pat, r, medium_iters);
         }
     }
@@ -417,7 +425,7 @@ pub fn main() !void {
             var pat_z: [64:0]u8 = undefined;
             @memcpy(pat_z[0..pat.len], pat);
             pat_z[pat.len] = 0;
-            const r = try benchmarkPattern(io, &pat_z, large_iters);
+            const r = benchmarkPattern(io, &pat_z, large_iters);
             printResult("large", pat, r, large_iters);
         }
     }
@@ -439,7 +447,7 @@ pub fn main() !void {
                 var pat_z: [64:0]u8 = undefined;
                 @memcpy(pat_z[0..pat.len], pat);
                 pat_z[pat.len] = 0;
-                const r = try benchmarkZlobOnly(io, &pat_z, ds_flag, iters);
+                const r = benchmarkZlobOnly(io, &pat_z, ds_flag, iters);
                 printZlobOnly("small-recursive", pat, r, iters);
             }
         }
@@ -456,7 +464,7 @@ pub fn main() !void {
                 var pat_z: [64:0]u8 = undefined;
                 @memcpy(pat_z[0..pat.len], pat);
                 pat_z[pat.len] = 0;
-                const r = try benchmarkZlobOnly(io, &pat_z, ds_flag, iters);
+                const r = benchmarkZlobOnly(io, &pat_z, ds_flag, iters);
                 printZlobOnly("medium-recursive", pat, r, iters);
             }
         }
@@ -473,7 +481,7 @@ pub fn main() !void {
                 var pat_z: [64:0]u8 = undefined;
                 @memcpy(pat_z[0..pat.len], pat);
                 pat_z[pat.len] = 0;
-                const r = try benchmarkZlobOnly(io, &pat_z, ds_flag, iters);
+                const r = benchmarkZlobOnly(io, &pat_z, ds_flag, iters);
                 printZlobOnly("large-recursive", pat, r, iters);
             }
         }

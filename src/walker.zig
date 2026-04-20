@@ -3,30 +3,19 @@ const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-// std.posix is not available on Windows
-const posix = if (builtin.os.tag != .windows) std.posix else struct {
-    // Stubs for Windows - provide errno values for compatibility
-    pub const fd_t = std.os.windows.HANDLE;
-    pub const E = enum(c_int) {
-        ACCES = 13,
-        NOENT = 2,
-        NOTDIR = 20,
-        LOOP = 40,
-        NAMETOOLONG = 36,
-        NOMEM = 12,
-        INVAL = 22,
-        IO = 5,
-    };
-    pub fn close(_: anytype) void {}
-    pub fn open(_: anytype, _: anytype, _: anytype) !fd_t {
-        return error.Unsupported;
-    }
-    pub fn openat(_: anytype, _: anytype, _: anytype, _: anytype) !fd_t {
-        return error.Unsupported;
-    }
-    pub fn openatZ(_: anytype, _: anytype, _: anytype, _: anytype) !fd_t {
-        return error.Unsupported;
-    }
+
+/// POSIX errno values used for cross-platform error reporting through the
+/// `ErrCallbackFn` interface. Values are the standard POSIX integers and
+/// match `std.posix.E` on POSIX targets.
+const errno = struct {
+    const ACCES: c_int = 13;
+    const NOENT: c_int = 2;
+    const NOTDIR: c_int = 20;
+    const LOOP: c_int = 40;
+    const NAMETOOLONG: c_int = 36;
+    const NOMEM: c_int = 12;
+    const INVAL: c_int = 22;
+    const IO: c_int = 5;
 };
 
 pub const ErrCallbackFn = *const fn (epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int;
@@ -188,7 +177,10 @@ inline fn shouldSkipEntry(name: []const u8, hidden: HiddenConfig) bool {
 
 pub fn WalkerType(comptime backend: Backend) type {
     return switch (backend) {
-        .getdents64 => RecursiveGetdents64Walker,
+        .getdents64 => if (builtin.os.tag == .linux)
+            RecursiveGetdents64Walker
+        else
+            @compileError("getdents64 backend is Linux-only"),
         .std_fs => StdFsWalker,
     };
 }
@@ -199,10 +191,11 @@ pub fn isOptimizedBackendAvailable() bool {
     return builtin.os.tag == .linux;
 }
 
-// Uses getdents64 syscall but only for recursive walking
-const RecursiveGetdents64Walker = struct {
-    const is_linux = builtin.os.tag == .linux;
-    const linux = if (is_linux) std.os.linux else undefined;
+// Uses getdents64 syscall but only for recursive walking.
+// Linux-only: the entire body assumes `std.posix` / `std.os.linux` are available.
+const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else struct {
+    const posix = std.posix;
+    const linux = std.os.linux;
 
     const DT_DIR: u8 = 4;
     const DT_REG: u8 = 8;
@@ -245,9 +238,6 @@ const RecursiveGetdents64Walker = struct {
     };
 
     pub fn init(allocator: Allocator, io: Io, start_path: []const u8, config: WalkerConfig) !RecursiveGetdents64Walker {
-        if (!is_linux) {
-            @compileError("Getdents64Walker is only available on Linux");
-        }
         _ = io; // Linux getdents64 backend uses raw syscalls; accepted for API parity with StdFsWalker.
 
         // Use smaller buffer for single-directory iteration (max_depth=0)
@@ -298,8 +288,8 @@ const RecursiveGetdents64Walker = struct {
             @memcpy(path_z[0..len], path[0..len]);
             path_z[len] = 0;
 
-            const errno = zigErrorToPosix(err);
-            if (cb(&path_z, errno) != 0) {
+            const err_code = zigErrorToPosix(err);
+            if (cb(&path_z, err_code) != 0) {
                 return error.Aborted;
             }
         }
@@ -309,8 +299,6 @@ const RecursiveGetdents64Walker = struct {
     }
 
     pub fn deinit(self: *RecursiveGetdents64Walker) void {
-        if (!is_linux) return;
-
         // Close current fd if still open
         if (!self.finished and self.current_fd >= 0) {
             _ = linux.close(self.current_fd);
@@ -329,7 +317,6 @@ const RecursiveGetdents64Walker = struct {
     }
 
     pub fn next(self: *RecursiveGetdents64Walker) !?Entry {
-        if (!is_linux) return null;
         if (self.finished) return null;
 
         while (true) {
@@ -370,8 +357,6 @@ const RecursiveGetdents64Walker = struct {
     }
 
     fn parseNextEntry(self: *RecursiveGetdents64Walker) ?Entry {
-        if (!is_linux) return null;
-
         const base = self.getdents_offset;
         if (base + 19 > self.getdents_len) return null;
 
@@ -530,8 +515,8 @@ const StdFsWalker = struct {
             @memcpy(path_z[0..len], path[0..len]);
             path_z[len] = 0;
 
-            const errno = zigErrorToPosix(err);
-            if (cb(&path_z, errno) != 0) {
+            const err_code = zigErrorToPosix(err);
+            if (cb(&path_z, err_code) != 0) {
                 return error.Aborted;
             }
         }
@@ -1081,14 +1066,14 @@ pub const DirIterator = struct {
 
 fn zigErrorToPosix(err: anyerror) c_int {
     return switch (err) {
-        error.AccessDenied => @intFromEnum(posix.E.ACCES),
-        error.FileNotFound => @intFromEnum(posix.E.NOENT),
-        error.NotDir => @intFromEnum(posix.E.NOTDIR),
-        error.SymLinkLoop => @intFromEnum(posix.E.LOOP),
-        error.NameTooLong => @intFromEnum(posix.E.NAMETOOLONG),
-        error.SystemResources => @intFromEnum(posix.E.NOMEM),
-        error.InvalidHandle, error.InvalidArgument => @intFromEnum(posix.E.INVAL),
-        else => @intFromEnum(posix.E.IO),
+        error.AccessDenied => errno.ACCES,
+        error.FileNotFound => errno.NOENT,
+        error.NotDir => errno.NOTDIR,
+        error.SymLinkLoop => errno.LOOP,
+        error.NameTooLong => errno.NAMETOOLONG,
+        error.SystemResources => errno.NOMEM,
+        error.InvalidHandle, error.InvalidArgument => errno.INVAL,
+        else => errno.IO,
     };
 }
 
