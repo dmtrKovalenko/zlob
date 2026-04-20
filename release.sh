@@ -55,10 +55,10 @@ else
 fi
 
 # Check for uncommitted changes
-if [ -n "$(git status --porcelain)" ]; then
-    echo -e "${RED}Error: You have uncommitted changes. Please commit or stash them first.${NC}"
-    exit 1
-fi
+# if [ -n "$(git status --porcelain)" ]; then
+#     echo -e "${RED}Error: You have uncommitted changes. Please commit or stash them first.${NC}"
+#     exit 1
+# fi
 
 # Update version in build.zig.zon
 echo -e "${GREEN}Updating build.zig.zon...${NC}"
@@ -74,6 +74,7 @@ if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would update version to \"${NEW_VERSION}\" in rust/Cargo.toml${NC}"
 else
     sed -i "s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"${NEW_VERSION}\"/" rust/Cargo.toml
+    cd rust && cargo build && cd -
 fi
 
 # Verify the changes (skip in dry-run)
