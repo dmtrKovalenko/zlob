@@ -88,11 +88,18 @@ fn main() {
     let target = env::var("TARGET").unwrap();
     let host = env::var("HOST").unwrap();
 
-    // For Windows targets, always map through rust_target_to_zig().
-    // Using "native" on Windows would cause Zig to resolve to GNU/MinGW ABI
-    // (because Zig ships its own MinGW libc), but Rust's MSVC linker expects
-    // MSVC symbols (e.g., __chkstk vs ___chkstk_ms). This causes linker errors.
-    let zig_target = if target == host && !target.contains("windows") {
+    // In CI, always map through rust_target_to_zig() so the produced artifact
+    // uses the generic baseline CPU for that ISA. Otherwise Zig's "native"
+    // would bake in whatever SIMD the CI runner happens to have (e.g.
+    // AVX-512 on some Intel SKUs), and downstream users on older CPUs hit
+    // SIGILL / "Illegal instruction" at runtime.
+    //
+    // For Windows targets, always map through rust_target_to_zig() regardless
+    // of CI: using "native" on Windows would cause Zig to resolve to GNU/MinGW
+    // ABI (because Zig ships its own MinGW libc), but Rust's MSVC linker
+    // expects MSVC symbols (e.g., __chkstk vs ___chkstk_ms).
+    let in_ci = env::var("CI").is_ok();
+    let zig_target = if target == host && !target.contains("windows") && !in_ci {
         "native"
     } else {
         rust_target_to_zig(&target)
