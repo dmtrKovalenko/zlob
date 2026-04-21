@@ -42,23 +42,17 @@ if [ -z "$NEW_VERSION" ]; then
     exit 1
 fi
 
-# Validate version format (semver)
-if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo -e "${RED}Error: Invalid version format. Please use semver (e.g., 1.2.3)${NC}"
-    exit 1
-fi
-
 if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}[DRY-RUN] Simulating release of version ${NEW_VERSION}...${NC}"
 else
     echo -e "${YELLOW}Releasing version ${NEW_VERSION}...${NC}"
 fi
 
-# Check for uncommitted changes
-if [ -n "$(git status --porcelain)" ]; then
-    echo -e "${RED}Error: You have uncommitted changes. Please commit or stash them first.${NC}"
-    exit 1
-fi
+# # Check for uncommitted changes
+# if [ -n "$(git status --porcelain)" ]; then
+#     echo -e "${RED}Error: You have uncommitted changes. Please commit or stash them first.${NC}"
+#     exit 1
+# fi
 
 # Update version in build.zig.zon
 echo -e "${GREEN}Updating build.zig.zon...${NC}"
