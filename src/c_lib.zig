@@ -7,28 +7,38 @@ const mem = std.mem;
 const ZlobFlags = zlob_flags.ZlobFlags;
 const pattern_context = zlob_impl.pattern_context;
 
-// Disable std's crash-handler alternative signal stack.
+// Strip Zig std's crash-handling / self-introspection machinery.
 //
-// Zig's default is a 256 KB `threadlocal var signal_stack: [size]u8` inside
-// std.Thread.maybeAttachSignalStack. When this `.so` is statically linked
-// into a downstream consumer (fff-nvim's libfff_nvim.so, fff-node's addon,
-// etc.) and that consumer is `dlopen`'d late by a host that has already
-// finished its own TLS setup (neovim loading a plugin, node/bun loading a
-// native module), glibc has to fit 256 KB per thread into its small static-
-// TLS reserve and `dlopen` fails with:
-//   `cannot allocate memory in static TLS block`
+// zlob is a static-lib FFI dependency: the host (fff-nvim, fff-node, nvim
+// itself, node, etc.) owns signal handling and process-wide panic/trace
+// reporting. We don't want Zig's extra machinery riding along into every
+// consumer because:
+//  1. Per-thread TLS: std.Thread.maybeAttachSignalStack declares a 256 KB
+//     `threadlocal var signal_stack`. When a downstream `.so` linking zlob
+//     statically is `dlopen`'d late (e.g. neovim loading a plugin), glibc
+//     fails with `cannot allocate memory in static TLS block` (fff.nvim
+//     issue #298).
+//  2. Upstream bug: on aarch64-windows-msvc, Zig 0.16.0's
+//     std.debug.SelfInfo.Windows.zig has an `@ptrCast increases pointer
+//     alignment` compile error that fails our build.
 //
-// Setting this to null early-returns from maybeAttachSignalStack, which
-// means the nested struct holding the threadlocal is never instantiated
-// and no TLS is reserved.
+// Three knobs turn all this off at compile time:
 //
-// This does NOT disable threads — zlob still spawns worker threads freely
-// via std.Thread.spawn. The only thing lost is Zig's pretty crash-trace
-// handler for SIGSEGV/SIGILL/SIGBUS/SIGFPE running on an alt stack; an
-// actual crash will still reach the host's signal handler (nvim, node,
-// etc.) the way any other C lib's crash would.
+// * `signal_stack_size = null` — maybeAttachSignalStack early-returns, the
+//   256 KB threadlocal is never instantiated.
+//
+// * `enable_segfault_handler = false` — don't install Zig's SIGSEGV/SIGILL/
+//   SIGBUS/SIGFPE handler. The host's handler runs instead (normal FFI).
+//
+// * `allow_stack_tracing = false` — disables debug.captureCurrentStackTrace
+//   and friends; keeps std.debug.SelfInfo (incl. the broken Windows path)
+//   out of the compilation entirely.
+//
+// None of this disables threads — std.Thread.spawn still works.
 pub const std_options: std.Options = .{
     .signal_stack_size = null,
+    .enable_segfault_handler = false,
+    .allow_stack_tracing = false,
 };
 
 // When libc is linked (most POSIX targets), use c_allocator (backed by malloc/free)
