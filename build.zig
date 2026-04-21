@@ -289,6 +289,84 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_test.step);
     }
 
+    // Regression test for #298 / fff.nvim TLS-block crash.
+    //
+    // Consumer `.so` statically links zlob. A host test `dlopen()`s the
+    // consumer to verify the library can still be loaded after the main
+    // program is up — i.e. zlob's static-TLS footprint must stay small
+    // enough for glibc to fit into its per-thread static-TLS reserve when
+    // the .so is loaded late. Linux glibc only; other platforms don't
+    // have a small static-TLS reserve.
+    const is_linux_gnu = target.result.os.tag == .linux and
+        target.result.abi == .gnu;
+    if (is_linux_gnu) {
+        const dlopen_consumer_mod = b.createModule(.{
+            .root_source_file = b.path("test/dlopen_consumer.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+            .imports = &.{
+                .{ .name = "c_lib", .module = c_lib_mod },
+            },
+        });
+        // The consumer pulls in the zlob static lib (not a fresh compile of
+        // the zig sources) so we exercise the same object files downstream
+        // Rust/C consumers link against.
+        dlopen_consumer_mod.linkLibrary(c_lib_static);
+        const dlopen_consumer = b.addLibrary(.{
+            .name = "dlopen_consumer",
+            .linkage = .dynamic,
+            .root_module = dlopen_consumer_mod,
+        });
+        b.installArtifact(dlopen_consumer);
+
+        // libdl is folded into libc on glibc >= 2.34 (Ubuntu 22.04+),
+        // which the CI runners use, so link_libc already provides
+        // dlopen/dlsym.
+        const tls_test_mod = b.createModule(.{
+            .root_source_file = b.path("test/test_dlopen_tls.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const tls_test = b.addTest(.{
+            .root_module = tls_test_mod,
+        });
+
+        const run_tls_test = b.addRunArtifact(tls_test);
+        // Point the test at the installed consumer .so. The zig test
+        // runner owns argv, so env var is the cleanest channel.
+        run_tls_test.step.dependOn(b.getInstallStep());
+        run_tls_test.setEnvironmentVariable(
+            "ZLOB_DLOPEN_CONSUMER",
+            b.getInstallPath(.lib, "libdlopen_consumer.so"),
+        );
+        test_step.dependOn(&run_tls_test.step);
+
+        // Symbol-level check: scan libzlob.a for any TLS symbol bigger
+        // than the static-TLS budget. Catches regressions where zlob's
+        // std_options override is removed or Zig std grows a new fat
+        // threadlocal. Independent of dlopen so it also runs in
+        // non-ELF-dlopen sandboxes.
+        const tls_budget_mod = b.createModule(.{
+            .root_source_file = b.path("test/test_static_tls_budget.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const tls_budget_test = b.addTest(.{
+            .root_module = tls_budget_mod,
+        });
+        const run_tls_budget = b.addRunArtifact(tls_budget_test);
+        run_tls_budget.step.dependOn(b.getInstallStep());
+        run_tls_budget.setEnvironmentVariable(
+            "ZLOB_STATIC_ARCHIVE",
+            b.getInstallPath(.lib, "libzlob.a"),
+        );
+        test_step.dependOn(&run_tls_budget.step);
+    }
+
     // Benchmark executables (only if not skipped)
     if (!skip_bench) {
         const is_windows = target.result.os.tag == .windows;
