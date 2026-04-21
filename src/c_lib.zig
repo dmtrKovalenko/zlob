@@ -7,6 +7,30 @@ const mem = std.mem;
 const ZlobFlags = zlob_flags.ZlobFlags;
 const pattern_context = zlob_impl.pattern_context;
 
+// Disable std's crash-handler alternative signal stack.
+//
+// Zig's default is a 256 KB `threadlocal var signal_stack: [size]u8` inside
+// std.Thread.maybeAttachSignalStack. When this `.so` is statically linked
+// into a downstream consumer (fff-nvim's libfff_nvim.so, fff-node's addon,
+// etc.) and that consumer is `dlopen`'d late by a host that has already
+// finished its own TLS setup (neovim loading a plugin, node/bun loading a
+// native module), glibc has to fit 256 KB per thread into its small static-
+// TLS reserve and `dlopen` fails with:
+//   `cannot allocate memory in static TLS block`
+//
+// Setting this to null early-returns from maybeAttachSignalStack, which
+// means the nested struct holding the threadlocal is never instantiated
+// and no TLS is reserved.
+//
+// This does NOT disable threads — zlob still spawns worker threads freely
+// via std.Thread.spawn. The only thing lost is Zig's pretty crash-trace
+// handler for SIGSEGV/SIGILL/SIGBUS/SIGFPE running on an alt stack; an
+// actual crash will still reach the host's signal handler (nvim, node,
+// etc.) the way any other C lib's crash would.
+pub const std_options: std.Options = .{
+    .signal_stack_size = null,
+};
+
 // When libc is linked (most POSIX targets), use c_allocator (backed by malloc/free)
 // for better small-alloc performance. Otherwise (Windows MSVC, Android, etc.)
 // fall back to page_allocator (backed by VirtualAlloc / mmap).

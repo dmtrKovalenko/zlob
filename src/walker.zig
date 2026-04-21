@@ -455,7 +455,17 @@ const StdFsWalker = struct {
 
     // Current directory being iterated
     current_dir: ?std.Io.Dir,
-    current_iter: ?std.Io.Dir.Iterator,
+    // Directory reader backed by a 4 KB buffer (reused across directories).
+    // Using Reader directly avoids std.Io.Dir.Iterator's fixed 2 KB buffer,
+    // which causes extra getdirentries/getdents syscalls in dirs with many
+    // entries (e.g. the Linux kernel tree).
+    reader: std.Io.Dir.Reader,
+    reader_buffer: [4096]u8 align(@alignOf(usize)),
+    // Batched entry cache: fetching multiple entries per vtable call
+    // amortises the Io.dirRead indirection over many directory entries.
+    entry_batch: [32]std.Io.Dir.Entry,
+    batch_index: usize,
+    batch_len: usize,
     current_depth: usize,
 
     // Path tracking
@@ -498,7 +508,17 @@ const StdFsWalker = struct {
             .config = config,
             .dir_stack = dir_stack,
             .current_dir = dir,
-            .current_iter = dir.iterate(),
+            .reader = .{
+                .dir = dir,
+                .state = .reset,
+                .index = 0,
+                .end = 0,
+                .buffer = &[_]u8{},
+            },
+            .reader_buffer = undefined,
+            .entry_batch = undefined,
+            .batch_index = 0,
+            .batch_len = 0,
             .current_depth = 0,
             .path_buffer = undefined,
             .path_len = 0,
@@ -547,76 +567,88 @@ const StdFsWalker = struct {
         const io = self.io;
 
         while (true) {
-            // Try to get next entry from current directory
-            if (self.current_iter) |*iter| {
-                if (iter.next(io) catch null) |entry| {
-                    // Unified filtering for ".", "..", and hidden files
-                    if (shouldSkipEntry(entry.name, self.config.hidden)) continue;
+            // Drain the cached batch first.
+            if (self.current_dir != null and self.batch_index < self.batch_len) {
+                const entry = self.entry_batch[self.batch_index];
+                self.batch_index += 1;
 
-                    // Build path for this entry
-                    const path_start = self.path_len;
-                    if (self.path_len > 0) {
-                        self.path_buffer[self.path_len] = '/';
-                        self.path_len += 1;
-                    }
-                    const name_start = self.path_len;
-                    if (self.path_len + entry.name.len > 4095) continue; // Path too long
-                    @memcpy(self.path_buffer[self.path_len..][0..entry.name.len], entry.name);
-                    self.path_len += entry.name.len;
+                // Unified filtering for ".", "..", and hidden files
+                if (shouldSkipEntry(entry.name, self.config.hidden)) continue;
 
-                    const rel_path = self.path_buffer[0..self.path_len];
-                    const kind = entry.kind;
-
-                    if (kind == .directory and self.current_depth < self.config.max_depth) {
-                        // Check dir_filter before deciding to descend
-                        const should_descend = if (self.config.dir_filter) |filter|
-                            filter.filterDir(rel_path, entry.name)
-                        else
-                            true;
-
-                        if (should_descend) {
-                            if (self.current_dir.?.openDir(io, entry.name, .{ .iterate = true })) |subdir| {
-                                // Allocate path prefix - only what we need
-                                const path_copy = self.allocator.alloc(u8, self.path_len) catch {
-                                    var sd = subdir;
-                                    sd.close(io);
-                                    continue;
-                                };
-                                @memcpy(path_copy, self.path_buffer[0..self.path_len]);
-
-                                self.dir_stack.append(self.allocator, .{
-                                    .dir = subdir,
-                                    .depth = self.current_depth + 1,
-                                    .path_len = self.path_len,
-                                    .path_prefix = path_copy,
-                                }) catch {
-                                    self.allocator.free(path_copy);
-                                    var sd = subdir;
-                                    sd.close(io);
-                                };
-                            } else |_| {}
-                        }
-                    }
-
-                    // Build result entry
-                    self.current_entry = .{
-                        .path = rel_path,
-                        .basename = self.path_buffer[name_start..][0..entry.name.len],
-                        .kind = kind,
-                    };
-
-                    // Reset path for next entry
-                    self.path_len = path_start;
-
-                    return self.current_entry;
+                // Build path for this entry
+                const path_start = self.path_len;
+                if (self.path_len > 0) {
+                    self.path_buffer[self.path_len] = '/';
+                    self.path_len += 1;
                 }
+                const name_start = self.path_len;
+                if (self.path_len + entry.name.len > 4095) continue; // Path too long
+                @memcpy(self.path_buffer[self.path_len..][0..entry.name.len], entry.name);
+                self.path_len += entry.name.len;
+
+                const rel_path = self.path_buffer[0..self.path_len];
+                const kind = entry.kind;
+
+                if (kind == .directory and self.current_depth < self.config.max_depth) {
+                    // Check dir_filter before deciding to descend
+                    const should_descend = if (self.config.dir_filter) |filter|
+                        filter.filterDir(rel_path, entry.name)
+                    else
+                        true;
+
+                    if (should_descend) {
+                        if (self.current_dir.?.openDir(io, entry.name, .{ .iterate = true })) |subdir| {
+                            // Allocate path prefix - only what we need
+                            const path_copy = self.allocator.alloc(u8, self.path_len) catch {
+                                var sd = subdir;
+                                sd.close(io);
+                                continue;
+                            };
+                            @memcpy(path_copy, self.path_buffer[0..self.path_len]);
+
+                            self.dir_stack.append(self.allocator, .{
+                                .dir = subdir,
+                                .depth = self.current_depth + 1,
+                                .path_len = self.path_len,
+                                .path_prefix = path_copy,
+                            }) catch {
+                                self.allocator.free(path_copy);
+                                var sd = subdir;
+                                sd.close(io);
+                            };
+                        } else |_| {}
+                    }
+                }
+
+                // Build result entry
+                self.current_entry = .{
+                    .path = rel_path,
+                    .basename = self.path_buffer[name_start..][0..entry.name.len],
+                    .kind = kind,
+                };
+
+                // Reset path for next entry
+                self.path_len = path_start;
+
+                return self.current_entry;
+            }
+
+            // Batch empty — refill via Reader.read. Reader.Entry.name slices
+            // reference self.reader_buffer, so they stay valid until the next
+            // refill. We batch up to entry_batch.len entries per vtable call,
+            // amortising the Io.dirRead indirection.
+            if (self.current_dir != null) {
+                self.reader.buffer = &self.reader_buffer;
+                const n = self.reader.read(io, &self.entry_batch) catch 0;
+                self.batch_index = 0;
+                self.batch_len = n;
+                if (n > 0) continue;
             }
 
             // Current directory exhausted - close it and pop from stack
             if (self.current_dir) |*dir| {
                 dir.close(io);
                 self.current_dir = null;
-                self.current_iter = null;
             }
 
             if (self.dir_stack.items.len == 0) {
@@ -630,7 +662,17 @@ const StdFsWalker = struct {
                 return null;
             };
             self.current_dir = next_entry.dir;
-            self.current_iter = next_entry.dir.iterate();
+            // Re-initialize the reader for the new directory (reuses buffer).
+            self.reader = .{
+                .dir = next_entry.dir,
+                .state = .reset,
+                .index = 0,
+                .end = 0,
+                .buffer = &[_]u8{},
+            };
+            // Invalidate any cached entries from the previous directory.
+            self.batch_index = 0;
+            self.batch_len = 0;
             self.current_depth = next_entry.depth;
             // Restore the path prefix from when we pushed this directory
             @memcpy(self.path_buffer[0..next_entry.path_len], next_entry.path_prefix);
@@ -859,7 +901,25 @@ pub const DirIterator = struct {
         else => 256,
     };
 
-    /// SIMD-optimized strlen for dirent d_name.
+    /// BSD-derived systems (macOS, FreeBSD, NetBSD, OpenBSD) embed the actual
+    /// name length in the dirent `namlen` field, so we can return the slice in
+    /// O(1). On glibc Linux the field is absent, so fall back to a SIMD scan
+    /// for the terminating NUL.
+    const has_namlen = has_libc and @hasField(c.dirent, "namlen");
+
+    /// Extract the name slice from a dirent entry. Uses `namlen` when present
+    /// (BSD-family) to skip the trailing-NUL scan entirely — avoids scanning
+    /// a fresh 1024-byte buffer on every macOS readdir().
+    inline fn direntNameFromEntry(entry: *const c.dirent) []const u8 {
+        if (has_namlen) {
+            const namlen: usize = @intCast(entry.namlen);
+            return entry.name[0..namlen];
+        }
+        return direntNameSlice(@ptrCast(&entry.name));
+    }
+
+    /// SIMD-optimized strlen for dirent d_name. Only used on platforms whose
+    /// dirent struct does NOT carry an explicit `namlen`.
     inline fn direntNameSlice(d_name: *const [DIRENT_NAME_LEN]u8) []const u8 {
         const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
         const Vec = @Vector(vec_len, u8);
@@ -1010,9 +1070,10 @@ pub const DirIterator = struct {
 
                 while (c.readdir(dir)) |entry_raw| {
                     const entry: *const c.dirent = @ptrCast(@alignCast(entry_raw));
-                    // @ptrCast handles platforms where d_name is sentinel-terminated
-                    // (e.g., FreeBSD [255:0]u8, NetBSD [511:0]u8) vs plain arrays
-                    const name = direntNameSlice(@ptrCast(&entry.name));
+                    // Uses the dirent's own name-length field on BSD-family
+                    // systems (macOS/FreeBSD/NetBSD/OpenBSD) to skip a 1024-byte
+                    // SIMD NUL scan per entry.
+                    const name = direntNameFromEntry(entry);
 
                     // Unified filtering for ".", "..", and hidden files
                     if (shouldSkipEntry(name, self.hidden)) continue;
