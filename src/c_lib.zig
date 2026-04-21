@@ -7,34 +7,9 @@ const mem = std.mem;
 const ZlobFlags = zlob_flags.ZlobFlags;
 const pattern_context = zlob_impl.pattern_context;
 
-// Strip Zig std's crash-handling / self-introspection machinery.
-//
-// zlob is a static-lib FFI dependency: the host (fff-nvim, fff-node, nvim
-// itself, node, etc.) owns signal handling and process-wide panic/trace
-// reporting. We don't want Zig's extra machinery riding along into every
-// consumer because:
-//  1. Per-thread TLS: std.Thread.maybeAttachSignalStack declares a 256 KB
-//     `threadlocal var signal_stack`. When a downstream `.so` linking zlob
-//     statically is `dlopen`'d late (e.g. neovim loading a plugin), glibc
-//     fails with `cannot allocate memory in static TLS block` (fff.nvim
-//     issue #298).
-//  2. Upstream bug: on aarch64-windows-msvc, Zig 0.16.0's
-//     std.debug.SelfInfo.Windows.zig has an `@ptrCast increases pointer
-//     alignment` compile error that fails our build.
-//
-// Three knobs turn all this off at compile time:
-//
-// * `signal_stack_size = null` — maybeAttachSignalStack early-returns, the
-//   256 KB threadlocal is never instantiated.
-//
-// * `enable_segfault_handler = false` — don't install Zig's SIGSEGV/SIGILL/
-//   SIGBUS/SIGFPE handler. The host's handler runs instead (normal FFI).
-//
-// * `allow_stack_tracing = false` — disables debug.captureCurrentStackTrace
-//   and friends; keeps std.debug.SelfInfo (incl. the broken Windows path)
-//   out of the compilation entirely.
-//
-// None of this disables threads — std.Thread.spawn still works.
+// zig just added a ton of bullshit to the default std options which causes
+// a lot of different behavior changes for the standard C library this is
+// a minimal set of exclusion to keep all the bs out and work like a normal C lib
 pub const std_options: std.Options = .{
     .signal_stack_size = null,
     .enable_segfault_handler = false,
