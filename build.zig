@@ -297,9 +297,16 @@ pub fn build(b: *std.Build) void {
     // enough for glibc to fit into its per-thread static-TLS reserve when
     // the .so is loaded late. Linux glibc only; other platforms don't
     // have a small static-TLS reserve.
+    //
+    // Skip when invoked as the Rust crate build. rust/build.rs passes
+    // `-Dsrc-dir=zig-src`; the crates.io tarball ships zig-src/ + include/
+    // only and excludes test/, so any reference to test/*.zig here would
+    // break downstream `cargo build` with `failed to check cache:
+    // test/... file_hash FileNotFound`.
+    const is_dev_checkout = std.mem.eql(u8, src_dir, "src");
     const is_linux_gnu = target.result.os.tag == .linux and
         target.result.abi == .gnu;
-    if (is_linux_gnu) {
+    if (is_dev_checkout and is_linux_gnu) {
         const dlopen_consumer_mod = b.createModule(.{
             .root_source_file = b.path("test/dlopen_consumer.zig"),
             .target = target,
