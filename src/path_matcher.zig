@@ -681,7 +681,11 @@ fn matchPathsImpl(
         // If so, use the unified multi-suffix SIMD matcher for a single-pass match
         const multi_suffix_result = tryBuildMultiSuffixMatcher(expanded_patterns);
         if (multi_suffix_result.all_simple_suffixes and multi_suffix_result.matcher.count > 0) {
-            var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+            // Pre-size to the worst-case match count — one alloc instead of
+            // ~log2(N) amortized grows. Big win under DebugAllocator which
+            // captures a stack trace on every allocation.
+            var matches = std.array_list.AlignedManaged([]const u8, null).initCapacity(allocator, paths.len) catch
+                std.array_list.AlignedManaged([]const u8, null).init(allocator);
             defer matches.deinit();
 
             // Fast path: use unified multi-suffix SIMD matching
@@ -700,7 +704,8 @@ fn matchPathsImpl(
         // Check if patterns are **/*.ext style (recursive with suffix)
         const recursive_suffix_result = tryBuildRecursiveSuffixMatcher(expanded_patterns);
         if (recursive_suffix_result.all_recursive_suffix and recursive_suffix_result.matcher.count > 0) {
-            var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+            var matches = std.array_list.AlignedManaged([]const u8, null).initCapacity(allocator, paths.len) catch
+                std.array_list.AlignedManaged([]const u8, null).init(allocator);
             defer matches.deinit();
 
             // Fast path: use unified multi-suffix SIMD matching on basename
@@ -725,7 +730,8 @@ fn matchPathsImpl(
             pattern_segments_list[i] = try splitPatternByDoublestar(allocator, exp_pattern);
         }
 
-        var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+        var matches = std.array_list.AlignedManaged([]const u8, null).initCapacity(allocator, paths.len) catch
+            std.array_list.AlignedManaged([]const u8, null).init(allocator);
         defer matches.deinit();
 
         const inner_flags = flags.without(.{ .brace = true, .nocheck = true });
@@ -790,7 +796,8 @@ fn matchPathsImpl(
             break :blk norm_pattern_buf[0..len];
         };
 
-        var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+        var matches = std.array_list.AlignedManaged([]const u8, null).initCapacity(allocator, paths.len) catch
+            std.array_list.AlignedManaged([]const u8, null).init(allocator);
         defer matches.deinit();
 
         for (paths) |path| {
@@ -834,7 +841,8 @@ fn matchPathsImpl(
     var pattern_segments = try splitPatternByDoublestar(allocator, pattern);
     defer pattern_segments.deinit();
 
-    var matches = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+    var matches = std.array_list.AlignedManaged([]const u8, null).initCapacity(allocator, paths.len) catch
+        std.array_list.AlignedManaged([]const u8, null).init(allocator);
     defer matches.deinit();
 
     const is_simple_suffix_only = suffix_info.suffix != null and

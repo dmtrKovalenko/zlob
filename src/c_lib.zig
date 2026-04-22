@@ -7,6 +7,15 @@ const mem = std.mem;
 const ZlobFlags = zlob_flags.ZlobFlags;
 const pattern_context = zlob_impl.pattern_context;
 
+// zig just added a ton of bullshit to the default std options which causes
+// a lot of different behavior changes for the standard C library this is
+// a minimal set of exclusion to keep all the bs out and work like a normal C lib
+pub const std_options: std.Options = .{
+    .signal_stack_size = null,
+    .enable_segfault_handler = false,
+    .allow_stack_tracing = false,
+};
+
 // When libc is linked (most POSIX targets), use c_allocator (backed by malloc/free)
 // for better small-alloc performance. Otherwise (Windows MSVC, Android, etc.)
 // fall back to page_allocator (backed by VirtualAlloc / mmap).

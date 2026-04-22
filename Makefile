@@ -166,6 +166,9 @@ test-libc: build
 	@echo "========================================"
 	./test/test_libc_comparison.sh
 
+format: 
+	zig fmt src/
+
 # Help
 help:
 	@echo "zlob - faster and more correct glob library, 100% POSIX compatible"

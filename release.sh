@@ -42,12 +42,6 @@ if [ -z "$NEW_VERSION" ]; then
     exit 1
 fi
 
-# Validate version format (semver)
-if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo -e "${RED}Error: Invalid version format. Please use semver (e.g., 1.2.3)${NC}"
-    exit 1
-fi
-
 if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}[DRY-RUN] Simulating release of version ${NEW_VERSION}...${NC}"
 else
@@ -65,7 +59,7 @@ echo -e "${GREEN}Updating build.zig.zon...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would update .version to \"${NEW_VERSION}\" in build.zig.zon${NC}"
 else
-    sed -i "s/\.version = \"[0-9]*\.[0-9]*\.[0-9]*\"/.version = \"${NEW_VERSION}\"/" build.zig.zon
+    sed -i "s/\.version = \"[^\"]*\"/.version = \"${NEW_VERSION}\"/" build.zig.zon
 fi
 
 # Update version in Cargo.toml
@@ -73,7 +67,7 @@ echo -e "${GREEN}Updating rust/Cargo.toml...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would update version to \"${NEW_VERSION}\" in rust/Cargo.toml${NC}"
 else
-    sed -i "s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"${NEW_VERSION}\"/" rust/Cargo.toml
+    sed -i "s/^version = \"[^\"]*\"/version = \"${NEW_VERSION}\"/" rust/Cargo.toml
     cd rust && cargo build && cd -
 fi
 
