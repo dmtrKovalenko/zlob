@@ -596,3 +596,203 @@ test "abs: literal path - exact file match" {
     try testing.expectEqual(@as(usize, 1), paths.len);
     try testing.expect(hasPath(paths, "Cargo.toml"));
 }
+
+// ============================================================================
+// Hidden files / directories with ZLOB_PERIOD
+//
+// Without ZLOB_PERIOD, wildcards do NOT match leading-dot names. With
+// ZLOB_PERIOD they do. These tests exercise every feature against an absolute
+// path prefix where the matched files or one of the directory components is
+// a dot-prefixed (hidden) entry.
+// ============================================================================
+
+test "abs+period: *.c matches hidden files" {
+    const allocator = testing.allocator;
+    var td = try AbsTestDir.init(allocator, &.{
+        ".hidden.c",
+        "visible.c",
+        ".env",
+    });
+    defer td.deinit();
+
+    const paths_no = try td.glob(allocator, "*.c", 0);
+    defer freePaths(allocator, paths_no);
+    try testing.expectEqual(@as(usize, 1), paths_no.len);
+    try testing.expect(hasPath(paths_no, "visible.c"));
+
+    const paths = try td.glob(allocator, "*.c", zlob_flags.ZLOB_PERIOD);
+    defer freePaths(allocator, paths);
+    try testing.expectEqual(@as(usize, 2), paths.len);
+    try testing.expect(hasPath(paths, ".hidden.c"));
+    try testing.expect(hasPath(paths, "visible.c"));
+}
+
+test "abs+period: explicit dot prefix always matches" {
+    const allocator = testing.allocator;
+    var td = try AbsTestDir.init(allocator, &.{
+        ".env",
+        ".gitignore",
+        "README.md",
+    });
+    defer td.deinit();
+
+    // Pattern starts with literal '.' so the hidden-file gate is implicitly
+    // bypassed. zlob also returns the synthetic "." and ".." entries on POSIX
+    // when the pattern's first char is '.'.
+    const paths = try td.glob(allocator, ".[a-z]*", 0);
+    defer freePaths(allocator, paths);
+
+    try testing.expectEqual(@as(usize, 2), paths.len);
+    try testing.expect(hasPath(paths, ".env"));
+    try testing.expect(hasPath(paths, ".gitignore"));
+}
+
+test "abs+period: .opencode/opencode.json{,c} hidden directory + brace empty alt" {
+    const allocator = testing.allocator;
+    var td = try AbsTestDir.init(allocator, &.{
+        ".opencode/opencode.json",
+        ".opencode/opencode.jsonc",
+        ".opencode/agents/foo.md",
+        "opencode.json",
+    });
+    defer td.deinit();
+
+    // Directory component starts with literal '.' so PERIOD is not required
+    // to traverse into it.
+    const paths = try td.glob(allocator, ".opencode/opencode.json{,c}", zlob_flags.ZLOB_BRACE);
+    defer freePaths(allocator, paths);
+
+    try testing.expectEqual(@as(usize, 2), paths.len);
+    try testing.expect(hasPath(paths, ".opencode/opencode.json"));
+    try testing.expect(hasPath(paths, ".opencode/opencode.jsonc"));
+}
+
+test "abs+period: **/opencode.json{,c} requires PERIOD to descend into hidden dirs" {
+    const allocator = testing.allocator;
+    var td = try AbsTestDir.init(allocator, &.{
+        ".opencode/opencode.json",
+        ".opencode/opencode.jsonc",
+        "packages/cli/opencode.json",
+        "packages/web/opencode.jsonc",
+    });
+    defer td.deinit();
+
+    // Without PERIOD, ** does not descend into '.opencode/'.
+    const paths_no = try td.glob(allocator, "**/opencode.json{,c}", zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE);
+    defer freePaths(allocator, paths_no);
+    try testing.expectEqual(@as(usize, 2), paths_no.len);
+    try testing.expect(hasPath(paths_no, "packages/cli/opencode.json"));
+    try testing.expect(hasPath(paths_no, "packages/web/opencode.jsonc"));
+
+    // With PERIOD, '.opencode/' is included.
+    const paths = try td.glob(allocator, "**/opencode.json{,c}", zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE | zlob_flags.ZLOB_PERIOD);
+    defer freePaths(allocator, paths);
+    try testing.expectEqual(@as(usize, 4), paths.len);
+    try testing.expect(hasPath(paths, ".opencode/opencode.json"));
+    try testing.expect(hasPath(paths, ".opencode/opencode.jsonc"));
+    try testing.expect(hasPath(paths, "packages/cli/opencode.json"));
+    try testing.expect(hasPath(paths, "packages/web/opencode.jsonc"));
+}
+
+test "abs+period: {.a,a,b}.c hidden brace alternative" {
+    const allocator = testing.allocator;
+    var td = try AbsTestDir.init(allocator, &.{
+        ".a.c",
+        "a.c",
+        "b.c",
+    });
+    defer td.deinit();
+
+    // Without PERIOD, even an explicit literal alternative starting with '.'
+    // does NOT bypass the iterator's hidden-file gate inside the brace
+    // expansion path. PERIOD is required to surface ".a.c".
+    const paths_no = try td.glob(allocator, "{.a,a,b}.c", zlob_flags.ZLOB_BRACE);
+    defer freePaths(allocator, paths_no);
+    try testing.expectEqual(@as(usize, 2), paths_no.len);
+
+    const paths = try td.glob(allocator, "{.a,a,b}.c", zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_PERIOD);
+    defer freePaths(allocator, paths);
+    try testing.expectEqual(@as(usize, 3), paths.len);
+    try testing.expect(hasPath(paths, ".a.c"));
+    try testing.expect(hasPath(paths, "a.c"));
+    try testing.expect(hasPath(paths, "b.c"));
+}
+
+test "abs+period: **/*.{c,h} with PERIOD across hidden dirs" {
+    const allocator = testing.allocator;
+    var td = try AbsTestDir.init(allocator, &.{
+        ".cache/main.c",
+        ".cache/main.h",
+        "src/util.c",
+        "src/util.h",
+    });
+    defer td.deinit();
+
+    const paths_no = try td.glob(allocator, "**/*.{c,h}", zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE);
+    defer freePaths(allocator, paths_no);
+    try testing.expectEqual(@as(usize, 2), paths_no.len);
+    try testing.expect(hasPath(paths_no, "src/util.c"));
+    try testing.expect(hasPath(paths_no, "src/util.h"));
+
+    const paths = try td.glob(allocator, "**/*.{c,h}", zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE | zlob_flags.ZLOB_PERIOD);
+    defer freePaths(allocator, paths);
+    try testing.expectEqual(@as(usize, 4), paths.len);
+    try testing.expect(hasPath(paths, ".cache/main.c"));
+    try testing.expect(hasPath(paths, ".cache/main.h"));
+    try testing.expect(hasPath(paths, "src/util.c"));
+    try testing.expect(hasPath(paths, "src/util.h"));
+}
+
+test "abs+period: ?(a|b).c extglob optional matches hidden empty case" {
+    const allocator = testing.allocator;
+    var td = try AbsTestDir.init(allocator, &.{ "a.c", "b.c", ".c", "ab.c" });
+    defer td.deinit();
+
+    const paths_no = try td.glob(allocator, "?(a|b).c", zlob_flags.ZLOB_EXTGLOB);
+    defer freePaths(allocator, paths_no);
+    try testing.expectEqual(@as(usize, 2), paths_no.len);
+
+    const paths = try td.glob(allocator, "?(a|b).c", zlob_flags.ZLOB_EXTGLOB | zlob_flags.ZLOB_PERIOD);
+    defer freePaths(allocator, paths);
+    try testing.expectEqual(@as(usize, 3), paths.len);
+    try testing.expect(hasPath(paths, "a.c"));
+    try testing.expect(hasPath(paths, "b.c"));
+    try testing.expect(hasPath(paths, ".c"));
+}
+
+test "abs+period: *(ab).c extglob zero-or-more matches hidden empty" {
+    const allocator = testing.allocator;
+    var td = try AbsTestDir.init(allocator, &.{ ".c", "ab.c", "abab.c", "abc.c" });
+    defer td.deinit();
+
+    const paths_no = try td.glob(allocator, "*(ab).c", zlob_flags.ZLOB_EXTGLOB);
+    defer freePaths(allocator, paths_no);
+    try testing.expectEqual(@as(usize, 2), paths_no.len);
+
+    const paths = try td.glob(allocator, "*(ab).c", zlob_flags.ZLOB_EXTGLOB | zlob_flags.ZLOB_PERIOD);
+    defer freePaths(allocator, paths);
+    try testing.expectEqual(@as(usize, 3), paths.len);
+    try testing.expect(hasPath(paths, ".c"));
+    try testing.expect(hasPath(paths, "ab.c"));
+    try testing.expect(hasPath(paths, "abab.c"));
+}
+
+test "abs+period: {.cache,src}/*.c hidden brace alt as dir" {
+    const allocator = testing.allocator;
+    var td = try AbsTestDir.init(allocator, &.{
+        ".cache/a.c",
+        ".cache/b.c",
+        "src/c.c",
+        "lib/d.c",
+    });
+    defer td.deinit();
+
+    // Brace alt is a literal dot-prefixed dir name - matches even without PERIOD.
+    const paths = try td.glob(allocator, "{.cache,src}/*.c", zlob_flags.ZLOB_BRACE);
+    defer freePaths(allocator, paths);
+
+    try testing.expectEqual(@as(usize, 3), paths.len);
+    try testing.expect(hasPath(paths, ".cache/a.c"));
+    try testing.expect(hasPath(paths, ".cache/b.c"));
+    try testing.expect(hasPath(paths, "src/c.c"));
+}

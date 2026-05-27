@@ -1447,9 +1447,12 @@ fn globWithBracedComponents(
     var start_dir: []const u8 = ".";
     var start_component_idx: usize = 0;
 
-    // On Windows, absolute paths can be drive-letter-prefixed (e.g. "C:/...")
-    // rather than starting with '/'. In that case the drive letter is the
-    // first literal component and we must NOT prepend '/' to start_dir.
+    // on POSIX  "/tmp/foo/{a,b}.txt"
+    //   split -> ["", "tmp", "foo", "{a,b}.txt"]
+    //   The empty leading element is discarded, so the leading '/' is LOST
+    // on Windows "C:/tmp/foo/{a,b}.txt"
+    //   split -> ["C:", "tmp", "foo", "{a,b}.txt"]
+    //   The drive letter survives as its own component
     const has_drive_letter = is_windows and info.is_absolute and
         parsed.components.len > 0 and
         parsed.components[0].text.len >= 2 and
