@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const zlob = @import("zlob");
 
@@ -46,23 +47,16 @@ pub const TestResult = struct {
 
 pub const AssertFn = *const fn (result: TestResult) anyerror!void;
 
-fn makeDirRecursive(path: []const u8) !void {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var path_buf: [4096]u8 = undefined;
-    var pos: usize = 0;
-
-    for (path) |char| {
-        path_buf[pos] = char;
-        pos += 1;
-        if (char == '/' and pos > 1) {
-            std.Io.Dir.createDirAbsolute(io, path_buf[0..pos], .default_dir) catch |err| {
-                if (err != error.PathAlreadyExists) continue;
-            };
-        }
+/// Convert backslashes to forward slashes in-place. zlob's parser accepts
+/// either separator on Windows (per README.md:17), but its assertion-side
+/// outputs are normalised to whatever the OS produced. Tests in this suite
+/// always assert against forward-slash literals, so we normalise both the
+/// absolute prefix used in the pattern and any result paths returned by zlob.
+fn normalizeSlashes(buf: []u8) void {
+    if (builtin.os.tag != .windows) return;
+    for (buf) |*ch| {
+        if (ch.* == '\\') ch.* = '/';
     }
-    std.Io.Dir.createDirAbsolute(io, path_buf[0..pos], .default_dir) catch |err| {
-        if (err != error.PathAlreadyExists) return err;
-    };
 }
 
 /// Run a glob test against both matchPaths (in-memory) and filesystem match.
@@ -71,6 +65,11 @@ fn makeDirRecursive(path: []const u8) !void {
 /// 1. Tests the pattern against the provided file list using matchPaths
 /// 2. Creates a temp directory with the files and tests filesystem glob
 /// 3. Runs the assertion function against both results
+///
+/// Cross-platform: uses `std.testing.tmpDir` rather than a hardcoded `/tmp`,
+/// so the same tests pass on Linux, macOS, and Windows. Path separators in
+/// the absolute prefix and in zlob's filesystem results are normalised to
+/// forward slashes so test assertions can use POSIX-style literals.
 ///
 /// Example:
 /// ```zig
@@ -91,6 +90,7 @@ pub fn zlobIsomorphicTest(
     assertFn: AssertFn,
     src: std.builtin.SourceLocation,
 ) !void {
+    _ = src; // tmp dir uniqueness is now provided by std.testing.tmpDir.
     const allocator = testing.allocator;
 
     // ========================================
@@ -117,60 +117,57 @@ pub fn zlobIsomorphicTest(
     {
         const io = std.Io.Threaded.global_single_threaded.io();
 
-        // Create temp directory with unique name based on test name (from @src())
-        // This is deterministic and avoids race conditions between parallel tests
-        var tmp_dir_buf: [512]u8 = undefined;
+        // Cross-platform tmp dir: /tmp/... on POSIX, %TEMP%\... on Windows.
+        // Cleanup is automatic on scope exit.
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
 
-        // Hash the test function name to create a unique but deterministic suffix
-        var hasher = std.hash.Fnv1a_64.init();
-        hasher.update(src.fn_name);
-        hasher.update(src.file);
-        const hash = hasher.final();
+        // Resolve to an absolute path so the glob pattern is unambiguous.
+        const tmp_path_z = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+        defer allocator.free(tmp_path_z);
+        const tmp_path = tmp_path_z[0..tmp_path_z.len];
+        normalizeSlashes(tmp_path);
 
-        const tmp_dir = try std.fmt.bufPrint(&tmp_dir_buf, "/tmp/zlob_test_{x}", .{hash});
-
-        // Create the temp directory
-        std.Io.Dir.createDirAbsolute(io, tmp_dir, .default_dir) catch |err| {
-            if (err != error.PathAlreadyExists) return err;
-        };
-        defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
-
-        // Create test files
+        // Create test files relative to the tmp dir. createDirPath handles
+        // arbitrary depth and is portable across separators.
         for (files) |file| {
-            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp_dir, file });
-            defer allocator.free(full_path);
-
-            // Create all parent directories recursively
-            if (std.fs.path.dirname(full_path)) |dir_path| {
-                try makeDirRecursive(dir_path);
+            if (std.fs.path.dirname(file)) |dir_path| {
+                tmp.dir.createDirPath(io, dir_path) catch |err| {
+                    if (err != error.PathAlreadyExists) return err;
+                };
             }
-
-            // Create the file
-            const f = try std.Io.Dir.createFileAbsolute(io, full_path, .{});
+            const f = try tmp.dir.createFile(io, file, .{});
             f.close(io);
         }
 
-        // Build full pattern with temp dir prefix
-        const full_pattern = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp_dir, pattern });
+        // Build the absolute pattern with forward slashes, which zlob accepts
+        // on every platform (see src/zlob.zig:392-396 for Windows handling).
+        const full_pattern = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp_path, pattern });
         defer allocator.free(full_pattern);
 
-        // Run filesystem glob
         var fs_result_opt = try zlob.match(allocator, io, full_pattern, flags);
         if (fs_result_opt) |*fs_result| {
             defer fs_result.deinit();
 
-            // Strip tmp_dir prefix from paths for comparison
             const result_len = fs_result.len();
+            // Allocate owned, normalised copies so we can rewrite separators
+            // without mutating the result-managed memory.
+            var owned_paths = try allocator.alloc([]u8, result_len);
+            defer {
+                for (owned_paths) |p| allocator.free(p);
+                allocator.free(owned_paths);
+            }
             var stripped_paths = try allocator.alloc([]const u8, result_len);
             defer allocator.free(stripped_paths);
 
-            const prefix_len = tmp_dir.len + 1; // +1 for the '/'
+            const prefix_len = tmp_path.len + 1; // +1 for the '/'
             for (0..result_len) |i| {
-                const path = fs_result.get(i);
-                if (path.len > prefix_len and std.mem.startsWith(u8, path, tmp_dir)) {
-                    stripped_paths[i] = path[prefix_len..];
+                owned_paths[i] = try allocator.dupe(u8, fs_result.get(i));
+                normalizeSlashes(owned_paths[i]);
+                if (owned_paths[i].len > prefix_len and std.mem.startsWith(u8, owned_paths[i], tmp_path)) {
+                    stripped_paths[i] = owned_paths[i][prefix_len..];
                 } else {
-                    stripped_paths[i] = path;
+                    stripped_paths[i] = owned_paths[i];
                 }
             }
 

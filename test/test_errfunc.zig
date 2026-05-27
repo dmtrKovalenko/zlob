@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const c_lib = @import("c_lib");
 const zlob_flags = @import("zlob_flags");
@@ -33,6 +34,7 @@ fn testErrorCallbackAbort(epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_in
 }
 
 test "errfunc is called on directory access error" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
 
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -78,6 +80,7 @@ test "errfunc is called on directory access error" {
 }
 
 test "errfunc returning non-zero causes ZLOB_ABORTED" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -120,6 +123,7 @@ test "errfunc returning non-zero causes ZLOB_ABORTED" {
 }
 
 test "ZLOB_ERR flag causes abort on directory error" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -160,6 +164,7 @@ test "ZLOB_ERR flag causes abort on directory error" {
 }
 
 test "errfunc NULL with ZLOB_ERR still aborts" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 

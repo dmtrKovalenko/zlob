@@ -59,7 +59,6 @@ jobs:
       - name: Make test
         run: make test
 
-
   linux-musl:
     name: Linux (musl)
     runs-on: ubuntu-latest
@@ -132,7 +131,7 @@ jobs:
       - name: Cross-compile Rust library
         working-directory: rust
         run: cargo zigbuild --target ${{ matrix.rust_target }} --release
-        continue-on-error: true  # Rust cross-compile to Windows may fail
+        continue-on-error: true # Rust cross-compile to Windows may fail
 
       - name: Package artifacts
         run: |
@@ -238,6 +237,9 @@ jobs:
       - name: Zig build
         run: zig build
 
+      - name: Zig tests
+        run: zig build test
+
       - name: Test Zig CLI
         run: |
           ./zig-out/bin/zlob --version
@@ -272,6 +274,9 @@ jobs:
 
       - name: Zig build
         run: zig build
+
+      - name: Zig tests
+        run: zig build test
 
       - name: List zig-out contents
         run: Get-ChildItem -Recurse zig-out

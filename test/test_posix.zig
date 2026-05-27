@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const glob = @import("zlob");
 const zlob_flags = @import("zlob_flags");
@@ -7,6 +8,9 @@ const c = std.c;
 
 /// Look up an environment variable via libc's getenv.
 fn getenv(name: []const u8) ?[]const u8 {
+    // Tilde tests are POSIX-only and use libc getenv; avoid referencing
+    // std.c.getenv on targets that don't link libc (e.g. Windows MSVC).
+    if (builtin.os.tag == .windows) return null;
     var name_buf: [256]u8 = undefined;
     if (name.len + 1 > name_buf.len) return null;
     @memcpy(name_buf[0..name.len], name);
@@ -17,6 +21,9 @@ fn getenv(name: []const u8) ?[]const u8 {
 
 // Test structure helper
 fn createTestFiles(allocator: std.mem.Allocator, base_path: []const u8) !void {
+    // POSIX-only fixtures: libc mkdir(2), libc getenv, and shell-based cleanup.
+    // Skip the entire suite on Windows.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const dirs = [_][]const u8{
         "test_missing_flags",
         "test_missing_flags/dir1",

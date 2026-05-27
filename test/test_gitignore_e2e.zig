@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const zlob = @import("zlob");
 const ZlobFlags = zlob.ZlobFlags;
@@ -6,7 +7,11 @@ const ZlobFlags = zlob.ZlobFlags;
 // End-to-end test for gitignore filtering with real filesystem operations.
 // This test creates a temporary directory structure with a .gitignore file
 // and verifies that glob correctly filters out ignored files and directories.
+//
+// All tests in this file hardcode `/tmp` and use libc-style filesystem
+// helpers, so they are POSIX-only. Skip on Windows.
 test "gitignore e2e - target directory is filtered" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -141,6 +146,7 @@ test "gitignore e2e - target directory is filtered" {
 }
 
 test "gitignore e2e - node_modules directory is filtered" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -217,6 +223,7 @@ test "gitignore e2e - node_modules directory is filtered" {
 }
 
 test "gitignore e2e - wildcard patterns" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -306,6 +313,7 @@ test "gitignore e2e - wildcard patterns" {
 // Anchored patterns (containing /) are not checked in shouldSkipDirectory,
 // so files inside ignored directories are still returned.
 test "gitignore e2e - anchored directory patterns (rust/target/)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -394,6 +402,7 @@ test "gitignore e2e - anchored directory patterns (rust/target/)" {
 }
 
 test "gitignore e2e - negation patterns" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -461,6 +470,7 @@ test "gitignore e2e - negation patterns" {
 }
 
 test "gitignore e2e - negated subdirectory of ignored directory" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 

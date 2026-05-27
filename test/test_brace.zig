@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const zlob = @import("zlob");
 const zlob_flags = @import("zlob_flags");
@@ -332,6 +333,11 @@ const c_lib = @import("c_lib");
 
 /// Helper to create test directory structure for brace tests
 fn createBraceTestFiles(allocator: std.mem.Allocator, base_path: []const u8) !void {
+    // These fixtures use libc mkdir(2) and shell out to `rm -rf` for cleanup,
+    // both of which are POSIX-only. The cross-platform-friendly equivalent is
+    // zlobIsomorphicTest in test_utils.zig. Skip these tests on Windows.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const dirs = [_][]const u8{
         "test_brace",
         "test_brace/src",
@@ -1424,4 +1430,173 @@ test "combined flags - BRACE and NOCHECK" {
 
     try testing.expectEqual(@as(usize, 1), resultPartial.len());
     try testing.expectEqualStrings("a.txt", resultPartial.get(0));
+}
+
+// ============================================================================
+// opencode config discovery: `opencode.json{,c}`
+//
+// These tests prove zlob handles the leading-empty-alternative brace pattern
+// used to match both `opencode.json` and `opencode.jsonc` in a single glob.
+// `zlobIsomorphicTest` runs each pattern against BOTH zlob modes:
+//   1. matchPaths  - in-memory string matching (zlob_match_paths)
+//   2. filesystem  - real directory walking via zlob()
+// The pattern uses only forward slashes and ASCII filenames, so it is
+// portable across Linux, macOS and Windows (per README's "windows users
+// should use forward slashes" guidance).
+// ============================================================================
+
+test "ZLOB_BRACE - opencode.json{,c} matches both extensions" {
+    const files = [_][]const u8{
+        "opencode.json",
+        "opencode.jsonc",
+        "opencode.json5", // must NOT match - zlob does not greedily consume "5"
+        "opencode.toml",
+        "package.json",
+    };
+
+    try zlobIsomorphicTest(&files, "opencode.json{,c}", zlob_flags.ZLOB_BRACE, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath("opencode.json"));
+            try testing.expect(result.hasPath("opencode.jsonc"));
+            try testing.expect(!result.hasPath("opencode.json5"));
+            try testing.expect(!result.hasPath("opencode.toml"));
+            try testing.expect(!result.hasPath("package.json"));
+        }
+    }.assert, @src());
+}
+
+test "ZLOB_BRACE - opencode.json{,c} when only .json present" {
+    const files = [_][]const u8{
+        "opencode.json",
+        "README.md",
+    };
+
+    try zlobIsomorphicTest(&files, "opencode.json{,c}", zlob_flags.ZLOB_BRACE, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 1), result.count);
+            try testing.expect(result.hasPath("opencode.json"));
+        }
+    }.assert, @src());
+}
+
+test "ZLOB_BRACE - opencode.json{,c} when only .jsonc present" {
+    const files = [_][]const u8{
+        "opencode.jsonc",
+        "README.md",
+    };
+
+    try zlobIsomorphicTest(&files, "opencode.json{,c}", zlob_flags.ZLOB_BRACE, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 1), result.count);
+            try testing.expect(result.hasPath("opencode.jsonc"));
+        }
+    }.assert, @src());
+}
+
+test "ZLOB_BRACE - .opencode/opencode.json{,c} project subdirectory form" {
+    // Mirrors opencode's `.opencode/opencode.json{,c}` discovery path.
+    // Forward slash is the canonical separator zlob uses on every platform.
+    const files = [_][]const u8{
+        ".opencode/opencode.json",
+        ".opencode/opencode.jsonc",
+        ".opencode/agents/foo.md",
+        "opencode.json",
+        "src/main.zig",
+    };
+
+    try zlobIsomorphicTest(&files, ".opencode/opencode.json{,c}", zlob_flags.ZLOB_BRACE, struct {
+        fn assert(result: TestResult) !void {
+            // Count of 2 already proves the bare-root opencode.json was excluded;
+            // hasPath() in the test helper matches by suffix so we cannot
+            // negative-assert "opencode.json" here.
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath(".opencode/opencode.json"));
+            try testing.expect(result.hasPath(".opencode/opencode.jsonc"));
+        }
+    }.assert, @src());
+}
+
+test "ZLOB_BRACE - tui.json{,c} same shape works for TUI config" {
+    const files = [_][]const u8{
+        "tui.json",
+        "tui.jsonc",
+        "tui.yaml",
+    };
+
+    try zlobIsomorphicTest(&files, "tui.json{,c}", zlob_flags.ZLOB_BRACE, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath("tui.json"));
+            try testing.expect(result.hasPath("tui.jsonc"));
+            try testing.expect(!result.hasPath("tui.yaml"));
+        }
+    }.assert, @src());
+}
+
+test "ZLOB_BRACE - opencode.{json,jsonc} equivalent explicit form" {
+    // The non-empty equivalent of `opencode.json{,c}`. Both notations should
+    // produce identical results, so we assert exactly the same outcome.
+    const files = [_][]const u8{
+        "opencode.json",
+        "opencode.jsonc",
+        "opencode.json5",
+        "opencode.toml",
+    };
+
+    try zlobIsomorphicTest(&files, "opencode.{json,jsonc}", zlob_flags.ZLOB_BRACE, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 2), result.count);
+            try testing.expect(result.hasPath("opencode.json"));
+            try testing.expect(result.hasPath("opencode.jsonc"));
+            try testing.expect(!result.hasPath("opencode.json5"));
+        }
+    }.assert, @src());
+}
+
+test "ZLOB_BRACE - opencode.json{,c} without flag treats braces as literal" {
+    // Sanity check: without ZLOB_BRACE the pattern must not expand. Use the
+    // matchPaths-only helper because `{,c}` cannot be a real filesystem name.
+    const files = [_][]const u8{
+        "opencode.json",
+        "opencode.jsonc",
+        "opencode.json{,c}",
+    };
+
+    try testMatchPathsOnly(&files, "opencode.json{,c}", 0, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 1), result.count);
+            try testing.expect(result.hasPath("opencode.json{,c}"));
+            try testing.expect(!result.hasPath("opencode.json"));
+            try testing.expect(!result.hasPath("opencode.jsonc"));
+        }
+    }.assert);
+}
+
+test "ZLOB_BRACE - **/opencode.json{,c} recursive discovery" {
+    const files = [_][]const u8{
+        "packages/cli/opencode.json",
+        "packages/cli/opencode.jsonc",
+        "packages/web/opencode.json",
+        "packages/web/nested/deep/opencode.json",
+        "packages/web/README.md",
+        "packages/web/opencode.json5",
+        "src/main.zig",
+    };
+
+    try zlobIsomorphicTest(&files, "**/opencode.json{,c}", zlob_flags.ZLOB_RECOMMENDED, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 4), result.count);
+            try testing.expect(result.hasPath("packages/cli/opencode.json"));
+            try testing.expect(result.hasPath("packages/cli/opencode.jsonc"));
+            try testing.expect(result.hasPath("packages/web/opencode.json"));
+            try testing.expect(result.hasPath("packages/web/nested/deep/opencode.json"));
+            // .json5 must NOT match - the brace alternatives are exactly "" and "c"
+            for (result.paths) |p| {
+                try testing.expect(!std.mem.endsWith(u8, p, ".json5"));
+                try testing.expect(!std.mem.endsWith(u8, p, ".md"));
+                try testing.expect(!std.mem.endsWith(u8, p, ".zig"));
+            }
+        }
+    }.assert, @src());
 }
