@@ -238,6 +238,9 @@ jobs:
       - name: Zig build
         run: zig build
 
+      - name: Zig tests
+        run: zig build test
+
       - name: Test Zig CLI
         run: |
           ./zig-out/bin/zlob --version
@@ -272,6 +275,13 @@ jobs:
 
       - name: Zig build
         run: zig build
+
+      - name: Zig tests
+        # POSIX-only fixture tests (libc mkdir, shell `rm -rf`, libc getenv)
+        # skip themselves at runtime via `error.SkipZigTest`. Cross-platform
+        # tests in test_brace.zig (zlobIsomorphicTest) and the inline tests
+        # in src/* run normally on Windows.
+        run: zig build test
 
       - name: List zig-out contents
         run: Get-ChildItem -Recurse zig-out

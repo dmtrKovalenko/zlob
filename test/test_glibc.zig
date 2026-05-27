@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const glob = @import("zlob"); // For direct zlob types
 const zlob_flags = @import("zlob_flags");
@@ -7,6 +8,8 @@ const c = std.c;
 
 // Helper to create test directory structure
 fn createTestDirStructure(allocator: std.mem.Allocator, base_path: []const u8) !void {
+    // POSIX-only fixtures (libc mkdir + shell `rm -rf` cleanup). Skip on Windows.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const dirs = [_][]const u8{
         "test_zlob_recursive",
         "test_zlob_recursive/dir1",
