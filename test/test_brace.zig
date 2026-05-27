@@ -1572,3 +1572,31 @@ test "ZLOB_BRACE - opencode.json{,c} without flag treats braces as literal" {
         }
     }.assert);
 }
+
+test "ZLOB_BRACE - **/opencode.json{,c} recursive discovery" {
+    const files = [_][]const u8{
+        "packages/cli/opencode.json",
+        "packages/cli/opencode.jsonc",
+        "packages/web/opencode.json",
+        "packages/web/nested/deep/opencode.json",
+        "packages/web/README.md",
+        "packages/web/opencode.json5",
+        "src/main.zig",
+    };
+
+    try zlobIsomorphicTest(&files, "**/opencode.json{,c}", zlob_flags.ZLOB_RECOMMENDED, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 4), result.count);
+            try testing.expect(result.hasPath("packages/cli/opencode.json"));
+            try testing.expect(result.hasPath("packages/cli/opencode.jsonc"));
+            try testing.expect(result.hasPath("packages/web/opencode.json"));
+            try testing.expect(result.hasPath("packages/web/nested/deep/opencode.json"));
+            // .json5 must NOT match - the brace alternatives are exactly "" and "c"
+            for (result.paths) |p| {
+                try testing.expect(!std.mem.endsWith(u8, p, ".json5"));
+                try testing.expect(!std.mem.endsWith(u8, p, ".md"));
+                try testing.expect(!std.mem.endsWith(u8, p, ".zig"));
+            }
+        }
+    }.assert, @src());
+}

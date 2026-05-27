@@ -1447,17 +1447,26 @@ fn globWithBracedComponents(
     var start_dir: []const u8 = ".";
     var start_component_idx: usize = 0;
 
+    // On Windows, absolute paths can be drive-letter-prefixed (e.g. "C:/...")
+    // rather than starting with '/'. In that case the drive letter is the
+    // first literal component and we must NOT prepend '/' to start_dir.
+    const has_drive_letter = is_windows and info.is_absolute and
+        parsed.components.len > 0 and
+        parsed.components[0].text.len >= 2 and
+        parsed.components[0].text[1] == ':';
+
     if (literal_prefix_end > 0) {
         var path_len: usize = 0;
 
-        // For absolute paths, start with "/"
-        if (info.is_absolute) {
+        // For POSIX-style absolute paths, start with "/".
+        // Drive-letter Windows absolutes preserve the drive prefix as-is.
+        if (info.is_absolute and !has_drive_letter) {
             start_dir_buf[0] = '/';
             path_len = 1;
         }
 
         for (parsed.components[0..literal_prefix_end], 0..) |comp, i| {
-            if (i > 0 or (i == 0 and info.is_absolute)) {
+            if (i > 0 or (i == 0 and info.is_absolute and !has_drive_letter)) {
                 if (path_len > 1 or (path_len == 1 and !info.is_absolute)) {
                     start_dir_buf[path_len] = '/';
                     path_len += 1;
@@ -1468,8 +1477,8 @@ fn globWithBracedComponents(
         }
         start_dir = start_dir_buf[0..path_len];
         start_component_idx = literal_prefix_end;
-    } else if (info.is_absolute) {
-        // No literal prefix but absolute path - start from "/"
+    } else if (info.is_absolute and !has_drive_letter) {
+        // No literal prefix but POSIX-absolute path - start from "/".
         start_dir = "/";
     }
 
