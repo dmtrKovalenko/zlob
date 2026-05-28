@@ -196,8 +196,8 @@ fn finalizeBraceMatches(
     };
 }
 
-fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8) !PatternSegments {
-    if (mem.indexOf(u8, pattern, "**") == null) {
+fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8, flags: ZlobFlags) !PatternSegments {
+    if (!flags.doublestar_recursive or mem.indexOf(u8, pattern, "**") == null) {
         var segments = try allocator.alloc([]const u8, 1);
         segments[0] = pattern;
 
@@ -701,23 +701,27 @@ fn matchPathsImpl(
             return finalizeBraceMatches(allocator, &matches, pattern, flags);
         }
 
-        // Check if patterns are **/*.ext style (recursive with suffix)
-        const recursive_suffix_result = tryBuildRecursiveSuffixMatcher(expanded_patterns);
-        if (recursive_suffix_result.all_recursive_suffix and recursive_suffix_result.matcher.count > 0) {
-            var matches = std.array_list.AlignedManaged([]const u8, null).initCapacity(allocator, paths.len) catch
-                std.array_list.AlignedManaged([]const u8, null).init(allocator);
-            defer matches.deinit();
+        // Check if patterns are **/*.ext style (recursive with suffix).
+        // Gated on ZLOB_DOUBLESTAR_RECURSIVE: when unset, `**` is a literal
+        // `*` and this fast path (which assumes recursion) must not trigger.
+        if (flags.doublestar_recursive) {
+            const recursive_suffix_result = tryBuildRecursiveSuffixMatcher(expanded_patterns);
+            if (recursive_suffix_result.all_recursive_suffix and recursive_suffix_result.matcher.count > 0) {
+                var matches = std.array_list.AlignedManaged([]const u8, null).initCapacity(allocator, paths.len) catch
+                    std.array_list.AlignedManaged([]const u8, null).init(allocator);
+                defer matches.deinit();
 
-            // Fast path: use unified multi-suffix SIMD matching on basename
-            for (paths) |path| {
-                if (path.len < path_offset) continue;
-                const basename = getBasename(path);
-                if (recursive_suffix_result.matcher.matchAny(basename)) {
-                    try matches.append(path);
+                // Fast path: use unified multi-suffix SIMD matching on basename
+                for (paths) |path| {
+                    if (path.len < path_offset) continue;
+                    const basename = getBasename(path);
+                    if (recursive_suffix_result.matcher.matchAny(basename)) {
+                        try matches.append(path);
+                    }
                 }
-            }
 
-            return finalizeBraceMatches(allocator, &matches, pattern, flags);
+                return finalizeBraceMatches(allocator, &matches, pattern, flags);
+            }
         }
 
         // Pre-compute pattern segments for each alternative
@@ -727,7 +731,7 @@ fn matchPathsImpl(
             allocator.free(pattern_segments_list);
         }
         for (expanded_patterns, 0..) |exp_pattern, i| {
-            pattern_segments_list[i] = try splitPatternByDoublestar(allocator, exp_pattern);
+            pattern_segments_list[i] = try splitPatternByDoublestar(allocator, exp_pattern, flags);
         }
 
         var matches = std.array_list.AlignedManaged([]const u8, null).initCapacity(allocator, paths.len) catch
@@ -838,7 +842,7 @@ fn matchPathsImpl(
     // which dramatically reduces the number of paths that need expensive ** matching.
     const suffix_info = extractSuffixFromPattern(pattern);
 
-    var pattern_segments = try splitPatternByDoublestar(allocator, pattern);
+    var pattern_segments = try splitPatternByDoublestar(allocator, pattern, flags);
     defer pattern_segments.deinit();
 
     var matches = std.array_list.AlignedManaged([]const u8, null).initCapacity(allocator, paths.len) catch

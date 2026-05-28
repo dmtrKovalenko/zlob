@@ -936,10 +936,11 @@ fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, pzlo
 const expandTilde = utils.expandTilde;
 
 /// Glob within a specific base directory.
-/// base_path must be an absolute path (starts with '/'), otherwise returns error.Aborted.
+/// base_path must be an absolute path, otherwise returns error.Aborted.
+/// Absoluteness is platform-aware: POSIX `/foo`, Windows `C:\foo` / `\\server`.
 pub fn globAt(allocator: std.mem.Allocator, io: Io, base_path: []const u8, pattern: [*:0]const u8, flags: c_int, errfunc: zlob_errfunc_t, pzlob: *zlob_t) !?void {
     // Validate that base_path is absolute
-    if (base_path.len == 0 or base_path[0] != '/') {
+    if (base_path.len == 0 or !std.fs.path.isAbsolute(base_path)) {
         return error.Aborted;
     }
 
