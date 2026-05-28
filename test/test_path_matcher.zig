@@ -635,3 +635,518 @@ test "matchPaths - allows ./ prefix for the pattern" {
 
     try testing.expectEqual(3, result.len());
 }
+
+// ===========================================================================
+// CompiledPattern + indices API tests
+// ===========================================================================
+
+const compilePattern = zlob.compilePattern;
+const matchPathIndices = zlob.matchPathIndices;
+const matchPathIndicesAt = zlob.matchPathIndicesAt;
+const matchPathsCompiled = zlob.matchPathsCompiled;
+const matchPathIndicesCompiled = zlob.matchPathIndicesCompiled;
+const matchPathIndicesAtCompiled = zlob.matchPathIndicesAtCompiled;
+
+test "CompiledPattern - literal pattern" {
+    var p = try compilePattern(testing.allocator, "src/main.zig", .{});
+    defer p.deinit();
+
+    try testing.expect(p.matches("src/main.zig", .{}));
+    try testing.expect(!p.matches("src/test.zig", .{}));
+    try testing.expect(!p.matches("src/main.zig.bak", .{}));
+}
+
+test "CompiledPattern - single suffix fast (1-4 byte ext)" {
+    var p = try compilePattern(testing.allocator, "*.zig", .{});
+    defer p.deinit();
+
+    try testing.expect(p.matches("foo.zig", .{}));
+    try testing.expect(p.matches("any/path/here/foo.zig", .{}));
+    try testing.expect(!p.matches("foo.txt", .{}));
+}
+
+test "CompiledPattern - single suffix generic (5+ byte ext)" {
+    var p = try compilePattern(testing.allocator, "*.markdown", .{});
+    defer p.deinit();
+
+    try testing.expect(p.matches("README.markdown", .{}));
+    try testing.expect(!p.matches("README.md", .{}));
+}
+
+test "CompiledPattern - general pattern" {
+    var p = try compilePattern(testing.allocator, "src/**/*.c", .{ .doublestar_recursive = true });
+    defer p.deinit();
+
+    const flags = zlob.ZlobFlags{ .doublestar_recursive = true };
+    try testing.expect(p.matches("src/foo.c", flags));
+    try testing.expect(p.matches("src/sub/dir/bar.c", flags));
+    try testing.expect(!p.matches("src/foo.h", flags));
+    try testing.expect(!p.matches("test/foo.c", flags));
+}
+
+test "CompiledPattern - brace multi_suffix" {
+    var p = try compilePattern(testing.allocator, "*.{c,h}", .{ .brace = true });
+    defer p.deinit();
+
+    const flags = zlob.ZlobFlags{ .brace = true };
+    try testing.expect(p.matches("foo.c", flags));
+    try testing.expect(p.matches("any/foo.h", flags));
+    try testing.expect(!p.matches("foo.txt", flags));
+}
+
+test "CompiledPattern - brace recursive_multi_suffix" {
+    var p = try compilePattern(testing.allocator, "**/*.{rs,toml}", .{ .brace = true, .doublestar_recursive = true });
+    defer p.deinit();
+
+    const flags = zlob.ZlobFlags{ .brace = true, .doublestar_recursive = true };
+    try testing.expect(p.matches("Cargo.toml", flags));
+    try testing.expect(p.matches("src/lib.rs", flags));
+    try testing.expect(p.matches("a/b/c/file.rs", flags));
+    try testing.expect(!p.matches("file.md", flags));
+}
+
+test "CompiledPattern - brace_general" {
+    var p = try compilePattern(testing.allocator, "{src,lib}/*.zig", .{ .brace = true });
+    defer p.deinit();
+
+    const flags = zlob.ZlobFlags{ .brace = true };
+    try testing.expect(p.matches("src/foo.zig", flags));
+    try testing.expect(p.matches("lib/bar.zig", flags));
+    try testing.expect(!p.matches("test/baz.zig", flags));
+}
+
+test "CompiledPattern - reuse across many paths" {
+    var p = try compilePattern(testing.allocator, "*.rs", .{});
+    defer p.deinit();
+
+    const paths = [_][]const u8{ "a.rs", "b.txt", "c.rs", "d.md", "e.rs" };
+    var hits: usize = 0;
+    for (paths) |path| {
+        if (p.matches(path, .{})) hits += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), hits);
+}
+
+test "matchPathIndices - basic" {
+    const paths = [_][]const u8{ "foo.rs", "bar.txt", "baz.rs", "qux.md" };
+    const indices = try matchPathIndices(testing.allocator, "*.rs", &paths, .{});
+    defer testing.allocator.free(indices);
+
+    try testing.expectEqual(@as(usize, 2), indices.len);
+    try testing.expectEqual(@as(usize, 0), indices[0]);
+    try testing.expectEqual(@as(usize, 2), indices[1]);
+}
+
+test "matchPathIndices - input order preserved (NOSORT ignored)" {
+    // Purposely unsorted input — output should preserve input order
+    // regardless of NOSORT being set or unset.
+    const paths = [_][]const u8{ "z.rs", "a.rs", "m.rs" };
+    const indices = try matchPathIndices(testing.allocator, "*.rs", &paths, .{});
+    defer testing.allocator.free(indices);
+
+    try testing.expectEqual(@as(usize, 3), indices.len);
+    try testing.expectEqual(@as(usize, 0), indices[0]);
+    try testing.expectEqual(@as(usize, 1), indices[1]);
+    try testing.expectEqual(@as(usize, 2), indices[2]);
+}
+
+test "matchPathIndices - no match returns empty" {
+    const paths = [_][]const u8{ "foo.rs", "bar.txt" };
+    const indices = try matchPathIndices(testing.allocator, "*.zig", &paths, .{});
+    defer testing.allocator.free(indices);
+
+    try testing.expectEqual(@as(usize, 0), indices.len);
+}
+
+test "matchPathIndices - empty input returns empty" {
+    const paths = [_][]const u8{};
+    const indices = try matchPathIndices(testing.allocator, "*.rs", &paths, .{});
+    defer testing.allocator.free(indices);
+
+    try testing.expectEqual(@as(usize, 0), indices.len);
+}
+
+test "matchPathIndices - brace expansion" {
+    const paths = [_][]const u8{ "a.c", "b.h", "c.txt", "d.h" };
+    const indices = try matchPathIndices(testing.allocator, "*.{c,h}", &paths, zlob_flags.ZLOB_BRACE);
+    defer testing.allocator.free(indices);
+
+    try testing.expectEqual(@as(usize, 3), indices.len);
+    try testing.expectEqual(@as(usize, 0), indices[0]);
+    try testing.expectEqual(@as(usize, 1), indices[1]);
+    try testing.expectEqual(@as(usize, 3), indices[2]);
+}
+
+test "matchPathIndices - recursive doublestar" {
+    const paths = [_][]const u8{
+        "src/main.rs",
+        "src/lib/util.rs",
+        "tests/test.rs",
+        "Cargo.toml",
+    };
+    const indices = try matchPathIndices(
+        testing.allocator,
+        "src/**/*.rs",
+        &paths,
+        zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE,
+    );
+    defer testing.allocator.free(indices);
+
+    try testing.expectEqual(@as(usize, 2), indices.len);
+    try testing.expectEqual(@as(usize, 0), indices[0]);
+    try testing.expectEqual(@as(usize, 1), indices[1]);
+}
+
+test "matchPathIndicesAt - base path" {
+    const paths = [_][]const u8{
+        "/home/me/proj/src/main.rs",
+        "/home/me/proj/lib/util.rs",
+        "/home/me/proj/README.md",
+    };
+    const indices = try matchPathIndicesAt(
+        testing.allocator,
+        "/home/me/proj",
+        "src/*.rs",
+        &paths,
+        .{},
+    );
+    defer testing.allocator.free(indices);
+
+    try testing.expectEqual(@as(usize, 1), indices.len);
+    try testing.expectEqual(@as(usize, 0), indices[0]);
+}
+
+test "matchPathsCompiled - parity with matchPaths" {
+    const paths = [_][]const u8{ "foo.rs", "bar.txt", "baz.rs" };
+    var p = try compilePattern(testing.allocator, "*.rs", .{});
+    defer p.deinit();
+
+    var compiled_result = try matchPathsCompiled(testing.allocator, &p, &paths, .{});
+    defer compiled_result.deinit();
+
+    var direct_result = try matchPaths(testing.allocator, "*.rs", &paths, .{});
+    defer direct_result.deinit();
+
+    try testing.expectEqual(direct_result.len(), compiled_result.len());
+    for (0..direct_result.len()) |i| {
+        try testing.expectEqualSlices(u8, direct_result.get(i), compiled_result.get(i));
+    }
+}
+
+test "matchPathIndicesCompiled - same pattern reused" {
+    var p = try compilePattern(testing.allocator, "*.rs", .{});
+    defer p.deinit();
+
+    const paths1 = [_][]const u8{ "a.rs", "b.txt" };
+    const idx1 = try matchPathIndicesCompiled(testing.allocator, &p, &paths1, .{});
+    defer testing.allocator.free(idx1);
+    try testing.expectEqual(@as(usize, 1), idx1.len);
+    try testing.expectEqual(@as(usize, 0), idx1[0]);
+
+    // Reuse the same compiled pattern against a different paths slice.
+    const paths2 = [_][]const u8{ "x.txt", "y.rs", "z.rs" };
+    const idx2 = try matchPathIndicesCompiled(testing.allocator, &p, &paths2, .{});
+    defer testing.allocator.free(idx2);
+    try testing.expectEqual(@as(usize, 2), idx2.len);
+    try testing.expectEqual(@as(usize, 1), idx2[0]);
+    try testing.expectEqual(@as(usize, 2), idx2[1]);
+}
+
+test "matchPathIndicesAtCompiled - base path" {
+    var p = try compilePattern(testing.allocator, "src/*.rs", .{});
+    defer p.deinit();
+
+    const paths = [_][]const u8{
+        "/proj/src/lib.rs",
+        "/proj/src/main.rs",
+        "/proj/README.md",
+    };
+    const indices = try matchPathIndicesAtCompiled(
+        testing.allocator,
+        "/proj",
+        &p,
+        &paths,
+        .{},
+    );
+    defer testing.allocator.free(indices);
+
+    try testing.expectEqual(@as(usize, 2), indices.len);
+}
+
+// ===========================================================================
+// Path-separator handling: `/` always, `\\` on Windows only.
+// ===========================================================================
+
+const builtin = @import("builtin");
+const zlob_core = @import("zlob_core");
+const path_matcher_mod = zlob_core.compiled_pattern;
+
+test "splitPathComponentsNormalized - forward slash always splits" {
+    var buf: [16][]const u8 = undefined;
+    const out = path_matcher_mod.splitPathComponentsNormalized("a/b/c", &buf).?;
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualStrings("a", out[0]);
+    try testing.expectEqualStrings("b", out[1]);
+    try testing.expectEqualStrings("c", out[2]);
+}
+
+test "getBasenameNormalized - forward slash always" {
+    try testing.expectEqualStrings("file.txt", path_matcher_mod.getBasenameNormalized("a/b/file.txt"));
+    try testing.expectEqualStrings("file.txt", path_matcher_mod.getBasenameNormalized("file.txt"));
+}
+
+test "splitPathComponentsNormalized - backslash splits only on Windows" {
+    var buf: [16][]const u8 = undefined;
+    const out = path_matcher_mod.splitPathComponentsNormalized("a\\b\\c", &buf).?;
+    if (builtin.os.tag == .windows) {
+        try testing.expectEqual(@as(usize, 3), out.len);
+        try testing.expectEqualStrings("a", out[0]);
+        try testing.expectEqualStrings("b", out[1]);
+        try testing.expectEqualStrings("c", out[2]);
+    } else {
+        try testing.expectEqual(@as(usize, 1), out.len);
+        try testing.expectEqualStrings("a\\b\\c", out[0]);
+    }
+}
+
+test "getBasenameNormalized - backslash splits only on Windows" {
+    const got = path_matcher_mod.getBasenameNormalized("dir\\sub\\file.txt");
+    if (builtin.os.tag == .windows) {
+        try testing.expectEqualStrings("file.txt", got);
+    } else {
+        try testing.expectEqualStrings("dir\\sub\\file.txt", got);
+    }
+}
+
+test "splitPathComponentsNormalized - mixed separators on Windows" {
+    var buf: [16][]const u8 = undefined;
+    const out = path_matcher_mod.splitPathComponentsNormalized("a/b\\c/d", &buf).?;
+    if (builtin.os.tag == .windows) {
+        try testing.expectEqual(@as(usize, 4), out.len);
+        try testing.expectEqualStrings("a", out[0]);
+        try testing.expectEqualStrings("b", out[1]);
+        try testing.expectEqualStrings("c", out[2]);
+        try testing.expectEqualStrings("d", out[3]);
+    } else {
+        // On POSIX `\` is a literal byte, so the input splits on `/` only:
+        // "a", "b\\c", "d".
+        try testing.expectEqual(@as(usize, 3), out.len);
+        try testing.expectEqualStrings("a", out[0]);
+        try testing.expectEqualStrings("b\\c", out[1]);
+        try testing.expectEqualStrings("d", out[2]);
+    }
+}
+
+test "splitPathComponentsNormalized - returns null on component overflow" {
+    var buf: [4][]const u8 = undefined;
+    // 5 components into a 4-slot buffer: must report overflow, not truncate.
+    try testing.expectEqual(@as(?[][]const u8, null), path_matcher_mod.splitPathComponentsNormalized("a/b/c/d/e", &buf));
+    // Exactly buffer.len components fits.
+    const ok = path_matcher_mod.splitPathComponentsNormalized("a/b/c/d", &buf);
+    try testing.expectEqual(@as(usize, 4), ok.?.len);
+}
+
+test "matchPaths - deep path beyond MAX_PATH_COMPONENTS does not match doublestar" {
+    // Build a path with far more components than the matcher buffer holds.
+    const depth = path_matcher_mod.MAX_PATH_COMPONENTS + 5;
+    var buf: [(path_matcher_mod.MAX_PATH_COMPONENTS + 5) * 2 + 16]u8 = undefined;
+    var w: usize = 0;
+    for (0..depth) |_| {
+        buf[w] = 'a';
+        buf[w + 1] = '/';
+        w += 2;
+    }
+    @memcpy(buf[w..][0..5], "x.zig");
+    w += 5;
+    const deep = buf[0..w];
+
+    const paths = [_][]const u8{deep};
+    var result = try matchPaths(testing.allocator, "**/*.zig", &paths, .{ .doublestar_recursive = true });
+    defer result.deinit();
+    // Overflow → no-match (false negative is the documented, safe behaviour).
+    try testing.expectEqual(@as(usize, 0), result.len());
+}
+
+// ===========================================================================
+// Stack-only chunked C-string FFI: paths > STR_CHUNK should still produce
+// correctly base-offset indices. Goes through the c_lib bridge.
+// ===========================================================================
+
+const c_lib = @import("c_lib");
+
+test "zlob_match_paths - ZLOB_NOCHECK synthesizes pattern on no match (C string)" {
+    const paths = [_][*:0]const u8{ "foo.txt", "bar.md" };
+    var pzlob: c_lib.zlob_t = std.mem.zeroes(c_lib.zlob_t);
+    const code = c_lib.zlob_match_paths(
+        "*.zig",
+        @ptrCast(&paths),
+        paths.len,
+        zlob_flags.ZLOB_NOCHECK,
+        &pzlob,
+    );
+    defer c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(@as(c_int, 0), code);
+    try testing.expectEqual(@as(usize, 1), pzlob.zlo_pathc);
+    const got = std.mem.sliceTo(pzlob.zlo_pathv[0], 0);
+    try testing.expectEqualStrings("*.zig", got);
+}
+
+test "zlob_match_paths - no match without ZLOB_NOCHECK returns NOMATCH (C string)" {
+    const paths = [_][*:0]const u8{ "foo.txt", "bar.md" };
+    var pzlob: c_lib.zlob_t = std.mem.zeroes(c_lib.zlob_t);
+    const code = c_lib.zlob_match_paths(
+        "*.zig",
+        @ptrCast(&paths),
+        paths.len,
+        0,
+        &pzlob,
+    );
+    defer c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(zlob_flags.ZLOB_NOMATCH, code);
+}
+
+test "matchPaths over chunked C-string array (> 256 paths)" {
+    const path_count: usize = 1024;
+    var paths_buf: [path_count][32:0]u8 = undefined;
+    var paths: [path_count][*:0]const u8 = undefined;
+
+    var matched_count: usize = 0;
+    for (0..path_count) |i| {
+        // Every 7th path matches *.zig; rest are .txt.
+        const is_zig = (i % 7) == 0;
+        const ext = if (is_zig) ".zig" else ".txt";
+        if (is_zig) matched_count += 1;
+        const written = std.fmt.bufPrintZ(&paths_buf[i], "p{d:0>5}{s}", .{ i, ext }) catch unreachable;
+        paths[i] = written.ptr;
+    }
+
+    var out: c_lib.zlob_indices_t = .{ .indices = null, .count = 0 };
+    const code = c_lib.zlob_match_paths_indices(
+        "*.zig",
+        @ptrCast(&paths),
+        path_count,
+        0,
+        &out,
+    );
+    defer c_lib.zlob_indices_free(&out);
+
+    try testing.expectEqual(@as(c_int, 0), code);
+    try testing.expectEqual(matched_count, out.count);
+    try testing.expect(out.indices != null);
+
+    // Spot-check: every emitted index should land on a path ending in ".zig".
+    const indices_slice = out.indices.?[0..out.count];
+    for (indices_slice) |idx| {
+        try testing.expect(idx < path_count);
+        const path = std.mem.sliceTo(paths[idx], 0);
+        try testing.expect(std.mem.endsWith(u8, path, ".zig"));
+    }
+
+    // Indices must be in input (ascending) order.
+    for (1..indices_slice.len) |i| {
+        try testing.expect(indices_slice[i] > indices_slice[i - 1]);
+    }
+}
+
+// ===========================================================================
+// Unified Windows-aware matching:
+//   - On Windows, both `/` and `\\` are accepted in patterns AND paths;
+//     they're equivalent at the matcher level.
+//   - On POSIX, only `/` is a separator. `\\` stays literal.
+// All dispatch arms (literal / single_suffix / multi_suffix / general / brace)
+// must agree.
+// ===========================================================================
+
+test "unified separators: literal pattern + Windows-style path" {
+    const paths = [_][]const u8{ "src\\main.zig", "src/main.zig", "src\\lib.zig" };
+    var result = try matchPaths(testing.allocator, "src/main.zig", &paths, .{});
+    defer result.deinit();
+
+    if (builtin.os.tag == .windows) {
+        // On Windows: both src\\main.zig and src/main.zig should match the
+        // POSIX pattern `src/main.zig`.
+        try testing.expectEqual(@as(usize, 2), result.len());
+    } else {
+        // On POSIX: `\\` is literal, only the exact `/` form matches.
+        try testing.expectEqual(@as(usize, 1), result.len());
+    }
+}
+
+test "unified separators: backslash pattern matches forward-slash path on Windows" {
+    const paths = [_][]const u8{ "src/main.zig", "test/main.zig" };
+    // Pattern uses `\\` — on Windows this normalises to `src/main.zig` at compile.
+    var result = try matchPaths(testing.allocator, "src\\main.zig", &paths, .{});
+    defer result.deinit();
+
+    if (builtin.os.tag == .windows) {
+        try testing.expectEqual(@as(usize, 1), result.len());
+    } else {
+        // On POSIX `src\\main.zig` is literal-byte, no path matches it.
+        try testing.expectEqual(@as(usize, 0), result.len());
+    }
+}
+
+test "unified separators: general pattern with `*` against Windows path" {
+    const paths = [_][]const u8{ "src\\main.zig", "src\\lib.zig", "test\\foo.zig" };
+    var result = try matchPaths(testing.allocator, "src/*.zig", &paths, .{});
+    defer result.deinit();
+
+    if (builtin.os.tag == .windows) {
+        try testing.expectEqual(@as(usize, 2), result.len());
+    } else {
+        try testing.expectEqual(@as(usize, 0), result.len());
+    }
+}
+
+test "unified separators: doublestar pattern against Windows path" {
+    const paths = [_][]const u8{
+        "src\\main.zig",
+        "src\\sub\\dir\\foo.zig",
+        "test\\bar.zig",
+    };
+    var result = try matchPaths(testing.allocator, "src/**/*.zig", &paths, .{ .doublestar_recursive = true });
+    defer result.deinit();
+
+    if (builtin.os.tag == .windows) {
+        try testing.expectEqual(@as(usize, 2), result.len());
+    } else {
+        try testing.expectEqual(@as(usize, 0), result.len());
+    }
+}
+
+test "unified separators: simple suffix matches regardless of separators" {
+    // Suffix matching is byte-based — separator-agnostic on every platform.
+    const paths = [_][]const u8{ "src\\main.zig", "src/lib.zig", "test\\foo.txt" };
+    var result = try matchPaths(testing.allocator, "*.zig", &paths, .{});
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 2), result.len());
+}
+
+test "unified separators: brace pattern against mixed paths" {
+    const paths = [_][]const u8{ "src\\main.zig", "src/lib.toml", "test/foo.txt" };
+    var result = try matchPaths(testing.allocator, "src/*.{zig,toml}", &paths, .{ .brace = true });
+    defer result.deinit();
+
+    if (builtin.os.tag == .windows) {
+        try testing.expectEqual(@as(usize, 2), result.len());
+    } else {
+        // On POSIX `src/*.toml` matches `src/lib.toml`, `src/*.zig` doesn't
+        // match `src\\main.zig` (literal byte mismatch).
+        try testing.expectEqual(@as(usize, 1), result.len());
+    }
+}
+
+test "unified separators: CompiledPattern.matches per-path API" {
+    var p = try compilePattern(testing.allocator, "src/main.zig", .{});
+    defer p.deinit();
+
+    try testing.expect(p.matches("src/main.zig", .{}));
+    if (builtin.os.tag == .windows) {
+        try testing.expect(p.matches("src\\main.zig", .{}));
+    } else {
+        try testing.expect(!p.matches("src\\main.zig", .{}));
+    }
+}

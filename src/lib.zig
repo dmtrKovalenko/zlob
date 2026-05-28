@@ -28,6 +28,11 @@ pub const hasWildcardsWithFlags = zlob.hasWildcards;
 pub const hasWildcardsBasic = zlob.hasWildcardsBasic;
 pub const ZlobFlags = zlob.ZlobFlags;
 
+// Compiled pattern + indices APIs (in-memory matching, no filesystem).
+pub const CompiledPattern = zlob.compiled_pattern.CompiledPattern;
+pub const CompiledPatternKind = zlob.compiled_pattern.CompiledPatternKind;
+pub const compilePattern = zlob.compiled_pattern.compilePattern;
+
 /// Check if a pattern contains any glob special characters.
 /// Detects all glob syntax: basic wildcards (*, ?, [), braces ({), and extglob patterns.
 /// For fine-grained control, use `hasWildcardsWithFlags(pattern, flags)`.
@@ -114,7 +119,7 @@ pub fn match(allocator: std.mem.Allocator, io: std.Io, pattern: []const u8, flag
 /// - Paths from filesystem operations are typically already normalized
 pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !ZlobResults {
     const zflags = flagsToZlobFlags(flags_param);
-    return zlob.path_matcher.matchPaths(allocator, pattern, paths, zflags);
+    return zlob.compiled_pattern.matchPaths(allocator, pattern, paths, zflags);
 }
 
 /// Match glob pattern against an array of absolute paths, treating each path as relative
@@ -147,7 +152,49 @@ pub fn matchPaths(allocator: std.mem.Allocator, pattern: []const u8, paths: []co
 /// Supported flags: same as `matchPaths`.
 pub fn matchPathsAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, paths: []const []const u8, flags_param: anytype) !ZlobResults {
     const zflags = flagsToZlobFlags(flags_param);
-    return zlob.path_matcher.matchPathsAt(allocator, base_path, pattern, paths, zflags);
+    return zlob.compiled_pattern.matchPathsAt(allocator, base_path, pattern, paths, zflags);
+}
+
+/// Match a glob pattern against paths and return the indices of matching paths
+/// (into the input slice), in input order. Allocates only an `[]usize` —
+/// no string allocations. Caller frees with `allocator.free`.
+///
+/// `ZLOB_NOSORT` and `ZLOB_NOCHECK` are ignored: indices are always in input
+/// order, and there is no input index for a synthesized pattern.
+pub fn matchPathIndices(allocator: std.mem.Allocator, pattern: []const u8, paths: []const []const u8, flags_param: anytype) ![]usize {
+    const zflags = flagsToZlobFlags(flags_param);
+    return zlob.compiled_pattern.matchPathIndices(allocator, pattern, paths, zflags);
+}
+
+/// At-flow variant of `matchPathIndices`.
+pub fn matchPathIndicesAt(allocator: std.mem.Allocator, base_path: []const u8, pattern: []const u8, paths: []const []const u8, flags_param: anytype) ![]usize {
+    const zflags = flagsToZlobFlags(flags_param);
+    return zlob.compiled_pattern.matchPathIndicesAt(allocator, base_path, pattern, paths, zflags);
+}
+
+/// Pre-compiled variant of `matchPaths`. Reuse the same `CompiledPattern`
+/// across many paths slices to skip repeated pattern analysis.
+pub fn matchPathsCompiled(allocator: std.mem.Allocator, compiled: *const CompiledPattern, paths: []const []const u8, flags_param: anytype) !ZlobResults {
+    const zflags = flagsToZlobFlags(flags_param);
+    return zlob.compiled_pattern.matchPathsCompiled(allocator, compiled, paths, zflags);
+}
+
+/// Pre-compiled variant of `matchPathsAt`.
+pub fn matchPathsAtCompiled(allocator: std.mem.Allocator, base_path: []const u8, compiled: *const CompiledPattern, paths: []const []const u8, flags_param: anytype) !ZlobResults {
+    const zflags = flagsToZlobFlags(flags_param);
+    return zlob.compiled_pattern.matchPathsAtCompiled(allocator, base_path, compiled, paths, zflags);
+}
+
+/// Pre-compiled variant of `matchPathIndices`.
+pub fn matchPathIndicesCompiled(allocator: std.mem.Allocator, compiled: *const CompiledPattern, paths: []const []const u8, flags_param: anytype) ![]usize {
+    const zflags = flagsToZlobFlags(flags_param);
+    return zlob.compiled_pattern.matchPathIndicesCompiled(allocator, compiled, paths, zflags);
+}
+
+/// Pre-compiled variant of `matchPathIndicesAt`.
+pub fn matchPathIndicesAtCompiled(allocator: std.mem.Allocator, base_path: []const u8, compiled: *const CompiledPattern, paths: []const []const u8, flags_param: anytype) ![]usize {
+    const zflags = flagsToZlobFlags(flags_param);
+    return zlob.compiled_pattern.matchPathIndicesAtCompiled(allocator, base_path, compiled, paths, zflags);
 }
 
 /// Perform file system walking within a specified base directory and collect matching results.
@@ -207,8 +254,15 @@ fn flagsToZlobFlags(flags_param: anytype) ZlobFlags {
     } else if (T == comptime_int) {
         return ZlobFlags.fromU32(@intCast(flags_param));
     } else if (@typeInfo(T) == .@"struct") {
-        // Handle anonymous struct literals like .{ .mark = true }
-        const gf: ZlobFlags = flags_param;
+        // Handle anonymous struct literals like .{} or .{ .mark = true }.
+        // Build a ZlobFlags by copying any matching fields from the literal;
+        // unmatched fields stay at their default. Avoids relying on
+        // anonymous-to-named struct coercion which is brittle across Zig
+        // versions, especially for empty literals.
+        var gf = ZlobFlags{};
+        inline for (@typeInfo(T).@"struct".fields) |field| {
+            @field(gf, field.name) = @field(flags_param, field.name);
+        }
         return gf;
     } else {
         @compileError("flags must be ZlobFlags, u32, c_int, or a struct literal");

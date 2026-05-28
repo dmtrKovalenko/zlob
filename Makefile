@@ -3,9 +3,9 @@
 # Targets:
 #   make          - Build the shared library
 #   make install  - Install library and headers (requires sudo)
-#   make test     - Run minimal C API tests
+#   make test     - Run all tests (Zig + Rust, plus C API on Linux/macOS)
 #   make dev      - Build all: Zig, C library, and Rust bindings
-#   make dev-test - Run all tests: Zig, C, and Rust
+#   make dev-test - Run all tests including libc comparison
 #   make clean    - Remove build artifacts
 
 PREFIX ?= /usr/local
@@ -78,13 +78,20 @@ uninstall:
 	@echo "Uninstall complete!"
 
 test: build
-	zig build test --summary all
+	@echo "-> Running Zig tests"
+	$(ZIG) build test --summary all
+ifneq ($(filter Linux Darwin,$(UNAME_S)),)
+	@echo "========================"
+	@echo "-> Running C API tests"
 	$(CC) $(CFLAGS) -I./zig-out/include -L./zig-out/lib \
 		-o test_c_api test/test_c_api.c -lzlob \
 		-Wl,-rpath,./zig-out/lib
-	@echo ""
 	./test_c_api
 	@rm -f test_c_api
+endif
+	@echo "========================"
+	@echo "-> Running Rust tests"
+	cd rust && $(CARGO) test
 
 # Clean build artifacts
 clean:
@@ -132,12 +139,12 @@ dev: build
 # Run all tests: Zig, C, and Rust
 dev-test: build
 	@echo "========================================"
-	@echo "Running Zig tests..."
+	@echo "zig tests"
 	@echo "========================================"
 	$(ZIG) build test
 	@echo ""
 	@echo "========================================"
-	@echo "Running C API tests..."
+	@echo "c api tests"
 	@echo "========================================"
 	$(CC) $(CFLAGS) -I./zig-out/include -L./zig-out/lib \
 		-o test_c_api test/test_c_api.c -lzlob \
@@ -146,12 +153,12 @@ dev-test: build
 	@rm -f test_c_api
 	@echo ""
 	@echo "========================================"
-	@echo "Running Rust tests..."
+	@echo "rust tests "
 	@echo "========================================"
 	cd rust && $(CARGO) test
 	@echo ""
 	@echo "========================================"
-	@echo "Running libc comparison tests..."
+	@echo "comparing to glibc"
 	@echo "========================================"
 	./test/test_libc_comparison.sh
 	@echo ""
@@ -176,7 +183,7 @@ help:
 	@echo "Targets:"
 	@echo "  make              - Build the shared library (release)"
 	@echo "  make install      - Install library and headers (may require sudo)"
-	@echo "  make test         - Run C API tests only"
+	@echo "  make test         - Run all tests (Zig + Rust, plus C API on Linux/macOS)"
 	@echo "  make test-libc    - Run libc comparison tests (requires TEST_DIR)"
 	@echo "  make cli          - Build the CLI executable"
 	@echo "  make install-cli  - Install CLI executable (may require sudo)"

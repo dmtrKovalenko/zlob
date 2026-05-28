@@ -3,6 +3,7 @@
 use crate::error::ZlobError;
 use crate::ffi;
 use crate::flags::ZlobFlags;
+use crate::indicies::ZlobIndicies;
 use std::marker::PhantomData;
 use std::slice;
 
@@ -40,6 +41,18 @@ impl std::fmt::Debug for ZlobMatch<'_> {
 }
 
 impl<'a> ZlobMatch<'a> {
+    /// Internal: wrap a raw `zlob_t` returned by C, taking ownership.
+    /// SAFETY: `inner` must have been initialised by a successful zlob_match*
+    /// call. The caller is responsible for ensuring referenced paths outlive
+    /// the resulting `ZlobMatch` (the `'a` lifetime).
+    #[doc(hidden)]
+    pub(crate) unsafe fn from_raw(inner: ffi::zlob_t) -> Self {
+        ZlobMatch {
+            inner,
+            _marker: PhantomData,
+        }
+    }
+
     /// Returns the number of matched paths.
     #[inline]
     pub fn len(&self) -> usize {
@@ -345,6 +358,76 @@ pub fn zlob_match_paths_at<'a>(
         Ok(false) => Ok(None),
         Err(err) => Err(err),
     }
+}
+
+/// Match paths against a glob pattern and return the indices of matches into
+/// the input slice, in input order.
+///
+/// `ZLOB_NOSORT` is ignored (indices are always in input order).
+/// `ZLOB_NOCHECK` is silently ignored (no input index for a synthesised pattern).
+///
+/// # Example
+///
+/// ```
+/// use zlob::{zlob_match_paths_indices, ZlobFlags};
+///
+/// let paths = ["foo.rs", "bar.txt", "baz.rs"];
+/// let hits = zlob_match_paths_indices("*.rs", &paths, ZlobFlags::empty())?;
+/// assert_eq!(hits.as_slice(), &[0, 2]);
+/// # Ok::<(), zlob::ZlobError>(())
+/// ```
+pub fn zlob_match_paths_indices(
+    pattern: &str,
+    paths: &[&str],
+    flags: ZlobFlags,
+) -> Result<ZlobIndicies, ZlobError> {
+    let pattern_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&pattern) };
+    let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+    let mut out = ffi::zlob_indices_t {
+        indices: std::ptr::null_mut(),
+        count: 0,
+    };
+
+    let code = unsafe {
+        ffi::zlob_match_paths_indices_slice(
+            pattern_slice,
+            path_slices.as_ptr(),
+            path_slices.len(),
+            flags.bits(),
+            &mut out,
+        )
+    };
+
+    ZlobIndicies::from_ffi(code, out)
+}
+
+/// At-flow variant of [`zlob_match_paths_indices`].
+pub fn zlob_match_paths_indices_at(
+    base_path: &str,
+    pattern: &str,
+    paths: &[&str],
+    flags: ZlobFlags,
+) -> Result<ZlobIndicies, ZlobError> {
+    let base_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&base_path) };
+    let pattern_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&pattern) };
+    let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+    let mut out = ffi::zlob_indices_t {
+        indices: std::ptr::null_mut(),
+        count: 0,
+    };
+
+    let code = unsafe {
+        ffi::zlob_match_paths_indices_at_slice(
+            base_slice,
+            pattern_slice,
+            path_slices.as_ptr(),
+            path_slices.len(),
+            flags.bits(),
+            &mut out,
+        )
+    };
+
+    ZlobIndicies::from_ffi(code, out)
 }
 
 #[cfg(test)]
@@ -674,5 +757,35 @@ mod tests {
             "Literal pattern should match exactly one path"
         );
         assert_eq!(&literal_match[0], *first_rs);
+    }
+
+    #[test]
+    fn test_match_to_strings_and_helpers() {
+        let paths = ["foo.rs", "bar.txt", "baz.rs"];
+        let matches = zlob_match_paths("*.rs", &paths, ZlobFlags::empty())
+            .unwrap()
+            .unwrap();
+
+        assert!(!matches.is_empty());
+        assert_eq!(matches.len(), 2);
+
+        let owned: Vec<String> = matches.to_strings();
+        assert_eq!(owned.len(), 2);
+        assert!(owned.contains(&"foo.rs".to_string()));
+        assert!(owned.contains(&"baz.rs".to_string()));
+
+        // get() out of bounds returns None.
+        assert!(matches.get(2).is_none());
+        assert!(matches.get(0).is_some());
+    }
+
+    #[test]
+    fn test_match_debug_format() {
+        let paths = ["a.rs"];
+        let matches = zlob_match_paths("*.rs", &paths, ZlobFlags::empty())
+            .unwrap()
+            .unwrap();
+        let dbg = format!("{:?}", matches);
+        assert!(dbg.contains("ZlobMatch"));
     }
 }

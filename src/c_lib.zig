@@ -2,10 +2,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zlob_impl = @import("zlob");
 const zlob_flags = @import("zlob_flags");
-
+const compiled_pattern = zlob_impl.compiled_pattern;
 const mem = std.mem;
 const ZlobFlags = zlob_flags.ZlobFlags;
 const pattern_context = zlob_impl.pattern_context;
+
+const c_zlob = @cImport({
+    @cInclude("zlob.h");
+});
 
 // zig just added a ton of bullshit to the default std options which causes
 // a lot of different behavior changes for the standard C library this is
@@ -37,7 +41,7 @@ pub const DirIterator = zlob_impl.DirIterator;
 
 /// Zig or Rust compatible string slice type
 /// which makes FFI code execute signficantly faster than using C-style null-terminated strings
-/// at a cost of relying on the unstable Rust/Zig ABI compatiblitiy.
+/// at a cost of relying on the unstable Rust/Zig ABI compatibility.
 ///
 /// Meaning that any api that is accepting this type may break in any future version of Zig or Rust
 /// but it comes with a significant 15% performance boost for some hot paths so it may be worth the risk
@@ -91,41 +95,62 @@ pub export fn zlob_at(
     }
 }
 
-/// Extnesion to the standard C api allowing to match the pattern against the flat list of paths
-/// and do not access the filesystem at all.
-pub export fn zlob_match_paths(
-    pattern: [*:0]const u8,
+const STR_CHUNK: usize = 256;
+
+/// Materialise C-string `paths` into Zig slices STR_CHUNK at a time and match
+/// each chunk. The runtime `path_offset == 0` decision is made once here so
+/// the comptime `at` flag stays fixed for the whole loop.
+fn chunkedMatchFromCStr(
+    comptime kind: compiled_pattern.CollectorKind,
+    compiled: *const compiled_pattern.CompiledPattern,
     paths: [*]const [*:0]const u8,
     path_count: usize,
-    flags: c_int,
-    pzlob: *zlob_t,
-) c_int {
-    const pattern_slice = mem.sliceTo(pattern, 0);
-
-    const STACK_LIMIT = 256;
-    var stack_buf: [STACK_LIMIT][]const u8 = undefined;
-    const zig_paths_storage = if (path_count <= STACK_LIMIT)
-        stack_buf[0..path_count]
-    else
-        allocator.alloc([]const u8, path_count) catch return zlob_flags.ZLOB_NOSPACE;
-    defer if (path_count > STACK_LIMIT) allocator.free(zig_paths_storage);
-
-    for (0..path_count) |i| {
-        zig_paths_storage[i] = mem.sliceTo(paths[i], 0);
+    path_offset: usize,
+    flags: ZlobFlags,
+    out: *compiled_pattern.ListOf(kind),
+) !void {
+    if (path_offset == 0) {
+        try chunkedMatchImpl(kind, false, compiled, paths, path_count, 0, flags, out);
+    } else {
+        try chunkedMatchImpl(kind, true, compiled, paths, path_count, path_offset, flags, out);
     }
+}
 
-    var results = zlob_impl.path_matcher.matchPaths(allocator, pattern_slice, zig_paths_storage, ZlobFlags.fromInt(flags)) catch |err| {
-        return switch (err) {
-            error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
-        };
-    };
-    defer results.deinit();
+fn chunkedMatchImpl(
+    comptime kind: compiled_pattern.CollectorKind,
+    comptime at: bool,
+    compiled: *const compiled_pattern.CompiledPattern,
+    paths: [*]const [*:0]const u8,
+    path_count: usize,
+    path_offset: usize,
+    flags: ZlobFlags,
+    out: *compiled_pattern.ListOf(kind),
+) !void {
+    var stack_buf: [STR_CHUNK][]const u8 = undefined;
 
-    const result_len = results.len();
-    if (result_len == 0) {
-        return zlob_flags.ZLOB_NOMATCH;
+    var chunk_start: usize = 0;
+    while (chunk_start < path_count) : (chunk_start += STR_CHUNK) {
+        const chunk_len = @min(STR_CHUNK, path_count - chunk_start);
+        for (0..chunk_len) |i| {
+            stack_buf[i] = mem.sliceTo(paths[chunk_start + i], 0);
+        }
+        const chunk_paths = stack_buf[0..chunk_len];
+
+        try compiled_pattern.matchPathsCompiledImpl(
+            kind,
+            at,
+            compiled,
+            chunk_paths,
+            path_offset,
+            flags,
+            out,
+            chunk_start,
+        );
     }
+}
 
+fn finalizeSharedSliceResult(matches: []const []const u8, pzlob: *zlob_t) c_int {
+    const result_len = matches.len;
     const pathv_buf = allocator.alloc([*c]u8, result_len + 1) catch return zlob_flags.ZLOB_NOSPACE;
     errdefer allocator.free(pathv_buf);
 
@@ -134,8 +159,7 @@ pub export fn zlob_match_paths(
         return zlob_flags.ZLOB_NOSPACE;
     };
 
-    for (0..result_len) |i| {
-        const path = results.get(i);
+    for (matches, 0..) |path, i| {
         pathv_buf[i] = @ptrCast(@constCast(path.ptr));
         pathlen_buf[i] = path.len;
     }
@@ -150,8 +174,73 @@ pub export fn zlob_match_paths(
     return 0;
 }
 
+/// On an empty match set, honor ZLOB_NOCHECK by synthesizing the pattern
+/// itself as the single result (an owned copy, freed by zlobfree). Returns
+/// ZLOB_NOMATCH when NOCHECK is not set.
+fn finalizeNoMatch(pattern: []const u8, nocheck: bool, pzlob: *zlob_t) c_int {
+    if (!nocheck) return zlob_flags.ZLOB_NOMATCH;
+
+    const pathv_buf = allocator.alloc([*c]u8, 2) catch return zlob_flags.ZLOB_NOSPACE;
+    errdefer allocator.free(pathv_buf);
+    const pathlen_buf = allocator.alloc(usize, 1) catch {
+        allocator.free(pathv_buf);
+        return zlob_flags.ZLOB_NOSPACE;
+    };
+    errdefer allocator.free(pathlen_buf);
+
+    // NUL-terminated owned copy so C callers can treat it as a C string.
+    const owned = allocator.allocSentinel(u8, pattern.len, 0) catch {
+        allocator.free(pathv_buf);
+        allocator.free(pathlen_buf);
+        return zlob_flags.ZLOB_NOSPACE;
+    };
+    @memcpy(owned[0..pattern.len], pattern);
+
+    pathv_buf[0] = @ptrCast(owned.ptr);
+    pathv_buf[1] = null;
+    pathlen_buf[0] = pattern.len;
+
+    pzlob.zlo_pathc = 1;
+    pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
+    pzlob.zlo_offs = 0;
+    pzlob.zlo_pathlen = pathlen_buf.ptr;
+    pzlob.zlo_flags = zlob_flags.ZLOB_FLAGS_OWNS_STRINGS;
+    return 0;
+}
+
+/// Extension to the standard C api: match the pattern against a flat list of
+/// paths without touching the filesystem.
+pub export fn zlob_match_paths(
+    pattern: [*:0]const u8,
+    paths: [*]const [*:0]const u8,
+    path_count: usize,
+    flags: c_int,
+    pzlob: *zlob_t,
+) c_int {
+    const pattern_slice = mem.sliceTo(pattern, 0);
+    const zflags = ZlobFlags.fromInt(flags);
+
+    var compiled = compiled_pattern.compilePattern(allocator, pattern_slice, zflags) catch
+        return zlob_flags.ZLOB_NOSPACE;
+    defer compiled.deinit();
+
+    var matches = std.array_list.AlignedManaged([]const u8, null)
+        .initCapacity(allocator, @min(path_count, STR_CHUNK)) catch
+        std.array_list.AlignedManaged([]const u8, null).init(allocator);
+    defer matches.deinit();
+
+    chunkedMatchFromCStr(.slices, &compiled, paths, path_count, 0, zflags, &matches) catch
+        return zlob_flags.ZLOB_NOSPACE;
+
+    if (matches.items.len == 0) return finalizeNoMatch(compiled.pattern_storage, zflags.nocheck, pzlob);
+
+    if (!zflags.nosort) compiled_pattern.sortPathSlices(matches.items);
+
+    return finalizeSharedSliceResult(matches.items, pzlob);
+}
+
 /// The same as `zlob_match_paths` but using specific string slice type with a known length.
-/// Used primarily for FFI compatiblitiy with languates with normal string type as first-class citizens.
+/// Used primarily for FFI compatibility with languages with normal string type as first-class citizens.
 pub export fn zlob_match_paths_slice(
     pattern: *const zlob_slice_t,
     paths: [*]const zlob_slice_t,
@@ -164,7 +253,7 @@ pub export fn zlob_match_paths_slice(
     // UNSAFE: Relies on Zig ABI compatibility
     const zig_paths: []const []const u8 = @ptrCast(paths[0..path_count]);
 
-    var results = zlob_impl.path_matcher.matchPaths(allocator, pattern_slice, zig_paths, ZlobFlags.fromInt(flags)) catch |err| {
+    var results = compiled_pattern.matchPaths(allocator, pattern_slice, zig_paths, ZlobFlags.fromInt(flags)) catch |err| {
         return switch (err) {
             error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
         };
@@ -212,53 +301,26 @@ pub export fn zlob_match_paths_at(
 ) c_int {
     const base_slice = mem.sliceTo(base_path, 0);
     const pattern_slice = mem.sliceTo(pattern, 0);
+    const zflags = ZlobFlags.fromInt(flags);
+    const path_offset = compiled_pattern.computePathOffset(base_slice);
 
-    const STACK_LIMIT = 256;
-    var stack_buf: [STACK_LIMIT][]const u8 = undefined;
-    const zig_paths_storage = if (path_count <= STACK_LIMIT)
-        stack_buf[0..path_count]
-    else
-        allocator.alloc([]const u8, path_count) catch return zlob_flags.ZLOB_NOSPACE;
-    defer if (path_count > STACK_LIMIT) allocator.free(zig_paths_storage);
-
-    for (0..path_count) |i| {
-        zig_paths_storage[i] = mem.sliceTo(paths[i], 0);
-    }
-
-    var results = zlob_impl.path_matcher.matchPathsAt(allocator, base_slice, pattern_slice, zig_paths_storage, ZlobFlags.fromInt(flags)) catch |err| {
-        return switch (err) {
-            error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
-        };
-    };
-    defer results.deinit();
-
-    const result_len = results.len();
-    if (result_len == 0) {
-        return zlob_flags.ZLOB_NOMATCH;
-    }
-
-    const pathv_buf = allocator.alloc([*c]u8, result_len + 1) catch return zlob_flags.ZLOB_NOSPACE;
-    errdefer allocator.free(pathv_buf);
-
-    const pathlen_buf = allocator.alloc(usize, result_len) catch {
-        allocator.free(pathv_buf);
+    var compiled = compiled_pattern.compilePattern(allocator, pattern_slice, zflags) catch
         return zlob_flags.ZLOB_NOSPACE;
-    };
+    defer compiled.deinit();
 
-    for (0..result_len) |i| {
-        const path = results.get(i);
-        pathv_buf[i] = @ptrCast(@constCast(path.ptr));
-        pathlen_buf[i] = path.len;
-    }
-    pathv_buf[result_len] = null;
+    var matches = std.array_list.AlignedManaged([]const u8, null)
+        .initCapacity(allocator, @min(path_count, STR_CHUNK)) catch
+        std.array_list.AlignedManaged([]const u8, null).init(allocator);
+    defer matches.deinit();
 
-    pzlob.zlo_pathc = result_len;
-    pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
-    pzlob.zlo_offs = 0;
-    pzlob.zlo_pathlen = pathlen_buf.ptr;
-    pzlob.zlo_flags = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
+    chunkedMatchFromCStr(.slices, &compiled, paths, path_count, path_offset, zflags, &matches) catch
+        return zlob_flags.ZLOB_NOSPACE;
 
-    return 0;
+    if (matches.items.len == 0) return finalizeNoMatch(compiled.pattern_storage, zflags.nocheck, pzlob);
+
+    if (!zflags.nosort) compiled_pattern.sortPathSlices(matches.items);
+
+    return finalizeSharedSliceResult(matches.items, pzlob);
 }
 
 /// Match paths against a glob pattern relative to a base directory (slice version).
@@ -277,7 +339,7 @@ pub export fn zlob_match_paths_at_slice(
     // UNSAFE: Relies on Zig ABI compatibility
     const zig_paths: []const []const u8 = @ptrCast(paths[0..path_count]);
 
-    var results = zlob_impl.path_matcher.matchPathsAt(allocator, base_slice, pattern_slice, zig_paths, ZlobFlags.fromInt(flags)) catch |err| {
+    var results = compiled_pattern.matchPathsAt(allocator, base_slice, pattern_slice, zig_paths, ZlobFlags.fromInt(flags)) catch |err| {
         return switch (err) {
             error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
         };
@@ -329,4 +391,340 @@ pub export fn zlob_has_wildcards(
 ) callconv(.c) c_int {
     const pattern_slice = mem.sliceTo(pattern_str, 0);
     return @intFromBool(pattern_context.hasWildcards(pattern_slice, ZlobFlags.fromInt(flags)));
+}
+
+// ============================================================================
+// Compiled patterns + indices APIs
+//
+// `zlob_pattern_t` is exported as an opaque pointer; on the Zig side it is
+// just a heap-allocated `CompiledPattern`. No wrapper struct — the opaque
+// pointer points directly at the CompiledPattern, saving an indirection on
+// every `zlob_pattern_matches` call.
+//
+// `zlob_indices_t` is a layout-asserted extern struct — the C header has the
+// matching definition.
+// ============================================================================
+
+pub const zlob_indices_t = extern struct {
+    indices: ?[*]usize,
+    count: usize,
+
+    comptime {
+        const zig_t = zlob_indices_t;
+        const c_t = c_zlob.zlob_indices_t;
+
+        if (@sizeOf(zig_t) != @sizeOf(c_t)) {
+            @compileError("zlob_indices_t size mismatch");
+        }
+        if (@offsetOf(zig_t, "indices") != @offsetOf(c_t, "indices")) {
+            @compileError("zlob_indices_t indices offset mismatch");
+        }
+        if (@offsetOf(zig_t, "count") != @offsetOf(c_t, "count")) {
+            @compileError("zlob_indices_t count offset mismatch");
+        }
+    }
+};
+
+inline fn patternPtr(p: *anyopaque) *compiled_pattern.CompiledPattern {
+    return @ptrCast(@alignCast(p));
+}
+
+inline fn patternConstPtr(p: *const anyopaque) *const compiled_pattern.CompiledPattern {
+    return @ptrCast(@alignCast(p));
+}
+
+pub export fn zlob_pattern_compile(
+    pattern: [*:0]const u8,
+    flags: c_int,
+) ?*anyopaque {
+    const pattern_slice = mem.sliceTo(pattern, 0);
+    return zlob_pattern_compile_impl(pattern_slice, flags);
+}
+
+pub export fn zlob_pattern_compile_slice(
+    pattern: *const zlob_slice_t,
+    flags: c_int,
+) ?*anyopaque {
+    const pattern_slice = pattern.ptr[0..pattern.len];
+    return zlob_pattern_compile_impl(pattern_slice, flags);
+}
+
+fn zlob_pattern_compile_impl(pattern_slice: []const u8, flags: c_int) ?*anyopaque {
+    const cp = allocator.create(compiled_pattern.CompiledPattern) catch return null;
+    cp.* = compiled_pattern.compilePattern(allocator, pattern_slice, ZlobFlags.fromInt(flags)) catch {
+        allocator.destroy(cp);
+        return null;
+    };
+    return @ptrCast(cp);
+}
+
+pub export fn zlob_pattern_free(p: ?*anyopaque) void {
+    if (p) |raw| {
+        const cp = patternPtr(raw);
+        cp.deinit();
+        allocator.destroy(cp);
+    }
+}
+
+pub export fn zlob_pattern_matches(
+    p: ?*const anyopaque,
+    path: [*]const u8,
+    path_len: usize,
+    flags: c_int,
+) c_int {
+    const raw = p orelse return 0;
+    const cp = patternConstPtr(raw);
+    const path_slice = path[0..path_len];
+    return @intFromBool(cp.matches(path_slice, ZlobFlags.fromInt(flags)));
+}
+
+pub export fn zlob_indices_free(out: ?*zlob_indices_t) void {
+    const o = out orelse return;
+    if (o.indices) |ptr| {
+        const slice = ptr[0..o.count];
+        allocator.free(slice);
+    }
+    o.indices = null;
+    o.count = 0;
+}
+
+// -------- Indices APIs (uncompiled; compile internally per call) ----------
+
+fn writeIndicesResult(out: *zlob_indices_t, indices: []usize) c_int {
+    if (indices.len == 0) {
+        allocator.free(indices);
+        out.indices = null;
+        out.count = 0;
+        return zlob_flags.ZLOB_NOMATCH;
+    }
+    out.indices = indices.ptr;
+    out.count = indices.len;
+    return 0;
+}
+
+fn matchIndicesFromCStrPaths(
+    pattern_slice: []const u8,
+    paths: [*]const [*:0]const u8,
+    path_count: usize,
+    flags: c_int,
+    out: *zlob_indices_t,
+    base_path: ?[]const u8,
+) c_int {
+    const zflags = ZlobFlags.fromInt(flags);
+
+    var compiled = compiled_pattern.compilePattern(allocator, pattern_slice, zflags) catch
+        return zlob_flags.ZLOB_NOSPACE;
+    defer compiled.deinit();
+
+    const path_offset = if (base_path) |bp| compiled_pattern.computePathOffset(bp) else 0;
+
+    var indices = std.array_list.AlignedManaged(usize, null)
+        .initCapacity(allocator, @min(path_count, STR_CHUNK)) catch
+        std.array_list.AlignedManaged(usize, null).init(allocator);
+
+    chunkedMatchFromCStr(.indices, &compiled, paths, path_count, path_offset, zflags, &indices) catch {
+        indices.deinit();
+        return zlob_flags.ZLOB_NOSPACE;
+    };
+
+    const owned = indices.toOwnedSlice() catch {
+        indices.deinit();
+        return zlob_flags.ZLOB_NOSPACE;
+    };
+    return writeIndicesResult(out, owned);
+}
+
+fn matchIndicesFromSlicePaths(
+    pattern_slice: []const u8,
+    paths: [*]const zlob_slice_t,
+    path_count: usize,
+    flags: c_int,
+    out: *zlob_indices_t,
+    base_path: ?[]const u8,
+) c_int {
+    // UNSAFE: relies on Zig ABI compatibility (same as the existing slice APIs).
+    const zig_paths: []const []const u8 = @ptrCast(paths[0..path_count]);
+
+    const zflags = ZlobFlags.fromInt(flags);
+    const indices = if (base_path) |bp|
+        compiled_pattern.matchPathIndicesAt(allocator, bp, pattern_slice, zig_paths, zflags) catch |err| switch (err) {
+            error.OutOfMemory => return zlob_flags.ZLOB_NOSPACE,
+        }
+    else
+        compiled_pattern.matchPathIndices(allocator, pattern_slice, zig_paths, zflags) catch |err| switch (err) {
+            error.OutOfMemory => return zlob_flags.ZLOB_NOSPACE,
+        };
+
+    return writeIndicesResult(out, indices);
+}
+
+pub export fn zlob_match_paths_indices(
+    pattern: [*:0]const u8,
+    paths: [*]const [*:0]const u8,
+    path_count: usize,
+    flags: c_int,
+    out: *zlob_indices_t,
+) c_int {
+    return matchIndicesFromCStrPaths(mem.sliceTo(pattern, 0), paths, path_count, flags, out, null);
+}
+
+pub export fn zlob_match_paths_indices_slice(
+    pattern: *const zlob_slice_t,
+    paths: [*]const zlob_slice_t,
+    path_count: usize,
+    flags: c_int,
+    out: *zlob_indices_t,
+) c_int {
+    return matchIndicesFromSlicePaths(pattern.ptr[0..pattern.len], paths, path_count, flags, out, null);
+}
+
+pub export fn zlob_match_paths_indices_at(
+    base_path: [*:0]const u8,
+    pattern: [*:0]const u8,
+    paths: [*]const [*:0]const u8,
+    path_count: usize,
+    flags: c_int,
+    out: *zlob_indices_t,
+) c_int {
+    return matchIndicesFromCStrPaths(
+        mem.sliceTo(pattern, 0),
+        paths,
+        path_count,
+        flags,
+        out,
+        mem.sliceTo(base_path, 0),
+    );
+}
+
+pub export fn zlob_match_paths_indices_at_slice(
+    base_path: *const zlob_slice_t,
+    pattern: *const zlob_slice_t,
+    paths: [*]const zlob_slice_t,
+    path_count: usize,
+    flags: c_int,
+    out: *zlob_indices_t,
+) c_int {
+    return matchIndicesFromSlicePaths(
+        pattern.ptr[0..pattern.len],
+        paths,
+        path_count,
+        flags,
+        out,
+        base_path.ptr[0..base_path.len],
+    );
+}
+
+// -------- Compiled-pattern batch APIs ------------------------------------
+
+fn finalizeCompiledSliceResult(results: *zlob_impl.ZlobResults, pzlob: *zlob_t) c_int {
+    const result_len = results.len();
+    if (result_len == 0) {
+        return zlob_flags.ZLOB_NOMATCH;
+    }
+
+    const pathv_buf = allocator.alloc([*c]u8, result_len + 1) catch return zlob_flags.ZLOB_NOSPACE;
+    errdefer allocator.free(pathv_buf);
+
+    const pathlen_buf = allocator.alloc(usize, result_len) catch {
+        allocator.free(pathv_buf);
+        return zlob_flags.ZLOB_NOSPACE;
+    };
+
+    for (0..result_len) |i| {
+        const path = results.get(i);
+        pathv_buf[i] = @ptrCast(@constCast(path.ptr));
+        pathlen_buf[i] = path.len;
+    }
+    pathv_buf[result_len] = null;
+
+    pzlob.zlo_pathc = result_len;
+    pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
+    pzlob.zlo_offs = 0;
+    pzlob.zlo_pathlen = pathlen_buf.ptr;
+    pzlob.zlo_flags = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
+
+    return 0;
+}
+
+pub export fn zlob_pattern_match_paths_slice(
+    p: ?*const anyopaque,
+    paths: [*]const zlob_slice_t,
+    path_count: usize,
+    flags: c_int,
+    pzlob: *zlob_t,
+) c_int {
+    const raw = p orelse return zlob_flags.ZLOB_ABORTED;
+    const cp = patternConstPtr(raw);
+
+    // UNSAFE: relies on Zig ABI compatibility.
+    const zig_paths: []const []const u8 = @ptrCast(paths[0..path_count]);
+
+    var results = compiled_pattern.matchPathsCompiled(allocator, cp, zig_paths, ZlobFlags.fromInt(flags)) catch |err| switch (err) {
+        error.OutOfMemory => return zlob_flags.ZLOB_NOSPACE,
+    };
+    defer results.deinit();
+
+    return finalizeCompiledSliceResult(&results, pzlob);
+}
+
+pub export fn zlob_pattern_match_paths_at_slice(
+    p: ?*const anyopaque,
+    base_path: *const zlob_slice_t,
+    paths: [*]const zlob_slice_t,
+    path_count: usize,
+    flags: c_int,
+    pzlob: *zlob_t,
+) c_int {
+    const raw = p orelse return zlob_flags.ZLOB_ABORTED;
+    const cp = patternConstPtr(raw);
+
+    const zig_paths: []const []const u8 = @ptrCast(paths[0..path_count]);
+    const base_slice = base_path.ptr[0..base_path.len];
+
+    var results = compiled_pattern.matchPathsAtCompiled(allocator, base_slice, cp, zig_paths, ZlobFlags.fromInt(flags)) catch |err| switch (err) {
+        error.OutOfMemory => return zlob_flags.ZLOB_NOSPACE,
+    };
+    defer results.deinit();
+
+    return finalizeCompiledSliceResult(&results, pzlob);
+}
+
+pub export fn zlob_pattern_match_paths_indices_slice(
+    p: ?*const anyopaque,
+    paths: [*]const zlob_slice_t,
+    path_count: usize,
+    flags: c_int,
+    out: *zlob_indices_t,
+) c_int {
+    const raw = p orelse return zlob_flags.ZLOB_ABORTED;
+    const cp = patternConstPtr(raw);
+
+    const zig_paths: []const []const u8 = @ptrCast(paths[0..path_count]);
+
+    const indices = compiled_pattern.matchPathIndicesCompiled(allocator, cp, zig_paths, ZlobFlags.fromInt(flags)) catch |err| switch (err) {
+        error.OutOfMemory => return zlob_flags.ZLOB_NOSPACE,
+    };
+
+    return writeIndicesResult(out, indices);
+}
+
+pub export fn zlob_pattern_match_paths_indices_at_slice(
+    p: ?*const anyopaque,
+    base_path: *const zlob_slice_t,
+    paths: [*]const zlob_slice_t,
+    path_count: usize,
+    flags: c_int,
+    out: *zlob_indices_t,
+) c_int {
+    const raw = p orelse return zlob_flags.ZLOB_ABORTED;
+    const cp = patternConstPtr(raw);
+
+    const zig_paths: []const []const u8 = @ptrCast(paths[0..path_count]);
+    const base_slice = base_path.ptr[0..base_path.len];
+
+    const indices = compiled_pattern.matchPathIndicesAtCompiled(allocator, base_slice, cp, zig_paths, ZlobFlags.fromInt(flags)) catch |err| switch (err) {
+        error.OutOfMemory => return zlob_flags.ZLOB_NOSPACE,
+    };
+
+    return writeIndicesResult(out, indices);
 }

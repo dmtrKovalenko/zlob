@@ -39,24 +39,7 @@ jobs:
         working-directory: rust
         run: cargo clippy -- -D warnings
 
-      - name: Zig build
-        run: zig build
-
-      - name: Zig tests
-        run: zig build test
-
-      - name: Rust tests
-        working-directory: rust
-        run: cargo test
-
-      - name: Rust build release
-        working-directory: rust
-        run: cargo build --release
-
-      - name: Make build
-        run: make
-
-      - name: Make test
+      - name: Run tests
         run: make test
 
   linux-musl:
@@ -234,25 +217,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Zig build
-        run: zig build
-
-      - name: Zig tests
-        run: zig build test
+      - name: Run tests
+        run: make test
 
       - name: Test Zig CLI
         run: |
           ./zig-out/bin/zlob --version
           ./zig-out/bin/zlob "*.zig" src/
           ./zig-out/bin/zlob "**/*.zig" .
-
-      - name: Rust tests
-        working-directory: rust
-        run: cargo test
-
-      - name: Rust build release
-        working-directory: rust
-        run: cargo build --release
 
   windows-native:
     name: Native windows msvc
@@ -272,11 +244,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Zig build
-        run: zig build
-
-      - name: Zig tests
-        run: zig build test
+      - name: Run tests
+        run: make test
+        shell: bash
 
       - name: List zig-out contents
         run: Get-ChildItem -Recurse zig-out
@@ -295,15 +265,3 @@ jobs:
           Write-Host "Exit code: $LASTEXITCODE"
         shell: pwsh
         continue-on-error: true
-
-      - name: Rust build
-        working-directory: rust
-        run: cargo build
-
-      - name: Rust tests
-        working-directory: rust
-        run: cargo test
-
-      - name: Rust build release
-        working-directory: rust
-        run: cargo build --release

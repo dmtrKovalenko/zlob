@@ -358,4 +358,69 @@ pub const SingleSuffixMatcher = struct {
             }
         }
     }
+
+    /// 4-way SIMD-pipelined batch matcher with comptime-selected output mode
+    /// and comptime-selected `at` flag. When `collect_indices` is comptime-true,
+    /// pushes the input index into `out`; otherwise pushes the matched path
+    /// slice. When `at` is comptime-false, the per-path `path_offset` check
+    /// is fully elided. Both branches collapse to a single `out.append(...)`
+    /// call after monomorphization.
+    ///
+    /// `base_index` is added to every pushed index when `collect_indices` is
+    /// true. Chunked callers pass the chunk's start offset so emitted indices
+    /// stay relative to the original full input array; non-chunked callers
+    /// pass `0`. Ignored when `collect_indices` is false.
+    pub fn matchPathsBatchedCollect(
+        self: *const SingleSuffixMatcher,
+        paths: []const []const u8,
+        path_offset: usize,
+        comptime collect_indices: bool,
+        comptime at: bool,
+        out: anytype,
+        base_index: usize,
+    ) !void {
+        const len = paths.len;
+        var i: usize = 0;
+
+        // Process 4 paths at a time for better instruction pipelining.
+        while (i + 4 <= len) : (i += 4) {
+            const p0 = paths[i + 0];
+            const p1 = paths[i + 1];
+            const p2 = paths[i + 2];
+            const p3 = paths[i + 3];
+
+            const ok0 = if (comptime at) p0.len >= path_offset else true;
+            const ok1 = if (comptime at) p1.len >= path_offset else true;
+            const ok2 = if (comptime at) p2.len >= path_offset else true;
+            const ok3 = if (comptime at) p3.len >= path_offset else true;
+
+            const m0 = ok0 and self.matchSuffix(p0);
+            const m1 = ok1 and self.matchSuffix(p1);
+            const m2 = ok2 and self.matchSuffix(p2);
+            const m3 = ok3 and self.matchSuffix(p3);
+
+            if (m0) {
+                if (comptime collect_indices) try out.append(base_index + i + 0) else try out.append(p0);
+            }
+            if (m1) {
+                if (comptime collect_indices) try out.append(base_index + i + 1) else try out.append(p1);
+            }
+            if (m2) {
+                if (comptime collect_indices) try out.append(base_index + i + 2) else try out.append(p2);
+            }
+            if (m3) {
+                if (comptime collect_indices) try out.append(base_index + i + 3) else try out.append(p3);
+            }
+        }
+
+        while (i < len) : (i += 1) {
+            const p = paths[i];
+            if (comptime at) {
+                if (p.len < path_offset) continue;
+            }
+            if (self.matchSuffix(p)) {
+                if (comptime collect_indices) try out.append(base_index + i) else try out.append(p);
+            }
+        }
+    }
 };

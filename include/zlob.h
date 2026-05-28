@@ -17,9 +17,8 @@
  *       zlobfree(&pzlob);
  *   }
  *
- * There is an additional pathlen field provides O(1) access to path
- * lengths, which is useful for FFI with languages like Rust where you can
- * create string slices without calling strlen():
+ * For FFI check out zlob_slice_t and *_slice versions of functions for a more
+ * efficinet strings & seamless length-aware string outputs without `strlen`s.
  */
 
 #ifndef ZLOB_H
@@ -62,18 +61,20 @@ typedef struct {
  * sources.
  */
 typedef struct {
-  size_t zlo_pathc; /* Count of matched paths */
-  char **zlo_pathv; /* Array of matched path strings (NULL-terminated) */
-  size_t zlo_offs; /* Number of NULL entries to reserve at beginning of zlo_pathv */
-  size_t * zlo_pathlen; /* Array of path lengths (zlob extension for efficient FFI) */
-  int zlo_flags;   /* Internal flags */
+  size_t zlo_pathc;    /* Count of matched paths */
+  char **zlo_pathv;    /* Array of matched path strings (NULL-terminated) */
+  size_t zlo_offs;     /* Number of NULL entries to reserve at beginning of
+                          zlo_pathv */
+  size_t *zlo_pathlen; /* Array of path lengths (zlob extension for efficient
+                          FFI) */
+  int zlo_flags;       /* Internal flags */
 
   /* ALTDIRFUNC: Custom directory access functions (GNU extension)
    * Set these before calling zlob() with ZLOB_ALTDIRFUNC flag */
   void *(*zlo_opendir)(
       const char *path); /* Returns opaque dir handle, NULL on error */
   zlob_dirent_t *(*zlo_readdir)(
-      void *dir);                 /* Returns next entry, NULL when done */
+      void *dir);                  /* Returns next entry, NULL when done */
   void (*zlo_closedir)(void *dir); /* Closes directory handle */
 } zlob_t;
 
@@ -116,7 +117,8 @@ typedef struct {
  * glibc currently uses bits 0-14. We leave a 9-bit gap to avoid conflicts.
  * ============================================================================
  */
-#define ZLOB_GITIGNORE (1 << 24) /* Filter results using .gitignore from cwd */
+#define ZLOB_GITIGNORE (1 << 24) /* Filter results using .gitignore from cwd   \
+                                  */
 #define ZLOB_DOUBLESTAR_RECURSIVE                                              \
   (1 << 25) /* Enable ** recursive directory matching */
 #define ZLOB_EXTGLOB                                                           \
@@ -140,9 +142,12 @@ typedef struct {
 #define ZLOB_NOMATCH 3 /* No matches found */
 
 /**
- * zlob - Find pathnames matching a pattern
+ * Find pathnames matching a glob pattern.
  *
- * @return 0 on success, or one of ZLOB_NOSPACE, ZLOB_ABORTED, ZLOB_NOMATCH
+ * Caller must zlobfree() `pzlob` after a successful call to release the
+ * allocated path strings and pathv array.
+ *
+ * @return 0 on success, or one of ZLOB_NOSPACE, ZLOB_ABORTED, ZLOB_NOMATCH.
  *
  * Supported patterns:
  *   *              Matches any string, including the null string
@@ -151,65 +156,29 @@ typedef struct {
  *   [!abc]         Matches one character NOT in the set
  *   [a-z]          Matches one character in the range
  *   **             Matches zero or more path components (recursive)
- *   {a,b,c}        Matches any of the comma-separated alternatives (with
- * ZLOB_BRACE) ~              Expands to home directory (with ZLOB_TILDE)
- *   ~/path         Expands to $HOME/path (with ZLOB_TILDE)
- *   ~user/path     Expands to user's home directory (with ZLOB_TILDE)
- *
- * Examples:
- *   "*.txt"          All .txt files in current directory
- *   "src/test_*.c"   All test_*.c files in src directory
- *   "file?.txt"      file1.txt, file2.txt, etc.
- *   "{foo,bar}*"     All files starting with foo or bar (with ZLOB_BRACE)
- *   "~/.config"      User's .config directory (with ZLOB_TILDE)
- *
- * Memory Management:
- *   After successful zlob() call, you MUST call zlobfree() to release memory.
- *   The strings in pathv and the pathv array itself are allocated by
- * zlob() and must be freed by zlobfree().
+ *   {a,b,c}        Comma-separated alternatives (with ZLOB_BRACE)
+ *   ~ / ~/path     Home directory expansion (with ZLOB_TILDE)
+ *   ~user/path     Other user's home directory (with ZLOB_TILDE)
  */
 int zlob(const char *restrict pattern, int flags,
          int (*errfunc)(const char *epath, int eerrno), zlob_t *restrict pzlob);
 
 /**
- * zlobfree - Free memory allocated by zlob()
+ * Free memory allocated by zlob().
  *
- * @param pzlob  Pointer to zlob_t structure to free
- *
- * This function frees all memory allocated by a previous zlob() call,
- * including the path strings and the pathv array.
- * After calling zlobfree(), the zlob_t structure is reset to initial state.
- *
- * It is safe to call zlobfree() on a zlob_t that has already been freed,
- * or on an uninitialized zlob_t with pathv set to NULL.
+ * Safe to call on an already-freed or zero-initialized zlob_t.
  */
 void zlobfree(zlob_t *pzlob);
 
 /**
- * zlob_at - Find pathnames matching a pattern relative to a base directory
+ * Same as `zlob` but interpreted relative to `base_path`.
  *
- * This function is similar to zlob() but operates relative to the specified
- * base_path instead of the current working directory. The matched paths in
- * pzlob->pathv will be relative to base_path.
- *
- * @return 0 on success, or one of ZLOB_NOSPACE, ZLOB_ABORTED, ZLOB_NOMATCH
- *
- * Returns ZLOB_ABORTED if base_path is not an absolute path.
- *
- * Example:
- *   zlob_t pzlob;
- *   int result = zlob_at("/home/user/project", "src/*.c", ZLOB_BRACE, NULL,
- * &pzlob); if (result == 0) { for (size_t i = 0; i < pzlob.pathc; i++) {
- *           // Paths are relative to /home/user/project
- *           printf("%s\n", pzlob.pathv[i]);
- *       }
- *       zlobfree(&pzlob);
- *   }
+ * Matched paths in `pzlob->pathv` are relative to `base_path`. Returns
+ * ZLOB_ABORTED if `base_path` is not absolute.
  */
 int zlob_at(const char *base_path, const char *restrict pattern, int flags,
             int (*errfunc)(const char *epath, int eerrno),
             zlob_t *restrict pzlob);
-
 
 /**
  * zlob_slice_t - FFI-compatible slice representation
@@ -222,109 +191,161 @@ typedef struct {
   size_t len;
 } zlob_slice_t;
 
-/**
- * zlob_match_paths_slice - Filter paths with glob pattern (zero-copy, slice
- * version)
- *
- * This function filters an array of paths using a glob pattern WITHOUT copying
- * the path strings. The result pointers in pzlob->pathv point directly to
- * the caller's original memory.
- *
- * IMPORTANT:
- * - Caller must keep the original paths alive until globfree() is called
- * - Use globfree() to clean up results
- */
+/** Same as `zlob_match_paths` but accepts string slices as input. */
 int zlob_match_paths_slice(const zlob_slice_t *pattern,
                            const zlob_slice_t *paths, size_t path_count,
                            int flags, zlob_t *pzlob);
 
 /**
- * zlob_match_paths - Filter paths with glob pattern (zero-copy, C string
- * version)
+ * Filter `paths` with a glob pattern (zero-copy).
  *
- * This function filters an array of paths using a glob pattern WITHOUT copying
- * the path strings. The result pointers in pzlob->pathv point directly to
- * the caller's original memory.
- *
- * IMPORTANT:
- * - Caller must keep the original paths alive until globfree() is called
- * - Use globfree() to clean up results
+ * Result pointers in `pzlob->pathv` point directly into the caller's
+ * original `paths` memory — no string copies are made. The caller must
+ * keep `paths` alive until zlobfree() is called.
  */
 int zlob_match_paths(const char *pattern, const char *const *paths,
                      size_t path_count, int flags, zlob_t *pzlob);
 
 /**
- * zlob_match_paths_at - Filter paths with glob pattern relative to a base
- * directory (zero-copy, C string version)
- *
- * @return 0 on success, ZLOB_NOMATCH if no matches, ZLOB_NOSPACE on OOM
- *
- * This function filters an array of absolute paths using a glob pattern
- * relative to a base directory, WITHOUT copying the path strings. The result
- * pointers in pzlob->pathv point directly to the caller's original memory.
- *
- * If the pattern starts with "./", it is treated as relative to base_path
- * (the prefix is stripped).
- *
- * Example:
- *   const char *paths[] = {
- *       "/home/user/project/src/main.c",
- *       "/home/user/project/lib/utils.c",
- *       "/home/user/project/docs/readme.md",
- *   };
- *   zlob_t pzlob;
- *   int result = zlob_match_paths_at("/home/user/project", "src/*.c",
- *       paths, 3, 0, &pzlob);
- *
- * IMPORTANT:
- * - Caller must keep the original paths alive until zlobfree() is called
- * - Use zlobfree() to clean up results
+ * Same as `zlob_match_paths` but matches against `paths` relative to
+ * `base_path`. A leading "./" in `pattern` is treated as relative to
+ * `base_path` (and stripped).
  */
 int zlob_match_paths_at(const char *base_path, const char *pattern,
                         const char *const *paths, size_t path_count, int flags,
                         zlob_t *pzlob);
 
-/**
- * zlob_match_paths_at_slice - Filter paths with glob pattern relative to a
- * base directory (zero-copy, slice version)
- *
- * Same as zlob_match_paths_at but using slice types for zero-copy FFI with
- * languages like Rust and Zig.
- *
- * IMPORTANT:
- * - Caller must keep the original paths alive until zlobfree() is called
- * - Use zlobfree() to clean up results
- */
+/** Same as `zlob_match_paths_at` but accepts string slices as input. */
 int zlob_match_paths_at_slice(const zlob_slice_t *base_path,
                                const zlob_slice_t *pattern,
                                const zlob_slice_t *paths, size_t path_count,
                                int flags, zlob_t *pzlob);
 
 /**
- * zlob_has_wildcards - Check if a string contains glob pattern syntax
- *
- * Detects glob metacharacters in a single SIMD-accelerated pass:
- * - Basic wildcards: *, ?, [
- * - Brace expansion syntax: { (only if ZLOB_BRACE flag is set)
- * - Extended glob patterns: ?(, *(, +(, @(, !( (only if ZLOB_EXTGLOB flag is set)
- *
- * This is useful for determining whether a string should be treated as a
- * glob pattern or as a literal file path. For example, a file manager could
- * use this to decide whether to call zlob() or just stat() the path directly.
- *
- * Example:
- *   if (zlob_has_wildcards("*.txt", 0)) {
- *       // Use zlob() for pattern matching
- *   } else {
- *       // Treat as literal path
- *   }
- *
- *   // With brace expansion enabled
- *   if (zlob_has_wildcards("{a,b}.txt", ZLOB_BRACE)) {
- *       // Detected brace pattern
- *   }
+ * Check whether a string contains glob wildcard syntax handled by a set of flags
  */
 int zlob_has_wildcards(const char *pattern, int flags);
+
+/** zlob_pattern_t - Preanalyzed glob pattern */
+typedef struct zlob_pattern zlob_pattern_t;
+
+/**
+ * zlob_indices_t - result of zlob_match_paths_indices*() functions
+ * which returns indicies of the matched paths in the original provided array.
+ */
+typedef struct {
+  size_t *indices;
+  size_t count;
+} zlob_indices_t;
+
+/** Free indices array allocated by zlob_match_paths_indices*(). */
+void zlob_indices_free(zlob_indices_t *out);
+
+/**
+ * Compile a glob pattern for reuse.
+ *
+ * @param pattern  Null-terminated glob pattern string. Copied internally —
+ *                 the caller may free `pattern` immediately after this call.
+ * @param flags    ZLOB_* flags. Structural bits (BRACE/DOUBLESTAR_RECURSIVE/
+ *                 EXTGLOB) are baked in.
+ *
+ * @return         Pointer to a freshly-allocated zlob_pattern_t, or NULL on
+ *                 out-of-memory.
+ */
+zlob_pattern_t *zlob_pattern_compile(const char *pattern, int flags);
+
+/**
+ * Compile a glob pattern from a slice.
+ *
+ * Same as zlob_pattern_compile but accepts a `zlob_slice_t` (ptr + len)
+ * instead of a null-terminated string. Useful for FFI from languages like
+ * Rust where strings are not null-terminated.
+ */
+zlob_pattern_t *zlob_pattern_compile_slice(const zlob_slice_t *pattern,
+                                           int flags);
+
+/**
+ * Free memory allocated by zlob_pattern_compile*().
+ *
+ * Safe to call with NULL. After calling, the pointer must not be used.
+ */
+void zlob_pattern_free(zlob_pattern_t *p);
+
+/**
+ * Zero-allocation a single path match against a compiled pattern.
+ *
+ * @param p          Compiled pattern.
+ * @param path       Path to test (does NOT need to be null-terminated).
+ * @param path_len   Length of `path` in bytes.
+ * @param flags      ZLOB_* flags. Must agree with compile-time flags on
+ *                   the structural bits (BRACE/DOUBLESTAR_RECURSIVE/EXTGLOB);
+ *                   debug builds assert this.
+ *
+ * @return           1 if the path matches, 0 otherwise.
+ */
+int zlob_pattern_matches(const zlob_pattern_t *p, const char *path,
+                         size_t path_len, int flags);
+
+/**
+ * Filter `paths` and return matching indices into the input array.
+ *
+ * Same matching semantics as zlob_match_paths but returns indices rather
+ * than path strings — useful for FFI hot paths that want to avoid
+ * string-pointer round trips.
+ *
+ * Indices are always in input order regardless of ZLOB_NOSORT.
+ * ZLOB_NOCHECK is silently ignored.
+ *
+ * Use zlob_indices_free() to clean up the result.
+ *
+ * @return 0 on success (with matches), ZLOB_NOMATCH if no matches,
+ *         ZLOB_NOSPACE on OOM.
+ */
+int zlob_match_paths_indices(const char *pattern, const char *const *paths,
+                             size_t path_count, int flags, zlob_indices_t *out);
+
+/** Same as `zlob_match_paths_indices` but accepts string slice as an input */
+int zlob_match_paths_indices_slice(const zlob_slice_t *pattern,
+                                   const zlob_slice_t *paths, size_t path_count,
+                                   int flags, zlob_indices_t *out);
+
+/** Same as `zlob_match_paths_indices` but accepts base_path parameter. */
+int zlob_match_paths_indices_at(const char *base_path, const char *pattern,
+                                const char *const *paths, size_t path_count,
+                                int flags, zlob_indices_t *out);
+
+/** Same as `zlob_match_paths_indices_at` but accepts string slices as input. */
+int zlob_match_paths_indices_at_slice(const zlob_slice_t *base_path,
+                                      const zlob_slice_t *pattern,
+                                      const zlob_slice_t *paths,
+                                      size_t path_count, int flags,
+                                      zlob_indices_t *out);
+
+/** Same as `zlob_match_paths_slice` but reuses a pre-compiled pattern. */
+int zlob_pattern_match_paths_slice(const zlob_pattern_t *p,
+                                   const zlob_slice_t *paths,
+                                   size_t path_count, int flags,
+                                   zlob_t *out);
+
+/** Same as `zlob_pattern_match_paths_slice` but accepts base_path parameter. */
+int zlob_pattern_match_paths_at_slice(const zlob_pattern_t *p,
+                                      const zlob_slice_t *base_path,
+                                      const zlob_slice_t *paths,
+                                      size_t path_count, int flags,
+                                      zlob_t *out);
+
+/** Same as `zlob_pattern_match_paths_slice` but returns matching indices. */
+int zlob_pattern_match_paths_indices_slice(const zlob_pattern_t *p,
+                                           const zlob_slice_t *paths,
+                                           size_t path_count, int flags,
+                                           zlob_indices_t *out);
+
+/** Same as `zlob_pattern_match_paths_indices_slice` but accepts base_path parameter. */
+int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
+                                              const zlob_slice_t *base_path,
+                                              const zlob_slice_t *paths,
+                                              size_t path_count, int flags,
+                                              zlob_indices_t *out);
 
 #ifdef __cplusplus
 }

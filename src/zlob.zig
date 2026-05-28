@@ -58,6 +58,8 @@ pub const hasWildcardsBasic = pattern_context_internal.hasWildcardsBasic;
 pub const hasWildcards = pattern_context_internal.hasWildcards;
 pub const indexOfCharSIMD = pattern_context_internal.indexOfCharSIMD;
 pub const lastIndexOfCharSIMD = pattern_context_internal.lastIndexOfCharSIMD;
+pub const lastIndexOfAnyTwoSIMD = pattern_context_internal.lastIndexOfAnyTwoSIMD;
+pub const isPathSep = pattern_context_internal.isPathSep;
 pub const containsExtglob = fnmatch_impl.containsExtglob;
 pub const simdFindChar = fnmatch_impl.simdFindChar;
 pub const gitignore = @import("gitignore.zig");
@@ -209,6 +211,7 @@ const ZLOB_FLAGS_SHARED_STRINGS = zlob_flags.ZLOB_FLAGS_SHARED_STRINGS;
 pub const zlob_errfunc_t = ?*const fn (epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int;
 
 pub const path_matcher = @import("path_matcher.zig");
+pub const compiled_pattern = @import("compiled_pattern.zig");
 
 pub const dirent = std.c.dirent;
 
