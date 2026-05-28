@@ -91,7 +91,7 @@ test "matchPaths - with paths" {
     }.assert, @src());
 }
 
-test "matchPaths - recursive pattern" {
+test "matchPaths - **/test.txt with flags=0 (depth-1 only)" {
     const files = [_][]const u8{
         "src/test.txt",
         "lib/test.txt",
@@ -105,6 +105,176 @@ test "matchPaths - recursive pattern" {
             try testing.expect(result.hasPath("lib/test.txt"));
         }
     }.assert, @src());
+}
+
+// Regression: `**/lua/*.lua` is the shape `**/<dir>/*.<ext>`. The leading `**`
+// matches zero-or-more directory components, but the trailing `*` must NOT
+// cross a `/` boundary - it is a single-segment wildcard. So files nested
+// deeper than one level inside a `lua/` directory must be excluded.
+test "matchPaths - **/lua/*.lua does not match files nested under lua/" {
+    const files = [_][]const u8{
+        // Should match: zero, one, and many directory components before `lua/`,
+        // then exactly one path segment ending in `.lua`.
+        "lua/init.lua",
+        "nvim/lua/setup.lua",
+        "config/nested/lua/plugin.lua",
+
+        // Should NOT match: the `*` after `lua/` is single-segment, so anything
+        // nested deeper than `lua/<file>.lua` must be rejected.
+        "nvim/lua/sub/nested.lua",
+        "nvim/lua/sub/deep/file.lua",
+        "lua/sub/foo.lua",
+
+        // Should NOT match: no `lua/` directory anywhere in the path.
+        "init.lua",
+
+        // Should NOT match: lives in a `lua/` directory but has the wrong extension.
+        "lua/init.txt",
+
+        // Should NOT match: completely unrelated.
+        "src/main.zig",
+    };
+
+    try zlobIsomorphicTest(&files, "**/lua/*.lua", zlob_flags.ZLOB_RECOMMENDED, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 3), result.count);
+
+            // Positive cases - zero, one, and many directory components
+            // before `lua/`, each followed by exactly one `.lua` file.
+            try testing.expect(result.hasPath("lua/init.lua"));
+            try testing.expect(result.hasPath("nvim/lua/setup.lua"));
+            try testing.expect(result.hasPath("config/nested/lua/plugin.lua"));
+
+            // Negative cases - these would only leak in if `*` were treated
+            // as recursive, which is the bug this test guards against.
+            // Asserting them explicitly gives a clear diagnostic on failure.
+            try testing.expect(result.noPathEndsWith("nvim/lua/sub/nested.lua"));
+            try testing.expect(result.noPathEndsWith("nvim/lua/sub/deep/file.lua"));
+            try testing.expect(result.noPathEndsWith("lua/sub/foo.lua"));
+        }
+    }.assert, @src());
+}
+
+// Regression: `./**/*.lua` should be equivalent to `**/*.lua` - the leading
+// `./` is a no-op and must not be treated as a literal segment that needs
+// to match a `.` directory.
+test "matchPaths - ./**/*.lua is equivalent to **/*.lua" {
+    const files = [_][]const u8{
+        "init.lua",
+        "lua/setup.lua",
+        "nested/deep/plugin.lua",
+        "src/main.zig",
+        "readme.md",
+    };
+
+    try zlobIsomorphicTest(&files, "./**/*.lua", zlob_flags.ZLOB_RECOMMENDED, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expect(result.hasPathEndingWith("init.lua"));
+            try testing.expect(result.hasPathEndingWith("lua/setup.lua"));
+            try testing.expect(result.hasPathEndingWith("nested/deep/plugin.lua"));
+            try testing.expect(result.noPathEndsWith("main.zig"));
+            try testing.expect(result.noPathEndsWith("readme.md"));
+        }
+    }.assert, @src());
+}
+
+// Regression: `./<prefix>/**/*.<ext>` should be equivalent to `<prefix>/**/*.<ext>`.
+// The leading `./` should be normalised away by the parser.
+test "matchPaths - ./prefix/**/*.lua narrows correctly" {
+    const files = [_][]const u8{
+        "src/init.lua",
+        "src/nested/setup.lua",
+        "src/deep/nested/plugin.lua",
+        "lib/should_not_match.lua",
+        "init.lua",
+    };
+
+    try zlobIsomorphicTest(&files, "./src/**/*.lua", zlob_flags.ZLOB_RECOMMENDED, struct {
+        fn assert(result: TestResult) !void {
+            try testing.expectEqual(@as(usize, 3), result.count);
+            try testing.expect(result.hasPathEndingWith("src/init.lua"));
+            try testing.expect(result.hasPathEndingWith("src/nested/setup.lua"));
+            try testing.expect(result.hasPathEndingWith("src/deep/nested/plugin.lua"));
+            try testing.expect(result.noPathEndsWith("lib/should_not_match.lua"));
+            try testing.expect(result.noPathEndsWith("/init.lua") or result.hasPathEndingWith("src/init.lua"));
+        }
+    }.assert, @src());
+}
+
+// Regression: when calling `matchAt` with a pattern starting with `./`, the
+// pattern must behave identically to the same pattern without the leading
+// `./`. Both forms ultimately walk the base directory recursively.
+//
+// This is the scenario where a user runs zlob from inside a project and
+// passes either `**/*.lua` or `./**/*.lua` — they should produce the exact
+// same set of results.
+test "matchAt - ./**/*.lua and **/*.lua produce identical results" {
+    const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Create a test tree.
+    const files = [_][]const u8{
+        "init.lua",
+        "lua/setup.lua",
+        "nested/deep/plugin.lua",
+        "src/main.zig",
+        "readme.md",
+    };
+    for (files) |file| {
+        if (std.fs.path.dirname(file)) |dir_path| {
+            tmp.dir.createDirPath(io, dir_path) catch |err| {
+                if (err != error.PathAlreadyExists) return err;
+            };
+        }
+        const f = try tmp.dir.createFile(io, file, .{});
+        f.close(io);
+    }
+
+    const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(tmp_path);
+
+    // Run both forms of the pattern with the recommended flag set so `**`
+    // is treated as recursive (the C/POSIX entry point is glibc-compatible
+    // by default and only enables `**` recursion when this flag is set).
+    const flags = zlob_flags.ZlobFlags.recommended();
+    var bare = (try zlob.matchAt(allocator, io, tmp_path, "**/*.lua", flags)).?;
+    defer bare.deinit();
+
+    var with_dot_slash = (try zlob.matchAt(allocator, io, tmp_path, "./**/*.lua", flags)).?;
+    defer with_dot_slash.deinit();
+
+    // Both must find the three .lua files (and only the .lua files).
+    try testing.expectEqual(@as(usize, 3), bare.len());
+    try testing.expectEqual(@as(usize, 3), with_dot_slash.len());
+
+    // Build sorted slices so we can compare the sets directly.
+    const bare_slice = try bare.toSlice(allocator);
+    defer allocator.free(bare_slice);
+    const dot_slice = try with_dot_slash.toSlice(allocator);
+    defer allocator.free(dot_slice);
+
+    std.mem.sort([]const u8, bare_slice, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+    std.mem.sort([]const u8, dot_slice, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+
+    // The two forms should return equivalent paths (modulo a possibly
+    // different leading "./"); compare by suffix.
+    for (bare_slice, dot_slice) |b, d| {
+        const b_tail = if (std.mem.startsWith(u8, b, "./")) b[2..] else b;
+        const d_tail = if (std.mem.startsWith(u8, d, "./")) d[2..] else d;
+        try testing.expectEqualStrings(b_tail, d_tail);
+    }
 }
 
 test "matchPaths - no matches" {

@@ -316,30 +316,6 @@ int main(void) {
     PASS();
   }
 
-  TEST("zlob_match_paths_at with trailing slash on base_path");
-  {
-    const char *paths[] = {
-        "/opt/app/src/main.zig",
-        "/opt/app/src/utils/helpers.zig",
-        "/opt/app/test/test_main.zig",
-        "/opt/app/README.md",
-    };
-    const size_t path_count = sizeof(paths) / sizeof(paths[0]);
-
-    zlob_t pzlob;
-    int result = zlob_match_paths_at("/opt/app/", "src/**/*.zig", paths,
-                                     path_count, 0, &pzlob);
-
-    if (result != 0)
-      FAIL("zlob_match_paths_at() failed");
-    if (pzlob.zlo_pathc != 2)
-      FAIL("Expected 2 matches");
-
-    printf("    Found %zu matches (expected 2)\n", pzlob.zlo_pathc);
-    zlobfree(&pzlob);
-    PASS();
-  }
-
   TEST("zlob_match_paths_at with ./ prefix pattern");
   {
     const char *paths[] = {
@@ -372,7 +348,7 @@ int main(void) {
 
     zlob_t pzlob;
     int result = zlob_match_paths_at("/home/user/project", "**/*.zig", paths,
-                                     path_count, 0, &pzlob);
+                                     path_count, ZLOB_RECOMMENDED, &pzlob);
 
     if (result != ZLOB_NOMATCH)
       FAIL("Expected ZLOB_NOMATCH");

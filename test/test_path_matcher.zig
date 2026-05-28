@@ -9,6 +9,7 @@ const matchPathsAt = zlob.matchPathsAt;
 const ZLOB_NOSORT = zlob_flags.ZLOB_NOSORT;
 const ZLOB_NOCHECK = zlob_flags.ZLOB_NOCHECK;
 const ZLOB_PERIOD = zlob_flags.ZLOB_PERIOD;
+const ZLOB_DOUBLESTAR_RECURSIVE = zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE;
 
 // Test basic ** patterns
 
@@ -19,7 +20,7 @@ test "matchPaths - ** matches zero directories" {
         "dir/subdir/file.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "**/file.txt", &paths, 0);
+    var result = try matchPaths(testing.allocator, "**/file.txt", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
@@ -35,7 +36,7 @@ test "matchPathsAt - basic base_path strips directory prefix" {
         "/home/user/project/docs/readme.md",
     };
 
-    var result = try matchPathsAt(testing.allocator, "/home/user/project/", "**/*.c", &paths, ZLOB_PERIOD);
+    var result = try matchPathsAt(testing.allocator, "/home/user/project/", "**/*.c", &paths, ZLOB_PERIOD | ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
@@ -49,7 +50,7 @@ test "matchPathsAt - base_path without trailing slash" {
         "/home/user/project/docs/readme.md",
     };
 
-    var result = try matchPathsAt(testing.allocator, "/home/user/project", "**/*.c", &paths, ZLOB_PERIOD);
+    var result = try matchPathsAt(testing.allocator, "/home/user/project", "**/*.c", &paths, ZLOB_PERIOD | ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
@@ -76,10 +77,10 @@ test "matchPathsAt - empty base_path behaves like matchPaths" {
         "docs/readme.md",
     };
 
-    var result_at = try matchPathsAt(testing.allocator, "", "**/*.c", &paths, ZLOB_PERIOD);
+    var result_at = try matchPathsAt(testing.allocator, "", "**/*.c", &paths, ZLOB_PERIOD | ZLOB_DOUBLESTAR_RECURSIVE);
     defer result_at.deinit();
 
-    var result = try matchPaths(testing.allocator, "**/*.c", &paths, ZLOB_PERIOD);
+    var result = try matchPaths(testing.allocator, "**/*.c", &paths, ZLOB_PERIOD | ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(result.len(), result_at.len());
@@ -106,7 +107,7 @@ test "matchPathsAt - doublestar with base_path" {
         "/opt/app/README.md",
     };
 
-    var result = try matchPathsAt(testing.allocator, "/opt/app/", "src/**/*.zig", &paths, ZLOB_PERIOD);
+    var result = try matchPathsAt(testing.allocator, "/opt/app/", "src/**/*.zig", &paths, ZLOB_PERIOD | ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(2, result.len());
@@ -131,7 +132,7 @@ test "matchPathsAt - ./ prefix means relative to base_path" {
         "/home/user/project/lib/utils.c",
     };
 
-    var result = try matchPathsAt(testing.allocator, "/home/user/project", "./**/*.c", &paths, ZLOB_PERIOD);
+    var result = try matchPathsAt(testing.allocator, "/home/user/project", "./**/*.c", &paths, ZLOB_PERIOD | ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(2, result.len());
@@ -143,7 +144,7 @@ test "matchPathsAt - no matches returns zero" {
         "/home/user/project/lib/utils.c",
     };
 
-    var result = try matchPathsAt(testing.allocator, "/home/user/project/", "**/*.zig", &paths, 0);
+    var result = try matchPathsAt(testing.allocator, "/home/user/project/", "**/*.zig", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(0, result.len());
@@ -157,7 +158,7 @@ test "matchPaths - prefix before **" {
         "/other/alice/code/main.c",
     };
 
-    var result = try matchPaths(testing.allocator, "/users/**/main.c", &paths, 0);
+    var result = try matchPaths(testing.allocator, "/users/**/main.c", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
@@ -171,7 +172,7 @@ test "matchPaths - ** in middle of pattern" {
         "src/baz/test.zig",
     };
 
-    var result = try matchPaths(testing.allocator, "src/**/test.zig", &paths, 0);
+    var result = try matchPaths(testing.allocator, "src/**/test.zig", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
@@ -185,7 +186,7 @@ test "matchPaths - multiple ** in pattern" {
         "a/b/c/e.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "a/**/c/**/e.txt", &paths, 0);
+    var result = try matchPaths(testing.allocator, "a/**/c/**/e.txt", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     // Should match paths that have 'a', then any depth, then 'c', then any depth, then 'e.txt'
@@ -204,7 +205,7 @@ test "matchPaths - ** with * wildcard" {
         "dir3/code/test.c",
     };
 
-    var result = try matchPaths(testing.allocator, "dir?/**/test.c", &paths, 0);
+    var result = try matchPaths(testing.allocator, "dir?/**/test.c", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(2, result.len());
@@ -218,7 +219,7 @@ test "matchPaths - ** with character class" {
         "dir1/d/file.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "dir1/**/[ab]/file.txt", &paths, 0);
+    var result = try matchPaths(testing.allocator, "dir1/**/[ab]/file.txt", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(2, result.len());
@@ -259,7 +260,7 @@ test "matchPaths - ZLOB_PERIOD allows hidden files" {
         "visible/file.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "**/file.txt", &paths, ZLOB_PERIOD);
+    var result = try matchPaths(testing.allocator, "**/file.txt", &paths, ZLOB_PERIOD | ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(2, result.len());
@@ -271,7 +272,7 @@ test "matchPaths - hidden files blocked without ZLOB_PERIOD" {
         "visible/file.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "**/file.txt", &paths, 0);
+    var result = try matchPaths(testing.allocator, "**/file.txt", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(1, result.len());
@@ -328,7 +329,7 @@ test "matchPaths - pattern is just **" {
         "d/e/f.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "**", &paths, 0);
+    var result = try matchPaths(testing.allocator, "**", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
@@ -340,7 +341,7 @@ test "matchPaths - absolute vs relative paths - absolute pattern" {
         "relative/path/file.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "/**/file.txt", &paths, 0);
+    var result = try matchPaths(testing.allocator, "/**/file.txt", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(1, result.len());
@@ -353,7 +354,7 @@ test "matchPaths - absolute vs relative paths - relative pattern" {
         "relative/path/file.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "**/file.txt", &paths, 0);
+    var result = try matchPaths(testing.allocator, "**/file.txt", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(2, result.len());
@@ -384,7 +385,7 @@ test "matchPaths - **/*.c finds all C files" {
         "tests/test_main.c",
     };
 
-    var result = try matchPaths(testing.allocator, "**/*.c", &paths, 0);
+    var result = try matchPaths(testing.allocator, "**/*.c", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(4, result.len());
@@ -399,7 +400,7 @@ test "matchPaths - test files in any test directory" {
         "test/test_immediate.zig",
     };
 
-    var result = try matchPaths(testing.allocator, "**/test/test_*.zig", &paths, 0);
+    var result = try matchPaths(testing.allocator, "**/test/test_*.zig", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     // Pattern **/test/test_*.zig means: any depth, then 'test' directory, then files matching 'test_*.zig'
@@ -417,7 +418,7 @@ test "matchPaths - src directory recursive" {
         "test/main_test.zig",
     };
 
-    var result = try matchPaths(testing.allocator, "src/**/*.zig", &paths, 0);
+    var result = try matchPaths(testing.allocator, "src/**/*.zig", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
@@ -481,7 +482,7 @@ test "matchPaths - ** at the beginning" {
         "app/src/code/main.c",
     };
 
-    var result = try matchPaths(testing.allocator, "**/code/main.c", &paths, 0);
+    var result = try matchPaths(testing.allocator, "**/code/main.c", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
@@ -495,7 +496,7 @@ test "matchPaths - ** at the end" {
         "other/file.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "src/**", &paths, 0);
+    var result = try matchPaths(testing.allocator, "src/**", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
@@ -510,7 +511,7 @@ test "matchPaths - user example 1: **/code/*.c" {
         "/users/alice/code/utils.c",
     };
 
-    var result = try matchPaths(testing.allocator, "**/code/*.c", &paths, 0);
+    var result = try matchPaths(testing.allocator, "**/code/*.c", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(2, result.len());
@@ -523,7 +524,7 @@ test "matchPaths - user example 2: /users/**/code/*.c" {
         "/other/alice/code/main.c",
     };
 
-    var result = try matchPaths(testing.allocator, "/users/**/code/*.c", &paths, 0);
+    var result = try matchPaths(testing.allocator, "/users/**/code/*.c", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(2, result.len());
@@ -536,7 +537,7 @@ test "matchPaths - user example 3: **/*.txt" {
         "x/y.txt",
     };
 
-    var result = try matchPaths(testing.allocator, "**/*.txt", &paths, 0);
+    var result = try matchPaths(testing.allocator, "**/*.txt", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
@@ -555,7 +556,7 @@ test "matchPaths - ZLOB_PERIOD should NOT match hidden files by default" {
         "dir2/subdir/.dotfile",
     };
 
-    var result = try matchPaths(testing.allocator, "**/*.txt", &paths, 0);
+    var result = try matchPaths(testing.allocator, "**/*.txt", &paths, ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     // Should match dir1/file1.txt and dir2/subdir/file3.txt
@@ -590,7 +591,7 @@ test "matchPaths - ZLOB_PERIOD matches hidden files with flag" {
         "dir2/subdir/.dotfile",
     };
 
-    var result = try matchPaths(testing.allocator, "**/*.txt", &paths, ZLOB_PERIOD);
+    var result = try matchPaths(testing.allocator, "**/*.txt", &paths, ZLOB_PERIOD | ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     // Should match all .txt files including hidden ones
@@ -624,12 +625,12 @@ test "matchPaths - allows ./ prefix for the pattern" {
         "docs/readme.md",
     };
 
-    var result_abs = try matchPaths(testing.allocator, "**/*.c", &paths, ZLOB_PERIOD);
+    var result_abs = try matchPaths(testing.allocator, "**/*.c", &paths, ZLOB_PERIOD | ZLOB_DOUBLESTAR_RECURSIVE);
     defer result_abs.deinit();
 
     try testing.expectEqual(3, result_abs.len());
 
-    var result = try matchPaths(testing.allocator, "./**/*.c", &paths, ZLOB_PERIOD);
+    var result = try matchPaths(testing.allocator, "./**/*.c", &paths, ZLOB_PERIOD | ZLOB_DOUBLESTAR_RECURSIVE);
     defer result.deinit();
 
     try testing.expectEqual(3, result.len());
