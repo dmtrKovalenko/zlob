@@ -8,18 +8,19 @@
 
 ---
 
-zlob is a C library, zig library and a rust crate that makes globbing fast. Why? Because `glob()` implemented by glibc sucks. It is very outdated and slow. Remember when you last time read all the flags avaialble exposed by glibc `glob(3)`? I am pretty sure you never read those because by default POSIX glob requires sorting of results list which is _VERY_ slow in glibc implementaion, it doesn't implement very basic patterns like `./**/*.c` and requires to pass a flags to enable bracing support like `./{a,b}/*.c`.
+zlob is a C library, zig library and a rust crate that makes globbing fast. Why? Because `glob()` implemented by glibc sucks. It is very outdated and slow. Remember when you last time read all the flags available exposed by glibc `glob(3)`? I am pretty sure you never read those because by default POSIX glob requires sorting of results list which is _VERY_ slow in glibc implementation, it doesn't implement very basic patterns like `./**/*.c` and requires to pass a flags to enable bracing support like `./{a,b}/*.c`.
 
 In short libc's glob is unusable, so I wanted to make a library that is 100% POSIX and glibc compatible, that supports all the features modern glob implementation needed and is faster than glibc. So here is zlob, a little bit about it:
 
 - 100% POSIX and glibc compatible with all the flags and features supported
 - absolutely cross platform (yes even windows support, windows users should use forward slashes)
 - Faster than glibc up to 10x in certain cases and for general cases 1.2-1.7x faster
-- In addition to standard globbing supportes `**` recursive patterns, braces `*.{c,h}`, `gitignore` and bash `extglob` patterns
-- SIMD first implementaion where needed
+- Faster than rust's, node's, bun's, python's implementation by far
+- In addition to standard unix wildcard syntax supports `**` recursive patterns, braces `*.{c,h}`, `gitignore` and bash `extglob` patterns
+- SIMD first implementaton 
 - Supports `.gitignore` out of the box
-- Exposes a way better api for globbing over paths list in case you need to glob over a liT of filenames
-- Exposes path length in the output struct meking it way better for FFI
+- Exposes a way better api for globbing over paths list in case you need to glob over a list of filenames
+- Exposes path length in the output struct making it way better for FFI
 - Truly cross platform: 
     - usage of [getdents64](https://linux.die.net/man/2/getdents64) syscall for faster directory listing
     - usage of [getattrslistbulk](https://man.freebsd.org/cgi/man.cgi?query=getattrlistbulk&sektion=2&manpath=macOS+13.6.5) on macos when requesting metadata from the walker
@@ -30,7 +31,7 @@ Used and built for [fff](https://github.com/dmtrKovalenko/fff)
 
 ## Why it is faster?
 
-zlob is using SIMD first implementation. It is a primary reason it is written in zig to have a native portable SIMD support at a langauges level, it significanlty reduces certain bottlnecks. But the primary reason of speed is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directories and making lef matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
+zlob is using SIMD first implementation. It is a primary reason it is written in zig to have a native portable SIMD support at a languages level, it significantly reduces certain bottlenecks. But the primary reason of speed is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directories and making lef matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
 
 One of my favourite optimizations for this project is patterns like `./**/*.{c,rs,zig}` this is usually the main reason glob is used and this pattern is the most optimized in the zlob implementation:
 
