@@ -1,7 +1,7 @@
 # zlob.h
 
 <p align="center">
-  <img src="./assets/zlob-logo.png" alt="zlob logo" width="320" />
+  <img src="./assets/zlob-logo.png" alt="zlob logo" />
 </p>
 
 100% POSIX and glibc compatible globbing library for C, Zig, and Rust that is **faster** and supports **all the modern globbing formats** and gitignore
@@ -26,6 +26,8 @@ In short libc's glob is unusable, so I wanted to make a library that is 100% POS
     - uses NTFS directly on windows
     - windows paths & patterns are normalized at compile time (both "/" and "\" accepted and treated the same in patterns)
 
+Used and built for [fff](https://github.com/dmtrKovalenko/fff)
+
 ## Why it is faster?
 
 zlob is using SIMD first implementation. It is a primary reason it is written in zig to have a native portable SIMD support at a langauges level, it significanlty reduces certain bottlnecks. But the primary reason of speed is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directories and making lef matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
@@ -38,48 +40,35 @@ One of my favourite optimizations for this project is patterns like `./**/*.{c,r
 
 ## Benchmarks
 
-Numbers below are from the criterion harness in `rust/benches/glob_comparison.rs`, comparing the `zlob` crate against the `glob` crate and the `globset` crate (paired with `walkdir` where it needs to walk the FS). The fixture is a Linux kernel checkout: **92,989 files / 6,130 directories / 36,550 `.c` files**.
+Numbers below come from the criterion harness in `rust/benches/glob_comparison.rs`, comparing the `zlob` crate against the `glob` crate and the `globset` crate (paired with `walkdir` where it needs to walk the FS). The fixture is a Linux kernel checkout: **92,989 files / 6,130 directories / 36,550 `.c` files**.
 
 Reproduce with:
 
 ```bash
 cd rust
-ZLOB_BENCH_REPO=/path/to/linux cargo bench --bench glob_comparison
+REPO=/path/to/linux cargo bench --bench glob_comparison
 ```
+
+The harness prints a match-count parity table at startup so you can see whether each library is doing the same amount of work.
 
 ### Filesystem walk (pattern + traversal)
 
 Median wall time, lower is better. Speedup is **vs zlob**.
 
-| Pattern (matches)         | zlob       | glob crate              | globset + walkdir          |
-| ------------------------- | ---------: | ----------------------: | -------------------------: |
-| `fs/*.c` (73)             | **16 µs**  | 54 µs &nbsp; (3.3×)     | 45 ms &nbsp; (~2 760×)     |
-| `*/Makefile` (21)         | **13 µs**  | 51 µs &nbsp; (3.8×)     | 46 ms &nbsp; (~3 440×)     |
-| `[fk]*/*.c` (179)         | **39 µs**  | 162 µs &nbsp; (4.2×)    | 44 ms &nbsp; (~1 150×)     |
-| `drivers/*/*.c` (4 318)   | **964 µs** | 2.75 ms &nbsp; (2.8×)   | 45 ms &nbsp; (~47×)        |
-| `drivers/**/*.c` (22 058) | **8.9 ms** | 22.1 ms &nbsp; (2.5×)   | 48.5 ms &nbsp; (5.4×)      |
-| `**/*.c` (36 555)         | **24 ms**  | 18.78 s &nbsp; (≈800×)¹ | 48.8 ms &nbsp; (2.1×)      |
-| `**/*.{c,h}` (63 101)     | **26 ms**  | n/a (no brace support)  | 48.0 ms &nbsp; (1.9×)      |
+| Pattern (matches)         | zlob        | glob crate              | globset + walkdir        |
+| ------------------------- | ----------: | ----------------------: | -----------------------: |
+| `fs/*.c` (73)             | **16.7 µs** | 56.2 µs &nbsp; (3.4×)   | 47.2 ms &nbsp; (~2 800×) |
+| `*/Makefile` (21)         | **13.1 µs** | 49.7 µs &nbsp; (3.8×)   | 46.4 ms &nbsp; (~3 540×) |
+| `[fk]*/*.c` (179)         | **40.3 µs** | 163 µs &nbsp; (4.0×)    | 46.8 ms &nbsp; (~1 160×) |
+| `drivers/*/*.c` (4 318)   | **988 µs**  | 2.84 ms &nbsp; (2.9×)   | 49.3 ms &nbsp; (50×)     |
+| `drivers/**/*.c` (22 058) | **9.50 ms** | 22.6 ms &nbsp; (2.4×)   | 50.2 ms &nbsp; (5.3×)    |
+| `net/**/*.c` (1 537)      | **384 µs**  | 1.05 ms &nbsp; (2.7×)   | 48.3 ms &nbsp; (126×)    |
+| `net/**/*.{c,h}` (1 817)  | **408 µs**  | n/a (no brace support)  | 47.7 ms &nbsp; (117×)    |
+| `**/*.c` (67889)      | **24.1 ms** | 19.33 s &nbsp; (~800×¹)  | 50.6 ms &nbsp; (2.1×)    |
 
-¹ The `glob` crate follow symlinks here and double-counts (returned 77 312 paths against 36 555 unique `.c` files); the wall-clock impact is real either way.
+¹ The `**/*.c` row is **not a fair speed comparison**: the kernel tree contains symlinks under `scripts/dtc/include-prefixes/{arch,arm,arm64,…}` that point back into directories which already contain `.c` files. zlob doesn't follow symlinks by design, glob crate doesn't have an option to configure this behavior.
 
-### In-memory path matching (no FS access, 92 989 paths)
-
-Median wall time and throughput in millions of paths/sec.
-
-| Pattern              | zlob                  | glob crate            | globset               |
-| -------------------- | --------------------: | --------------------: | --------------------: |
-| `fs/*.c`             | **277 µs / 336 Me/s** | 492 µs / 189 Me/s     | 2.54 ms / 37 Me/s     |
-| `*/Makefile`         | 3.38 ms / 28 Me/s     | 14.5 ms / 6.4 Me/s    | **2.86 ms / 33 Me/s** |
-| `[fk]*/*.c`          | **479 µs / 194 Me/s** | 813 µs / 114 Me/s     | 2.62 ms / 35 Me/s     |
-| `drivers/*/*.c`      | **860 µs / 108 Me/s** | 5.11 ms / 18 Me/s     | 3.16 ms / 29 Me/s     |
-| `drivers/**/*.c`     | **1.62 ms / 57 Me/s** | 5.14 ms / 18 Me/s     | 4.22 ms / 22 Me/s     |
-| `**/*.c`             | **1.55 ms / 60 Me/s** | 14.6 ms / 6.4 Me/s    | 6.20 ms / 15 Me/s     |
-| `**/*.{c,h}`         | **901 µs / 103 Me/s** | n/a                   | 6.07 ms / 15 Me/s     |
-
-zlob wins consistently wins accross the patterns patterns by 2-16x
-
-> Hardware / config used for these numbers: Linux x86_64, ReleaseFast static build via `zig 0.15.2`, `cargo bench` in release.
+> Hardware / config: Linux x86_64, ReleaseFast static build via `zig 0.16.0` & `cargo bench` via criterion
 
 ## Compatibility
 
@@ -180,7 +169,7 @@ zlob is also shared as a rust crate you can find it on [crates.io](https://crate
 
 ## Compilation
 
-Obviously to compile zlob as a C library you have to have installed `zig` toolchain (**only 0.15.2**) and then you can use standard make commands:
+Obviously to compile zlob as a C library you have to have installed `zig` toolchain (**only 0.16.0**) and then you can use standard make commands:
 
 ```bash
 make

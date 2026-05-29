@@ -31,9 +31,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-use zlob::{zlob_at, zlob_match_paths, ZlobFlags};
+use zlob::{ZlobFlags, zlob_at, zlob_match_paths};
 
 fn repo_path() -> &'static Path {
     static REPO: OnceLock<PathBuf> = OnceLock::new();
@@ -118,25 +118,25 @@ const PATTERNS: &[PatternSpec] = &[
         fs_samples: 40,
     },
     PatternSpec {
-        label: "drivers_recursive_c",  // drivers/**/*.c   STRESS: 20k+ matches (symlink-free)
+        label: "drivers_recursive_c", // drivers/**/*.c   STRESS: 20k+ matches (symlink-free)
         pattern: "drivers/**/*.c",
         supports_brace: false,
         fs_samples: 15,
     },
     PatternSpec {
-        label: "net_recursive_c",      // net/**/*.c       symlink-free recursive subtree
+        label: "net_recursive_c", // net/**/*.c       symlink-free recursive subtree
         pattern: "net/**/*.c",
         supports_brace: false,
         fs_samples: 30,
     },
     PatternSpec {
-        label: "net_brace_c_h",        // net/**/*.{c,h}   symlink-free recursive + brace
+        label: "net_brace_c_h", // net/**/*.{c,h}   symlink-free recursive + brace
         pattern: "net/**/*.{c,h}",
         supports_brace: true,
         fs_samples: 30,
     },
     PatternSpec {
-        label: "all_recursive_c",      // **/*.c           full tree - WARNING: hits symlink loops in `glob` crate
+        label: "all_recursive_c", // **/*.c           full tree - WARNING: hits symlink loops in `glob` crate
         pattern: "**/*.c",
         supports_brace: false,
         fs_samples: 10,

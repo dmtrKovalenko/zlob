@@ -61,7 +61,7 @@ pub struct zlob_t {
 }
 
 // Stub functions - these will never be called during doc builds
-extern "C" {
+unsafe extern "C" {
     pub fn zlob(
         pattern: *const c_char,
         flags: c_int,
