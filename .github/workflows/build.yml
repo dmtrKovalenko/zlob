@@ -42,6 +42,27 @@ jobs:
       - name: Run tests
         run: make test
 
+  docs-rs:
+    name: docs.rs build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Build docs rs
+        working-directory: rust
+        env:
+          RUSTDOCFLAGS: --cfg docsrs
+        run: cargo +nightly doc --lib --no-deps
+
   linux-musl:
     name: Linux (musl)
     runs-on: ubuntu-latest

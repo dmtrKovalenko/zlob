@@ -60,6 +60,21 @@ pub struct zlob_t {
     pub zlo_closedir: Option<unsafe extern "C" fn(dir: *mut core::ffi::c_void)>,
 }
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zlob_indices_t {
+    pub indices: *mut usize,
+    pub count: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zlob_pattern {
+    _unused: [u8; 0],
+}
+
+pub type zlob_pattern_t = zlob_pattern;
+
 // Stub functions - these will never be called during doc builds
 extern "C" {
     pub fn zlob(
@@ -114,4 +129,90 @@ extern "C" {
     ) -> c_int;
 
     pub fn zlob_has_wildcards(pattern: *const c_char, flags: c_int) -> c_int;
+
+    pub fn zlob_indices_free(out: *mut zlob_indices_t);
+
+    pub fn zlob_pattern_compile(pattern: *const c_char, flags: c_int) -> *mut zlob_pattern_t;
+
+    pub fn zlob_pattern_compile_slice(
+        pattern: *const zlob_slice_t,
+        flags: c_int,
+    ) -> *mut zlob_pattern_t;
+
+    pub fn zlob_pattern_free(p: *mut zlob_pattern_t);
+
+    pub fn zlob_pattern_matches(
+        p: *const zlob_pattern_t,
+        path: *const c_char,
+        path_len: usize,
+        flags: c_int,
+    ) -> c_int;
+
+    pub fn zlob_match_paths_indices(
+        pattern: *const c_char,
+        paths: *const *const c_char,
+        path_count: usize,
+        flags: c_int,
+        out: *mut zlob_indices_t,
+    ) -> c_int;
+
+    pub fn zlob_match_paths_indices_slice(
+        pattern: *const zlob_slice_t,
+        paths: *const zlob_slice_t,
+        path_count: usize,
+        flags: c_int,
+        out: *mut zlob_indices_t,
+    ) -> c_int;
+
+    pub fn zlob_match_paths_indices_at(
+        base_path: *const c_char,
+        pattern: *const c_char,
+        paths: *const *const c_char,
+        path_count: usize,
+        flags: c_int,
+        out: *mut zlob_indices_t,
+    ) -> c_int;
+
+    pub fn zlob_match_paths_indices_at_slice(
+        base_path: *const zlob_slice_t,
+        pattern: *const zlob_slice_t,
+        paths: *const zlob_slice_t,
+        path_count: usize,
+        flags: c_int,
+        out: *mut zlob_indices_t,
+    ) -> c_int;
+
+    pub fn zlob_pattern_match_paths_slice(
+        p: *const zlob_pattern_t,
+        paths: *const zlob_slice_t,
+        path_count: usize,
+        flags: c_int,
+        out: *mut zlob_t,
+    ) -> c_int;
+
+    pub fn zlob_pattern_match_paths_at_slice(
+        p: *const zlob_pattern_t,
+        base_path: *const zlob_slice_t,
+        paths: *const zlob_slice_t,
+        path_count: usize,
+        flags: c_int,
+        out: *mut zlob_t,
+    ) -> c_int;
+
+    pub fn zlob_pattern_match_paths_indices_slice(
+        p: *const zlob_pattern_t,
+        paths: *const zlob_slice_t,
+        path_count: usize,
+        flags: c_int,
+        out: *mut zlob_indices_t,
+    ) -> c_int;
+
+    pub fn zlob_pattern_match_paths_indices_at_slice(
+        p: *const zlob_pattern_t,
+        base_path: *const zlob_slice_t,
+        paths: *const zlob_slice_t,
+        path_count: usize,
+        flags: c_int,
+        out: *mut zlob_indices_t,
+    ) -> c_int;
 }
