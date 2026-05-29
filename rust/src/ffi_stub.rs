@@ -42,6 +42,7 @@ pub struct zlob_dirent_t {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub struct zlob_slice_t {
     pub ptr: *const c_uchar,
     pub len: usize,

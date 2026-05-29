@@ -3,6 +3,7 @@ use crate::ffi;
 use crate::flags::ZlobFlags;
 use crate::indicies::ZlobIndicies;
 use crate::match_paths::ZlobMatch;
+use crate::slices::AsZlobPaths;
 use std::ffi::c_char;
 use std::ptr::NonNull;
 
@@ -13,11 +14,10 @@ use std::ptr::NonNull;
 ///
 /// ```
 /// use zlob::{ZlobPattern, ZlobFlags};
-/// let paths_owned: Vec<String> = (0..2000)
+/// let paths: Vec<String> = (0..2000)
 ///      .map(|i| format!("path/{}/file.rs", i))
 ///      .collect();
 ///
-/// let paths: Vec<_> = paths_owned.iter().map(|s| s.as_str()).collect();
 /// let pattern = ZlobPattern::compile("**/*.rs", ZlobFlags::empty())?;
 /// let mut total = 0;
 ///
@@ -90,12 +90,12 @@ impl ZlobPattern {
     ///
     /// The returned `ZlobMatch` borrows path slices from the input — the
     /// caller must keep `paths` alive until the result is dropped.
-    pub fn match_paths<'a>(
+    pub fn match_paths<'a, P: AsZlobPaths + ?Sized>(
         &self,
-        paths: &'a [&str],
+        paths: &'a P,
         flags: ZlobFlags,
     ) -> Result<Option<ZlobMatch<'a>>, ZlobError> {
-        let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+        let path_slices = paths.as_zlob_slices();
         let mut inner = ffi::zlob_t::default();
 
         let result = unsafe {
@@ -116,14 +116,14 @@ impl ZlobPattern {
     }
 
     /// At-flow variant of [`Self::match_paths`].
-    pub fn match_paths_at<'a>(
+    pub fn match_paths_at<'a, P: AsZlobPaths + ?Sized>(
         &self,
         base_path: &str,
-        paths: &'a [&str],
+        paths: &'a P,
         flags: ZlobFlags,
     ) -> Result<Option<ZlobMatch<'a>>, ZlobError> {
         let base_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&base_path) };
-        let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+        let path_slices = paths.as_zlob_slices();
         let mut inner = ffi::zlob_t::default();
 
         let result = unsafe {
@@ -149,12 +149,12 @@ impl ZlobPattern {
     ///
     /// Returns an empty [`ZlobIndicies`] for the no-match case (no `Option`
     /// wrapper — empty is the natural representation for callers that iterate).
-    pub fn match_indices(
+    pub fn match_indices<P: AsZlobPaths + ?Sized>(
         &self,
-        paths: &[&str],
+        paths: &P,
         flags: ZlobFlags,
     ) -> Result<ZlobIndicies, ZlobError> {
-        let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+        let path_slices = paths.as_zlob_slices();
         let mut out = ffi::zlob_indices_t {
             indices: std::ptr::null_mut(),
             count: 0,
@@ -174,14 +174,14 @@ impl ZlobPattern {
     }
 
     /// At-flow variant of [`Self::match_indices`].
-    pub fn match_indices_at(
+    pub fn match_indices_at<P: AsZlobPaths + ?Sized>(
         &self,
         base_path: &str,
-        paths: &[&str],
+        paths: &P,
         flags: ZlobFlags,
     ) -> Result<ZlobIndicies, ZlobError> {
         let base_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&base_path) };
-        let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+        let path_slices = paths.as_zlob_slices();
         let mut out = ffi::zlob_indices_t {
             indices: std::ptr::null_mut(),
             count: 0,
