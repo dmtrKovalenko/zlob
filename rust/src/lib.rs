@@ -146,6 +146,7 @@ mod flags;
 mod indicies;
 mod match_paths;
 mod pattern;
+mod slices;
 mod zlob;
 
 // Raw FFI bindings - use stub for docs.rs, generated bindings otherwise
@@ -191,6 +192,7 @@ pub use flags::*;
 pub use indicies::*;
 pub use match_paths::*;
 pub use pattern::*;
+pub use slices::AsZlobPaths;
 pub use zlob::*;
 
 /// Check if a pattern string contains any glob special characters.

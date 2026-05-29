@@ -4,6 +4,7 @@ use crate::error::ZlobError;
 use crate::ffi;
 use crate::flags::ZlobFlags;
 use crate::indicies::ZlobIndicies;
+use crate::slices::AsZlobPaths;
 use std::marker::PhantomData;
 use std::slice;
 
@@ -247,20 +248,16 @@ impl std::iter::FusedIterator for ZlobMatchIter<'_, '_> {}
 /// }
 /// # Ok::<(), zlob::ZlobError>(())
 /// ```
-pub fn zlob_match_paths<'a>(
+pub fn zlob_match_paths<'a, P: AsZlobPaths + ?Sized>(
     pattern: &str,
-    paths: &'a [&str],
+    paths: &'a P,
     flags: ZlobFlags,
 ) -> Result<Option<ZlobMatch<'a>>, ZlobError> {
-    // SAFETY: zlob_slice_t and &str have identical memory layout:
-    // - Both are (ptr: *const u8, len: usize) pairs
-    // - Both have the same size and alignment (verified by static assert in ffi.rs)
-    // This transmute is zero-cost - no allocation, no copying.
+    // SAFETY: zlob_slice_t and &str have identical memory layout
+    // (ptr: *const u8, len: usize). This transmute is zero-cost.
     let pattern_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&pattern) };
 
-    // SAFETY: &[&str] and &[zlob_slice_t] have identical memory layout.
-    // Each &str is (ptr, len), each zlob_slice_t is { ptr, len }.
-    let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+    let path_slices = paths.as_zlob_slices();
 
     let mut inner = ffi::zlob_t::default();
 
@@ -326,16 +323,16 @@ pub fn zlob_match_paths<'a>(
 /// }
 /// # Ok::<(), zlob::ZlobError>(())
 /// ```
-pub fn zlob_match_paths_at<'a>(
+pub fn zlob_match_paths_at<'a, P: AsZlobPaths + ?Sized>(
     base_path: &str,
     pattern: &str,
-    paths: &'a [&str],
+    paths: &'a P,
     flags: ZlobFlags,
 ) -> Result<Option<ZlobMatch<'a>>, ZlobError> {
     // SAFETY: zlob_slice_t and &str have identical memory layout.
     let base_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&base_path) };
     let pattern_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&pattern) };
-    let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+    let path_slices = paths.as_zlob_slices();
 
     let mut inner = ffi::zlob_t::default();
 
@@ -376,13 +373,13 @@ pub fn zlob_match_paths_at<'a>(
 /// assert_eq!(hits.as_slice(), &[0, 2]);
 /// # Ok::<(), zlob::ZlobError>(())
 /// ```
-pub fn zlob_match_paths_indices(
+pub fn zlob_match_paths_indices<P: AsZlobPaths + ?Sized>(
     pattern: &str,
-    paths: &[&str],
+    paths: &P,
     flags: ZlobFlags,
 ) -> Result<ZlobIndicies, ZlobError> {
     let pattern_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&pattern) };
-    let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+    let path_slices = paths.as_zlob_slices();
     let mut out = ffi::zlob_indices_t {
         indices: std::ptr::null_mut(),
         count: 0,
@@ -402,15 +399,15 @@ pub fn zlob_match_paths_indices(
 }
 
 /// At-flow variant of [`zlob_match_paths_indices`].
-pub fn zlob_match_paths_indices_at(
+pub fn zlob_match_paths_indices_at<P: AsZlobPaths + ?Sized>(
     base_path: &str,
     pattern: &str,
-    paths: &[&str],
+    paths: &P,
     flags: ZlobFlags,
 ) -> Result<ZlobIndicies, ZlobError> {
     let base_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&base_path) };
     let pattern_slice: &ffi::zlob_slice_t = unsafe { std::mem::transmute(&pattern) };
-    let path_slices: &[ffi::zlob_slice_t] = unsafe { std::mem::transmute(paths) };
+    let path_slices = paths.as_zlob_slices();
     let mut out = ffi::zlob_indices_t {
         indices: std::ptr::null_mut(),
         count: 0,
@@ -787,5 +784,66 @@ mod tests {
             .unwrap();
         let dbg = format!("{:?}", matches);
         assert!(dbg.contains("ZlobMatch"));
+    }
+
+    #[test]
+    fn test_match_paths_accepts_vec_string() {
+        let paths: Vec<String> = vec!["foo.rs".into(), "bar.txt".into(), "baz.rs".into()];
+        let matches = zlob_match_paths("*.rs", &paths, ZlobFlags::empty())
+            .unwrap()
+            .unwrap();
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_match_paths_accepts_string_slice() {
+        let owned: Vec<String> = vec!["foo.rs".into(), "bar.txt".into()];
+        let matches = zlob_match_paths("*.rs", owned.as_slice(), ZlobFlags::empty())
+            .unwrap()
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_paths_accepts_vec_str() {
+        let paths: Vec<&str> = vec!["foo.rs", "bar.txt"];
+        let matches = zlob_match_paths("*.rs", &paths, ZlobFlags::empty())
+            .unwrap()
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_paths_accepts_cow() {
+        use std::borrow::Cow;
+        let paths: Vec<Cow<'_, str>> = vec![
+            Cow::Borrowed("foo.rs"),
+            Cow::Owned("bar.txt".into()),
+            Cow::Borrowed("baz.rs"),
+        ];
+        let matches = zlob_match_paths("*.rs", &paths, ZlobFlags::empty())
+            .unwrap()
+            .unwrap();
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_match_paths_indices_accepts_vec_string() {
+        let paths: Vec<String> = vec!["a.rs".into(), "b.txt".into(), "c.rs".into()];
+        let hits = zlob_match_paths_indices("*.rs", &paths, ZlobFlags::empty()).unwrap();
+        assert_eq!(hits.as_slice(), &[0, 2]);
+    }
+
+    #[test]
+    fn test_match_paths_at_accepts_vec_string() {
+        let paths: Vec<String> = vec![
+            "/proj/src/lib.rs".into(),
+            "/proj/src/main.rs".into(),
+            "/proj/README.md".into(),
+        ];
+        let matches = zlob_match_paths_at("/proj", "src/*.rs", &paths, ZlobFlags::empty())
+            .unwrap()
+            .unwrap();
+        assert_eq!(matches.len(), 2);
     }
 }
