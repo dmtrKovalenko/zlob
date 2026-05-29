@@ -356,6 +356,5 @@ int main(void) {
     PASS();
   }
 
-  printf("\n=== All Tests Passed! ===\n\n");
   return 0;
 }

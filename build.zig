@@ -130,6 +130,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zlob_flags", .module = flags_mod },
         },
     });
+    c_lib_mod.addIncludePath(b.path("include"));
 
     // Test utilities module (shared helpers for tests)
     const test_utils_mod = b.addModule("test_utils", .{
@@ -161,6 +162,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        c_lib.root_module.addIncludePath(b.path("include"));
         // Install C header
         c_lib.installHeader(b.path("include/zlob.h"), "zlob.h");
         b.installArtifact(c_lib);
@@ -183,6 +185,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    c_lib_static.root_module.addIncludePath(b.path("include"));
     // Install C header alongside static library when dynamic lib is skipped
     if (static_only) {
         c_lib_static.installHeader(b.path("include/zlob.h"), "zlob.h");

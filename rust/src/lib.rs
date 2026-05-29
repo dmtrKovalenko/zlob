@@ -143,7 +143,9 @@
 
 mod error;
 mod flags;
+mod indicies;
 mod match_paths;
+mod pattern;
 mod zlob;
 
 // Raw FFI bindings - use stub for docs.rs, generated bindings otherwise
@@ -186,7 +188,9 @@ unsafe impl Send for ffi::zlob_t {}
 
 pub use error::*;
 pub use flags::*;
+pub use indicies::*;
 pub use match_paths::*;
+pub use pattern::*;
 pub use zlob::*;
 
 /// Check if a pattern string contains any glob special characters.

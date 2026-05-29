@@ -1,7 +1,9 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
 const suffix_match = @import("suffix_match.zig");
 const zlob_flags = @import("zlob_flags");
+
 const ZlobFlags = zlob_flags.ZlobFlags;
 
 /// Common pattern templates that can be matched with specialized fast paths
@@ -156,7 +158,6 @@ fn findClosingBracket(pattern: []const u8, bracket_start: usize) ?usize {
 /// Detect the pattern template for fast-path matching.
 /// Accepts pre-computed has_wildcards to avoid redundant SIMD scan.
 fn detectPatternTemplate(pattern: []const u8, has_wildcards: bool) struct { template: PatternTemplate, prefix: []const u8, suffix: []const u8, bracket_bitmap: ?BracketBitmap } {
-    // Check for escape sequences once - used by both branches
     const has_escapes = mem.indexOfScalar(u8, pattern, '\\') != null;
 
     // Check for literal (no wildcards)
@@ -353,6 +354,59 @@ pub fn indexOfCharSIMD(s: []const u8, needle: u8) ?usize {
         return null;
     }
     return mem.indexOfScalar(u8, s, needle);
+}
+
+const path_sep_is_windows = builtin.os.tag == .windows;
+
+/// True when `ch` is a path separator on the current platform.
+///
+/// `/` is always treated as a separator. On Windows `\\` is too. The Windows
+/// branch is gated comptime so non-Windows builds compile to a single byte
+/// compare with no extra branches.
+pub inline fn isPathSep(ch: u8) bool {
+    return ch == '/' or (path_sep_is_windows and ch == '\\');
+}
+
+/// SIMD-accelerated last-occurrence scan that matches either of two bytes
+/// in a single reverse pass. Only useful when you genuinely need a two-needle
+/// scan (the canonical case is "last path separator on Windows", where both
+/// `/` and `\\` are valid).
+///
+/// On non-Windows targets prefer `lastIndexOfCharSIMD(s, '/')` directly —
+/// it does the same work with one fewer compare per chunk.
+pub fn lastIndexOfAnyTwoSIMD(s: []const u8, a: u8, b: u8) ?usize {
+    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
+    const MaskInt = std.meta.Int(.unsigned, vec_len);
+
+    if (s.len >= vec_len) {
+        const Vec = @Vector(vec_len, u8);
+        const a_vec: Vec = @splat(a);
+        const b_vec: Vec = @splat(b);
+        var i: usize = s.len;
+        while (i >= vec_len) {
+            i -= vec_len;
+            const chunk: Vec = s[i..][0..vec_len].*;
+            const mask = @as(MaskInt, @bitCast(chunk == a_vec)) |
+                @as(MaskInt, @bitCast(chunk == b_vec));
+            if (mask != 0) {
+                return i + vec_len - 1 - @clz(mask);
+            }
+        }
+        if (i > 0) {
+            var j: usize = i;
+            while (j > 0) {
+                j -= 1;
+                if (s[j] == a or s[j] == b) return j;
+            }
+        }
+        return null;
+    }
+    var j: usize = s.len;
+    while (j > 0) {
+        j -= 1;
+        if (s[j] == a or s[j] == b) return j;
+    }
+    return null;
 }
 
 /// SIMD-accelerated lastIndexOf for a single byte. Returns the index of last occurrence.

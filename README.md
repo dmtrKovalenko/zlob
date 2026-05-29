@@ -18,10 +18,14 @@ In short libc's glob is unusable, so I wanted to make a library that is 100% POS
 - Faster than glibc up to 10x in certain cases and for general cases 1.2-1.7x faster
 - In addition to standard globbing supportes `**` recursive patterns, braces `*.{c,h}`, `gitignore` and bash `extglob` patterns
 - SIMD first implementaion where needed
-- Direct usage of [getdents64](https://linux.die.net/man/2/getdents64) syscall for faster directory listing
 - Supports `.gitignore` out of the box
 - Exposes a way better api for globbing over paths list in case you need to glob over a liT of filenames
 - Exposes path length in the output struct meking it way better for FFI
+- Truly cross platform: 
+    - usage of [getdents64](https://linux.die.net/man/2/getdents64) syscall for faster directory listing
+    - usage of [getattrslistbulk](https://man.freebsd.org/cgi/man.cgi?query=getattrlistbulk&sektion=2&manpath=macOS+13.6.5) on macos when requesting metadata from the walker
+    - uses NTFS directly on windows
+    - windows paths & patterns are normalized at compile time (both "/" and "\" accepted and treated the same in patterns)
 
 ## Why it is faster?
 
