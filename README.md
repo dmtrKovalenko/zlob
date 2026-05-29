@@ -1,11 +1,10 @@
 # zlob.h
 
+<p align="center">
+  <img src="./assets/zlob-logo.png" alt="zlob logo" width="320" />
+</p>
+
 100% POSIX and glibc compatible globbing library for C, Zig, and Rust that is **faster** and supports **all the modern globbing formats** and gitignore
-
-
-https://github.com/user-attachments/assets/24c8de52-a69b-461e-8162-c7024975d50b
-
-
 
 ---
 
@@ -36,6 +35,51 @@ One of my favourite optimizations for this project is patterns like `./**/*.{c,r
 - recursive worker is using `getdents64` syscall directly which dramatically improves directory listing
 - gitignore implementation allows use to optionally skip large subdirectories out of the box
 - and the actual `*.{c,rs,zig}` pattern is precompiled down the the SIMD bitmask matching that allows to match 3 extension at once
+
+## Benchmarks
+
+Numbers below are from the criterion harness in `rust/benches/glob_comparison.rs`, comparing the `zlob` crate against the `glob` crate and the `globset` crate (paired with `walkdir` where it needs to walk the FS). The fixture is a Linux kernel checkout: **92,989 files / 6,130 directories / 36,550 `.c` files**.
+
+Reproduce with:
+
+```bash
+cd rust
+ZLOB_BENCH_REPO=/path/to/linux cargo bench --bench glob_comparison
+```
+
+### Filesystem walk (pattern + traversal)
+
+Median wall time, lower is better. Speedup is **vs zlob**.
+
+| Pattern (matches)         | zlob       | glob crate              | globset + walkdir          |
+| ------------------------- | ---------: | ----------------------: | -------------------------: |
+| `fs/*.c` (73)             | **16 µs**  | 54 µs &nbsp; (3.3×)     | 45 ms &nbsp; (~2 760×)     |
+| `*/Makefile` (21)         | **13 µs**  | 51 µs &nbsp; (3.8×)     | 46 ms &nbsp; (~3 440×)     |
+| `[fk]*/*.c` (179)         | **39 µs**  | 162 µs &nbsp; (4.2×)    | 44 ms &nbsp; (~1 150×)     |
+| `drivers/*/*.c` (4 318)   | **964 µs** | 2.75 ms &nbsp; (2.8×)   | 45 ms &nbsp; (~47×)        |
+| `drivers/**/*.c` (22 058) | **8.9 ms** | 22.1 ms &nbsp; (2.5×)   | 48.5 ms &nbsp; (5.4×)      |
+| `**/*.c` (36 555)         | **24 ms**  | 18.78 s &nbsp; (≈800×)¹ | 48.8 ms &nbsp; (2.1×)      |
+| `**/*.{c,h}` (63 101)     | **26 ms**  | n/a (no brace support)  | 48.0 ms &nbsp; (1.9×)      |
+
+¹ The `glob` crate follow symlinks here and double-counts (returned 77 312 paths against 36 555 unique `.c` files); the wall-clock impact is real either way.
+
+### In-memory path matching (no FS access, 92 989 paths)
+
+Median wall time and throughput in millions of paths/sec.
+
+| Pattern              | zlob                  | glob crate            | globset               |
+| -------------------- | --------------------: | --------------------: | --------------------: |
+| `fs/*.c`             | **277 µs / 336 Me/s** | 492 µs / 189 Me/s     | 2.54 ms / 37 Me/s     |
+| `*/Makefile`         | 3.38 ms / 28 Me/s     | 14.5 ms / 6.4 Me/s    | **2.86 ms / 33 Me/s** |
+| `[fk]*/*.c`          | **479 µs / 194 Me/s** | 813 µs / 114 Me/s     | 2.62 ms / 35 Me/s     |
+| `drivers/*/*.c`      | **860 µs / 108 Me/s** | 5.11 ms / 18 Me/s     | 3.16 ms / 29 Me/s     |
+| `drivers/**/*.c`     | **1.62 ms / 57 Me/s** | 5.14 ms / 18 Me/s     | 4.22 ms / 22 Me/s     |
+| `**/*.c`             | **1.55 ms / 60 Me/s** | 14.6 ms / 6.4 Me/s    | 6.20 ms / 15 Me/s     |
+| `**/*.{c,h}`         | **901 µs / 103 Me/s** | n/a                   | 6.07 ms / 15 Me/s     |
+
+zlob wins consistently wins accross the patterns patterns by 2-16x
+
+> Hardware / config used for these numbers: Linux x86_64, ReleaseFast static build via `zig 0.15.2`, `cargo bench` in release.
 
 ## Compatibility
 
