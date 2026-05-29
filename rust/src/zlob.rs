@@ -1,7 +1,7 @@
 use crate::error::ZlobError;
 use crate::ffi;
 use crate::flags::ZlobFlags;
-use std::ffi::{c_char, CString};
+use std::ffi::{CString, c_char};
 use std::ops::Index;
 use std::slice;
 
@@ -103,9 +103,11 @@ impl Zlob {
     /// - `pathv[i]` is a pointer to the i-th path (null-terminated)
     /// - `pathlen[i]` is the length of the i-th path (excluding null terminator)
     pub unsafe fn raw_parts(&self) -> (&[*mut c_char], &[usize]) {
-        let pathv = slice::from_raw_parts(self.inner.zlo_pathv, self.len());
-        let pathlen = slice::from_raw_parts(self.inner.zlo_pathlen, self.len());
-        (pathv, pathlen)
+        unsafe {
+            let pathv = slice::from_raw_parts(self.inner.zlo_pathv, self.len());
+            let pathlen = slice::from_raw_parts(self.inner.zlo_pathlen, self.len());
+            (pathv, pathlen)
+        }
     }
 }
 

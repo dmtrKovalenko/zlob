@@ -4,7 +4,7 @@ Zlob is a very fast glob implementation that is faster than ignore crate and eve
 
 ## Requirements
 
-To compile this crate you have to install [zig 0.15.2 compiler toolchain](https://ziglang.org/download/) and have it in your PATH.
+To compile this crate you have to install [zig 0.16.0 compiler toolchain](https://ziglang.org/download/) and have it in your PATH.
 
 ## Misc
 
