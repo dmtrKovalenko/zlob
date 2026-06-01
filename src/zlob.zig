@@ -1847,6 +1847,7 @@ fn globRecursiveWalk(
         .err_callback = errfunc,
         .abort_on_error = flags.err,
         .hidden = hidden_config,
+        .follow_symlinks = flags.follow_symlinks,
         .fs = fs_provider,
     };
 

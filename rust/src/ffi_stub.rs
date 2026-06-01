@@ -22,6 +22,7 @@ pub const ZLOB_TILDE_CHECK: c_int = 1 << 14;
 pub const ZLOB_GITIGNORE: c_int = 1 << 24;
 pub const ZLOB_DOUBLESTAR_RECURSIVE: c_int = 1 << 25;
 pub const ZLOB_EXTGLOB: c_int = 1 << 26;
+pub const ZLOB_FOLLOW_SYMLINKS: c_int = 1 << 27;
 
 pub const ZLOB_RECOMMENDED: c_int =
     ZLOB_BRACE | ZLOB_DOUBLESTAR_RECURSIVE | ZLOB_NOSORT | ZLOB_TILDE | ZLOB_TILDE_CHECK;
