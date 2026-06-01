@@ -183,13 +183,30 @@ inline fn isDirMode(mode: anytype) bool {
     return (@as(u32, @intCast(mode)) & S_IFMT) == S_IFDIR;
 }
 
+// On Linux, std 0.16 dropped the `Stat`/`fstat`/`fstatat` wrappers; `statx`
+// is the only raw stat syscall left. We only need (dev, ino) and the file
+// type, so request just TYPE | INO.
+const linux_statx_mask = if (builtin.os.tag == .linux)
+    std.os.linux.STATX{ .TYPE = true, .INO = true }
+else
+    undefined;
+
+inline fn keyFromStatx(stx: std.os.linux.Statx) InodeKey {
+    // Recombine the split major/minor into a single device identifier. Any
+    // injective combination works — this is only ever compared for equality
+    // within one walk to break cycles.
+    const dev = (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor);
+    return .{ .dev = dev, .ino = stx.ino };
+}
+
 /// Best-effort fstat on an open dir fd to obtain (dev, ino). Returns null
-/// when libc is unavailable on the target or the fstat call fails.
+/// when libc is unavailable on the target or the stat call fails.
 fn statFd(fd: std.posix.fd_t) ?InodeKey {
     if (builtin.os.tag == .linux) {
-        var st: std.os.linux.Stat = undefined;
-        if (std.os.linux.fstat(fd, &st) != 0) return null;
-        return .{ .dev = st.dev, .ino = st.ino };
+        var stx: std.os.linux.Statx = undefined;
+        const rc = std.os.linux.statx(fd, "", std.os.linux.AT.EMPTY_PATH, linux_statx_mask, &stx);
+        if (std.os.linux.errno(rc) != .SUCCESS) return null;
+        return keyFromStatx(stx);
     }
     if (!has_libc_for_stat) return null;
     var st: std.c.Stat = undefined;
@@ -197,17 +214,19 @@ fn statFd(fd: std.posix.fd_t) ?InodeKey {
     return keyFromCStat(st);
 }
 
-/// Resolved symlink target via fstatat(FOLLOW).
+/// Resolved symlink target via stat(FOLLOW).
 const ResolvedSym = struct { is_dir: bool, key: InodeKey };
 
-/// Best-effort fstatat(FOLLOW) on a symlink. Used as a pre-flight before
+/// Best-effort stat(FOLLOW) on a symlink. Used as a pre-flight before
 /// openat() so we can skip non-dir targets and detected cycles without
 /// paying for the open+close round-trip.
 fn statAtFollow(dir_fd: std.posix.fd_t, name_z: [*:0]const u8) ?ResolvedSym {
     if (builtin.os.tag == .linux) {
-        var st: std.os.linux.Stat = undefined;
-        if (std.os.linux.fstatat(dir_fd, name_z, &st, 0) != 0) return null;
-        return .{ .is_dir = isDirMode(st.mode), .key = .{ .dev = st.dev, .ino = st.ino } };
+        var stx: std.os.linux.Statx = undefined;
+        // flags = 0 → follow symlinks (no AT.SYMLINK_NOFOLLOW).
+        const rc = std.os.linux.statx(dir_fd, name_z, 0, linux_statx_mask, &stx);
+        if (std.os.linux.errno(rc) != .SUCCESS) return null;
+        return .{ .is_dir = isDirMode(stx.mode), .key = keyFromStatx(stx) };
     }
 
     if (!has_libc_for_stat) return null;
