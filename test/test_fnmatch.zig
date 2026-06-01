@@ -617,3 +617,55 @@ test "fnmatch - noescape flag treats backslash as literal" {
     try testing.expect(!fnmatch.fnmatch("\\*", "*", noescape));
     try testing.expect(fnmatch.fnmatch("\\*", "\\anything", noescape));
 }
+
+// ============================================================================
+// PATHNAME flag tests (like POSIX FNM_PATHNAME: * and ? stop at /)
+// ============================================================================
+
+const pathname_flags = zlob.ZlobFlags{ .pathname = true };
+
+test "fnmatch pathname - * does not match /" {
+    // Without PATHNAME, * crosses /
+    try testing.expect(fnmatch.fnmatch("*", "a/b", .{}));
+    try testing.expect(fnmatch.fnmatch("docs/*", "docs/api/index.md", .{}));
+
+    // With PATHNAME, * stops at /
+    try testing.expect(fnmatch.fnmatch("*", "a", pathname_flags));
+    try testing.expect(!fnmatch.fnmatch("*", "a/b", pathname_flags));
+}
+
+test "fnmatch pathname - * at end of pattern stops at /" {
+    try testing.expect(fnmatch.fnmatch("docs/*", "docs/index.md", pathname_flags));
+    try testing.expect(!fnmatch.fnmatch("docs/*", "docs/api/index.md", pathname_flags));
+    try testing.expect(!fnmatch.fnmatch("docs/*", "docs/api/deep/index.md", pathname_flags));
+}
+
+test "fnmatch pathname - *.ext pattern stops at /" {
+    try testing.expect(fnmatch.fnmatch("docs/*.md", "docs/index.md", pathname_flags));
+    try testing.expect(!fnmatch.fnmatch("docs/*.md", "docs/api/index.md", pathname_flags));
+}
+
+test "fnmatch pathname - ? does not match /" {
+    // Without PATHNAME, ? matches any single char including /
+    try testing.expect(fnmatch.fnmatch("a?b", "a/b", .{}));
+
+    // With PATHNAME, ? refuses to match /
+    try testing.expect(!fnmatch.fnmatch("a?b", "a/b", pathname_flags));
+    try testing.expect(fnmatch.fnmatch("a?b", "axb", pathname_flags));
+}
+
+test "fnmatch pathname - literal / in pattern still matches" {
+    // Explicit / in pattern always matches /
+    try testing.expect(fnmatch.fnmatch("docs/index.md", "docs/index.md", pathname_flags));
+    try testing.expect(!fnmatch.fnmatch("docs/index.md", "docs/other.md", pathname_flags));
+}
+
+test "fnmatch pathname - /anchored/pattern/* matches one level only" {
+    try testing.expect(fnmatch.fnmatch("/docs/*", "/docs/index.md", pathname_flags));
+    try testing.expect(!fnmatch.fnmatch("/docs/*", "/docs/api/index.md", pathname_flags));
+}
+
+test "fnmatch pathname - star matches empty segment" {
+    // * should still match zero characters (empty filename component)
+    try testing.expect(fnmatch.fnmatch("docs/*", "docs/", pathname_flags));
+}

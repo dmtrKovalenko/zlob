@@ -20,9 +20,9 @@ const splitPathComponentsNormalized = compiled_pattern.splitPathComponentsNormal
 /// - `?` matches exactly one character except `/`
 /// - `[abc]` matches one character from the set
 /// - `**` matches zero or more directories
-pub fn matchGlobSimple(pattern: []const u8, path: []const u8) bool {
+pub fn matchGlobSimple(pattern: []const u8, path: []const u8, flags: glob.ZlobFlags) bool {
     if (mem.indexOf(u8, pattern, "**") == null) {
-        return fnmatch_mod.fnmatch(pattern, path, .{});
+        return fnmatch_mod.fnmatch(pattern, path, flags);
     }
 
     var pat_segments_buf: [32][]const u8 = undefined;

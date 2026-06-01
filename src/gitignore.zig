@@ -380,7 +380,7 @@ pub const GitIgnore = struct {
                 }
                 return false;
             }
-            return path_matcher.matchGlobSimple(text, path);
+            return path_matcher.matchGlobSimple(text, path, .{});
         }
 
         // Non-anchored patterns without / match against basename only
@@ -423,14 +423,14 @@ pub const GitIgnore = struct {
         // Non-anchored patterns with / - match full path
         // For directory patterns, also match paths inside the directory
         if (pattern.dir_only) {
-            if (path_matcher.matchGlobSimple(text, path)) return true;
+            if (path_matcher.matchGlobSimple(text, path, .{})) return true;
             // Check if any path component matches and this is a child path
             // e.g., pattern "target" with dir_only should match "foo/target/bar.rs"
             var start: usize = 0;
             while (start < path.len) {
                 const end = mem.indexOfPos(u8, path, start, "/") orelse path.len;
                 const component_path = path[0..end];
-                if (path_matcher.matchGlobSimple(text, component_path)) {
+                if (path_matcher.matchGlobSimple(text, component_path, .{})) {
                     // This path component matches, so any path starting with it is inside
                     return true;
                 }
@@ -439,7 +439,7 @@ pub const GitIgnore = struct {
             }
             return false;
         }
-        return path_matcher.matchGlobSimple(text, path);
+        return path_matcher.matchGlobSimple(text, path, .{});
     }
 
     /// Check if a directory should be skipped entirely (not traversed)

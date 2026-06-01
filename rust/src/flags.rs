@@ -109,6 +109,28 @@ bitflags! {
         /// ```
         const EXTGLOB = ffi::ZLOB_EXTGLOB;
 
+        /// Prevent `*` and `?` from matching `/` (like POSIX `FNM_PATHNAME`).
+        ///
+        /// By default, `*` matches any character sequence including path separators.
+        /// With this flag, `*` stops at `/`, making patterns like `docs/*` match
+        /// only files directly inside `docs/` rather than arbitrarily deep paths.
+        ///
+        /// Has no effect when [`DOUBLESTAR_RECURSIVE`](ZlobFlags::DOUBLESTAR_RECURSIVE)
+        /// is set and the pattern contains `**`, since that path already uses
+        /// segment-by-segment matching.
+        ///
+        /// # Example
+        ///
+        /// ```
+        /// use zlob::{ZlobPattern, ZlobFlags};
+        ///
+        /// let flags = ZlobFlags::PATHNAME;
+        /// let pat = ZlobPattern::compile("docs/*", flags).unwrap();
+        /// assert!(pat.matches("docs/index.md", flags));
+        /// assert!(!pat.matches("docs/api/index.md", flags));
+        /// ```
+        const PATHNAME = ffi::ZLOB_PATHNAME;
+
         /// Recommended modern defaults for globbing.
         ///
         /// Enables: BRACE, DOUBLESTAR_RECURSIVE, NOSORT, TILDE, TILDE_CHECK
@@ -147,6 +169,7 @@ mod tests {
         assert_eq!(ZlobFlags::GITIGNORE.bits(), 1 << 24);
         assert_eq!(ZlobFlags::DOUBLESTAR_RECURSIVE.bits(), 1 << 25);
         assert_eq!(ZlobFlags::EXTGLOB.bits(), 1 << 26);
+        assert_eq!(ZlobFlags::PATHNAME.bits(), 1 << 27);
     }
 
     #[test]

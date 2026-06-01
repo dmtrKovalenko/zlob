@@ -316,9 +316,9 @@ pub fn matchSinglePath(
 
     if (!pattern_segments.has_doublestar) {
         if (enable_extglob and containsExtglob(pattern_segments.original_pattern)) {
-            return fnmatch_mod.fnmatch(pattern_segments.original_pattern, path, .{ .extglob = true });
+            return fnmatch_mod.fnmatch(pattern_segments.original_pattern, path, .{ .extglob = true, .pathname = flags.pathname });
         }
-        return fnmatch_mod.fnmatch(pattern_segments.original_pattern, path, .{ .noescape = !enable_escapes });
+        return fnmatch_mod.fnmatch(pattern_segments.original_pattern, path, .{ .noescape = !enable_escapes, .pathname = flags.pathname });
     }
 
     var component_buffer: [MAX_PATH_COMPONENTS][]const u8 = undefined;

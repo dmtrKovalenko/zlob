@@ -33,7 +33,7 @@ pub inline fn fnmatch(pattern: []const u8, string: []const u8, flags: ZlobFlags)
     if (flags.extglob and containsExtglob(pattern)) {
         return matchExtglob(pattern, string);
     }
-    return fnmatchCore(pattern, string, !flags.noescape);
+    return fnmatchCore(pattern, string, !flags.noescape, flags.pathname);
 }
 
 /// Match using a pre-computed PatternContext for repeated matching against the same pattern.
@@ -63,10 +63,10 @@ pub inline fn fnmatchWithContext(ctx: *const PatternContext, string: []const u8,
         return suffix_matcher.match(string);
     }
 
-    return fnmatchCore(ctx.pattern, string, !flags.noescape);
+    return fnmatchCore(ctx.pattern, string, !flags.noescape, flags.pathname);
 }
 
-fn fnmatchCore(pattern: []const u8, string: []const u8, enable_escapes: bool) bool {
+fn fnmatchCore(pattern: []const u8, string: []const u8, enable_escapes: bool, enable_pathname: bool) bool {
     var pi: usize = 0;
     var si: usize = 0;
 
@@ -114,6 +114,7 @@ fn fnmatchCore(pattern: []const u8, string: []const u8, enable_escapes: bool) bo
                 }
                 // Fall through to star backtrack
                 if (have_star and star_si < string.len) {
+                    if (enable_pathname and string[star_si] == '/') return false;
                     pi = star_pi;
                     star_si += 1;
                     si = star_si;
@@ -128,24 +129,33 @@ fn fnmatchCore(pattern: []const u8, string: []const u8, enable_escapes: bool) bo
                     pi += 1;
                     while (pi < pattern.len and pattern[pi] == '*') pi += 1;
 
-                    // If star is at end of pattern, it matches everything
-                    if (pi >= pattern.len) return true;
+                    // If star is at end of pattern, it matches everything remaining —
+                    // unless PATHNAME is set, in which case '/' cannot be consumed.
+                    if (pi >= pattern.len) {
+                        if (enable_pathname) return mem.indexOfScalar(u8, string[si..], '/') == null;
+                        return true;
+                    }
 
                     // SIMD optimization: if the next pattern char after * is a literal,
                     // use simdFindChar to jump directly to candidate positions in the
                     // string instead of advancing one char at a time on each backtrack.
+                    // With PATHNAME the search is bounded to the next '/' so the star
+                    // never jumps across a path separator.
                     const next_pc = pattern[pi];
                     const next_is_literal = next_pc != '*' and next_pc != '?' and next_pc != '[' and
                         !(enable_escapes and next_pc == '\\');
                     if (next_is_literal) {
-                        // Find next occurrence of the literal char starting from si
-                        if (simdFindChar(string[si..], next_pc)) |offset| {
+                        const remaining = string[si..];
+                        const search_end = if (enable_pathname)
+                            (mem.indexOfScalar(u8, remaining, '/') orelse remaining.len)
+                        else
+                            remaining.len;
+                        if (simdFindChar(remaining[0..search_end], next_pc)) |offset| {
                             star_pi = pi;
                             star_si = si + offset; // will be incremented on backtrack
                             si = si + offset;
                             have_star = true;
                         } else {
-                            // Literal char not found anywhere — no match possible
                             return false;
                         }
                     } else {
@@ -157,7 +167,8 @@ fn fnmatchCore(pattern: []const u8, string: []const u8, enable_escapes: bool) bo
                     continue;
                 },
                 '?' => {
-                    if (si < string.len) {
+                    // With PATHNAME, '?' cannot match '/'.
+                    if (si < string.len and !(enable_pathname and string[si] == '/')) {
                         pi += 1;
                         si += 1;
                         continue;
@@ -186,17 +197,26 @@ fn fnmatchCore(pattern: []const u8, string: []const u8, enable_escapes: bool) bo
             }
         }
 
-        // Mismatch — try to backtrack to last star
+        // Mismatch — try to backtrack to last star.
+        // With PATHNAME, the star cannot consume a '/', so stop backtracking if
+        // the next character to be consumed would be a path separator.
         if (have_star and star_si < string.len) {
+            if (enable_pathname and string[star_si] == '/') return false;
             star_si += 1;
             // SIMD-accelerated backtrack: if the char after * is a literal,
-            // jump to its next occurrence instead of trying every position
+            // jump to its next occurrence instead of trying every position.
+            // With PATHNAME, bound the search to before the next '/'.
             if (star_pi < pattern.len) {
                 const next_pc = pattern[star_pi];
                 const next_is_literal = next_pc != '*' and next_pc != '?' and next_pc != '[' and
                     !(enable_escapes and next_pc == '\\');
                 if (next_is_literal) {
-                    if (simdFindChar(string[star_si..], next_pc)) |offset| {
+                    const remaining = string[star_si..];
+                    const search_end = if (enable_pathname)
+                        (mem.indexOfScalar(u8, remaining, '/') orelse remaining.len)
+                    else
+                        remaining.len;
+                    if (simdFindChar(remaining[0..search_end], next_pc)) |offset| {
                         star_si += offset;
                     } else {
                         return false;
@@ -749,7 +769,7 @@ fn matchPlusInner(alternatives: []const []const u8, rest_pattern: []const u8, st
         var end_pos = str_pos;
         while (end_pos <= string.len) : (end_pos += 1) {
             const candidate = string[str_pos..end_pos];
-            if (fnmatchCore(alt, candidate, true)) {
+            if (fnmatchCore(alt, candidate, true, false)) {
                 if (matchExtglobImpl(rest_pattern, string, 0, end_pos)) return true;
                 if (end_pos > str_pos) {
                     if (matchPlusInner(alternatives, rest_pattern, string, end_pos, visited)) return true;
@@ -768,7 +788,7 @@ fn matchNot(alternatives: []const []const u8, rest_pattern: []const u8, string: 
 
         var matches_any = false;
         for (alternatives) |alt| {
-            if (fnmatchCore(alt, candidate, true)) {
+            if (fnmatchCore(alt, candidate, true, false)) {
                 matches_any = true;
                 break;
             }
@@ -786,7 +806,7 @@ fn tryMatchAlternative(alt: []const u8, rest_pattern: []const u8, string: []cons
     var end_pos = str_pos;
     while (end_pos <= string.len) : (end_pos += 1) {
         const candidate = string[str_pos..end_pos];
-        if (fnmatchCore(alt, candidate, true)) {
+        if (fnmatchCore(alt, candidate, true, false)) {
             if (matchExtglobImpl(rest_pattern, string, 0, end_pos)) return true;
         }
     }
@@ -826,10 +846,10 @@ test "fnmatch - empty patterns" {
 }
 
 test "fnmatchCore - iterative star does not overflow stack" {
-    try std.testing.expect(fnmatchCore("*.rs", "hello.rs", true));
-    try std.testing.expect(!fnmatchCore("*.rs", "hello.txt", true));
-    try std.testing.expect(fnmatchCore("a*b*c*d", "aXbYcZd", true));
-    try std.testing.expect(!fnmatchCore("a*b*c*d", "aXbYcZ", true));
+    try std.testing.expect(fnmatchCore("*.rs", "hello.rs", true, false));
+    try std.testing.expect(!fnmatchCore("*.rs", "hello.txt", true, false));
+    try std.testing.expect(fnmatchCore("a*b*c*d", "aXbYcZd", true, false));
+    try std.testing.expect(!fnmatchCore("a*b*c*d", "aXbYcZ", true, false));
 }
 
 test "detectExtglobAt - basic detection" {

@@ -124,6 +124,8 @@ typedef struct {
 #define ZLOB_EXTGLOB                                                           \
   (1 << 26) /* Enable extended glob patterns: ?(pat) *(pat) +(pat) @(pat)      \
                !(pat) */
+#define ZLOB_PATHNAME                                                          \
+  (1 << 27) /* * and ? don't match / (like POSIX FNM_PATHNAME) */
 
 /* Recommended modern defaults for globbing:
  * - BRACE: Brace expansion {a,b,c}
