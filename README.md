@@ -13,21 +13,19 @@ zlob is a C library, zig library and a rust crate that makes globbing fast. Why?
 In short libc's glob is unusable, so I wanted to make a library that is 100% POSIX and glibc compatible, that supports all the features modern glob implementation needed and is faster than glibc. So here is zlob, a little bit about it:
 
 - 100% POSIX and glibc compatible with all the flags and features supported
-- absolutely cross platform (yes even windows support, windows users should use forward slashes)
-- Faster than glibc up to 10x in certain cases and for general cases 1.2-1.7x faster
+- Faster than glibc up to 10x in specific cases and generally 1.2-1.7x faster. See [benchmarks](##Benchmarks)
 - Faster than rust's, node's, bun's, python's implementation by far
 - In addition to standard unix wildcard syntax supports `**` recursive patterns, braces `*.{c,h}`, `gitignore` and bash `extglob` patterns
-- SIMD first implementaton 
 - Supports `.gitignore` out of the box
-- Exposes a way better api for globbing over paths list in case you need to glob over a list of filenames
-- Exposes path length in the output struct making it way better for FFI
-- Truly cross platform: 
+- Exports api for matching over paths (one or many) without involving file system
+- Exposes path length in the output struct for seamless FFI
+- Truly optimized for all platforms: 
     - usage of [getdents64](https://linux.die.net/man/2/getdents64) syscall for faster directory listing
     - usage of [getattrslistbulk](https://man.freebsd.org/cgi/man.cgi?query=getattrlistbulk&sektion=2&manpath=macOS+13.6.5) on macos when requesting metadata from the walker
-    - uses NTFS directly on windows
+    - uses ntdll directly on windows
     - windows paths & patterns are normalized at compile time (both "/" and "\" accepted and treated the same in patterns)
 
-Used and built for [fff](https://github.com/dmtrKovalenko/fff)
+Used and built for [fff](https://github.com/dmtrKovalenko/fff) loved by more projects!
 
 ## Why it is faster?
 
@@ -39,39 +37,11 @@ One of my favourite optimizations for this project is patterns like `./**/*.{c,r
 - gitignore implementation allows use to optionally skip large subdirectories out of the box
 - and the actual `*.{c,rs,zig}` pattern is precompiled down the the SIMD bitmask matching that allows to match 3 extension at once
 
-## Benchmarks
-
-Numbers below come from the criterion harness in `rust/benches/glob_comparison.rs`, comparing the `zlob` crate against the `glob` crate and the `globset` crate (paired with `walkdir` where it needs to walk the FS). The fixture is a Linux kernel checkout: **93,638 files / 6,157 directories / 36,685 `.c` files / 99 symlinks**.
-
-Reproduce with:
-
-```bash
-# clones a shallow Linux kernel into /tmp/linux if no path is given
-scripts/run-benchmarks.sh [/path/to/linux]
-```
-
-The script just sets `REPO=` and runs `cargo bench --bench glob_comparison`. The harness prints a match-count parity table at startup so you can see whether each library is doing the same amount of work.
-
-### Filesystem walk (pattern + traversal)
-
-Median wall time, lower is better. Speedup is **vs zlob**.
-
-| Pattern (matches)         | zlob        | glob crate              | globset + walkdir        |
-| ------------------------- | ----------: | ----------------------: | -----------------------: |
-| `fs/*.c` (73)             | **9.84 µs** | 31.9 µs &nbsp; (3.2×)   | 40.3 ms &nbsp; (~4 100×) |
-| `*/Makefile` (21)         | **11.4 µs** | 39.1 µs &nbsp; (3.4×)   | 40.4 ms &nbsp; (~3 550×) |
-| `[fk]*/*.c` (179)         | **25.0 µs** | 81.8 µs &nbsp; (3.3×)   | 41.6 ms &nbsp; (~1 660×) |
-| `drivers/*/*.c` (4 314)   | **700 µs**  | 1.70 ms &nbsp; (2.4×)   | 40.9 ms &nbsp; (58×)     |
-| `drivers/**/*.c` (22 107) | **8.23 ms** | 16.4 ms &nbsp; (2.0×)   | 41.4 ms &nbsp; (5.0×)    |
-| `net/**/*.c` (1 475)      | **230 µs**  | 597 µs &nbsp; (2.6×)    | 40.2 ms &nbsp; (175×)    |
-| `net/**/*.{c,h}` (1 747)  | **266 µs**  | n/a (no brace support)  | 40.3 ms &nbsp; (151×)    |
-| `**/*.c` (36 685)         | **24.2 ms** | 49.2 ms &nbsp; (2.0×)   | 43.8 ms &nbsp; (1.8×)    |
-
-> Hardware / config: Linux x86_64, ReleaseFast static build via `zig 0.16.0` & `cargo bench` via criterion
+Checkout [benchmarks](##Benchmarks) yourself.
 
 ## Compatibility
 
-As much as I could I converted all the tests that I found from the glibc test suite, rust's `glob` crate and nodejs's `fs.glob` function. It passes 100% of test suite for both file system and string paths matching. As long as that it compares over 450 glob patterns with glibc for the same results count and the same outpu.
+As much as I could I converted all the tests that I found from the glibc test suite, rust's `glob` crate and nodejs's `fs.glob` function. It passes 100% of test suite for both file system and string paths matching. As long as this we have a compatibility layer with direct libc and bash for compatibility, check or extend it here [./test/test_libc_comparison.sh](./test/test_libc_comparison.sh)
 
 ## Supported patterns
 
@@ -96,12 +66,16 @@ Here are some examples:
 
 ## API
 
-The easiest way is to look at `include/zlob.h` but it exposes the same API as POSIX glob requires
+zlob primarily support 3 public apis: C library, Zig library, and Rust crate
+
+### C 
+The easiest way is to look at `include/zlob.h` it exposes the same API as POSIX glob requires. Just change prefix glob -> zlob.
 
 ```c
 #include "zlob.h"
 
 glob_t globbuf;
+// recommended flag is default set of settings we recommended, see below
 int ret = zlob("*.c", ZLOB_RECOMMENDED, NULL, &globbuf);
 
 if (ret == 0) {
@@ -114,6 +88,68 @@ if (ret == 0) {
     fprintf(stderr, "glob error: %d\n", ret);
 }
 ```
+
+
+### Zig
+
+zlob exposes a native zig module. Add it to your `build.zig.zon` and import as `@import("zlob")`.
+
+```zig
+const std = @import("std");
+const zlob = @import("zlob");
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+
+    if (try zlob.match(allocator, init.io, "**/*.{zig,zon}", .{
+        .brace = true,
+        .gitignore = true,
+    })) |*result| {
+        defer result.deinit();
+        var it = result.iterator();
+        while (it.next()) |path| {
+            std.debug.print("{s}\n", .{path});
+        }
+    }
+
+    // Or match against an in-memory path list — no FS I/O
+    const paths = [_][]const u8{
+        "src/lib.zig",
+        "src/main.zig",
+        "README.md",
+    };
+    var result = try zlob.matchPaths(allocator, "*.zig", &paths, .{});
+    defer result.deinit();
+
+    var it = result.iterator();
+    while (it.next()) |p| {
+        std.debug.print("{s}\n", .{p});
+    }
+}
+```
+
+zlob is also shared as an official rust crate, find it on [crates.io](https://crates.io/crates/zlob) and read the [rust docs](https://docs.rs/zlob/1.4.2/zlob/)
+
+```rust
+use zlob::{zlob, zlob_match_paths, ZlobFlags};
+
+fn main() -> Result<(), zlob::ZlobError> {
+    if let Some(result) = zlob("**/*.{rs,toml}", ZlobFlags::RECOMMENDED)? {
+        for path in &result {
+            println!("{}", path);
+        }
+    }
+
+    let paths = ["src/lib.rs", "src/main.rs", "README.md"];
+    if let Some(matches) = zlob_match_paths("*.rs", &paths, ZlobFlags::GITIGNORE)? {
+        for path in &matches {
+            println!("{}", path);
+        }
+    }
+
+    Ok(())
+}
+
 
 Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves like a modern glob implementation without sorting the output results, and enabling all the modern features that you might need. Additional flags that might be used are:
 
@@ -164,7 +200,7 @@ every aliased path — inflating their count several-fold and looping until
 
 ## MatchPaths mode
 
-Match paths allowing you to submit a pointer of C strings or rust/zig-like slices and get the matches pointer back
+Match paths allowing you to submit a pointer of C strings or rust/zig-like slices and get the matches pointer back.
 
 ```c
 const char *paths[] = {
@@ -182,7 +218,6 @@ zlobfree(&pzlob);
 
 This allows a very fast SIMD processing of the paths and supports **NOT ALL** the features of the standard FS globbing except `ALTDIRFUNC` which is not applicable because this mode is done to avoid using ALTDIRFUNC all along. Make sure that if you will use `ZLOB_TILDE` flag the paths input have to be absolute. Other flags like nomagic might not work as expected because they generally make very little sense.
 
-
 ## Rust
 
 zlob is also shared as a rust crate you can find it on [crates.io](https://crates.io/crates/zlob) rust version is supported by this project authors and published automatically on every zlob release. It also requires zig toolchain to compile.
@@ -198,6 +233,36 @@ make install <PREFIX>
 ```
 
 I know it might be annoying to install zig but zig's linker is currently a decent way to cross compiler any native code so I would definitely recommend trying it out.
+
+## Benchmarks
+
+Numbers below come from the criterion harness in `rust/benches/glob_comparison.rs`, comparing the `zlob` crate against the `glob` crate and the `globset` crate (paired with `walkdir` where it needs to walk the FS). The fixture is a Linux kernel checkout: **93,638 files / 6,157 directories / 36,685 `.c` files / 99 symlinks**.
+
+Reproduce with:
+
+```bash
+# clones a shallow Linux kernel into /tmp/linux if no path is given
+scripts/run-benchmarks.sh [/path/to/linux]
+```
+
+The script just sets `REPO=` and runs `cargo bench --bench glob_comparison`. The harness prints a match-count parity table at startup so you can see whether each library is doing the same amount of work.
+
+### Filesystem walk (pattern + traversal)
+
+Median wall time, lower is better.
+
+| Pattern (matches)         | zlob        | glob crate              | globset + walkdir        |
+| ------------------------- | ----------: | ----------------------: | -----------------------: |
+| `fs/*.c` (73)             | **9.84 µs** | 31.9 µs &nbsp; (3.2×)   | 40.3 ms &nbsp; (~4 100×) |
+| `*/Makefile` (21)         | **11.4 µs** | 39.1 µs &nbsp; (3.4×)   | 40.4 ms &nbsp; (~3 550×) |
+| `[fk]*/*.c` (179)         | **25.0 µs** | 81.8 µs &nbsp; (3.3×)   | 41.6 ms &nbsp; (~1 660×) |
+| `drivers/*/*.c` (4 314)   | **700 µs**  | 1.70 ms &nbsp; (2.4×)   | 40.9 ms &nbsp; (58×)     |
+| `drivers/**/*.c` (22 107) | **8.23 ms** | 16.4 ms &nbsp; (2.0×)   | 41.4 ms &nbsp; (5.0×)    |
+| `net/**/*.c` (1 475)      | **230 µs**  | 597 µs &nbsp; (2.6×)    | 40.2 ms &nbsp; (175×)    |
+| `net/**/*.{c,h}` (1 747)  | **266 µs**  | n/a (no brace support)  | 40.3 ms &nbsp; (151×)    |
+| `**/*.c` (36 685)         | **24.2 ms** | 49.2 ms &nbsp; (2.0×)   | 43.8 ms &nbsp; (1.8×)    |
+
+> Hardware / config: Linux x86_64 Intel(R) Core(TM) i7-14700K, 14 cores (28vcpu), ReleaseFast static build via `zig 0.16.0` & `cargo bench` via criterion
 
 ## Naming
 
