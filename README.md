@@ -13,7 +13,7 @@ zlob is a C library, zig library and a rust crate that makes globbing fast. Why?
 In short libc's glob is unusable, so I wanted to make a library that is 100% POSIX and glibc compatible, that supports all the features modern glob implementation needed and is faster than glibc. So here is zlob, a little bit about it:
 
 - 100% POSIX and glibc compatible with all the flags and features supported
-- Faster than glibc up to 10x in specific cases and generally 1.2-1.7x faster. See [benchmarks](##Benchmarks)
+- Faster than glibc up to 10x in specific cases and generally 1.2-1.7x faster. See [benchmarks](#Benchmarks)
 - Faster than rust's, node's, bun's, python's implementation by far
 - In addition to standard unix wildcard syntax supports `**` recursive patterns, braces `*.{c,h}`, `gitignore` and bash `extglob` patterns
 - Supports `.gitignore` out of the box
