@@ -112,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Or match against an in-memory path list — no FS I/O
+    // or match against an in-memory path list: no allocations, no io
     const paths = [_][]const u8{
         "src/lib.zig",
         "src/main.zig",
@@ -128,7 +128,9 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-zlob is also shared as an official rust crate, find it on [crates.io](https://crates.io/crates/zlob) and read the [rust docs](https://docs.rs/zlob/1.4.2/zlob/)
+## Rust
+
+zlob is also shared as an officially supported rust crate, find it on [crates.io](https://crates.io/crates/zlob) and read the [rust docs](https://docs.rs/zlob/1.4.2/zlob/)
 
 ```rust
 use zlob::{zlob, zlob_match_paths, ZlobFlags};
@@ -149,7 +151,9 @@ fn main() -> Result<(), zlob::ZlobError> {
 
     Ok(())
 }
+```
 
+## Flags
 
 Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves like a modern glob implementation without sorting the output results, and enabling all the modern features that you might need. Additional flags that might be used are:
 
@@ -218,9 +222,6 @@ zlobfree(&pzlob);
 
 This allows a very fast SIMD processing of the paths and supports **NOT ALL** the features of the standard FS globbing except `ALTDIRFUNC` which is not applicable because this mode is done to avoid using ALTDIRFUNC all along. Make sure that if you will use `ZLOB_TILDE` flag the paths input have to be absolute. Other flags like nomagic might not work as expected because they generally make very little sense.
 
-## Rust
-
-zlob is also shared as a rust crate you can find it on [crates.io](https://crates.io/crates/zlob) rust version is supported by this project authors and published automatically on every zlob release. It also requires zig toolchain to compile.
 
 ## Compilation
 
@@ -238,18 +239,7 @@ I know it might be annoying to install zig but zig's linker is currently a decen
 
 Numbers below come from the criterion harness in `rust/benches/glob_comparison.rs`, comparing the `zlob` crate against the `glob` crate and the `globset` crate (paired with `walkdir` where it needs to walk the FS). The fixture is a Linux kernel checkout: **93,638 files / 6,157 directories / 36,685 `.c` files / 99 symlinks**.
 
-Reproduce with:
-
-```bash
-# clones a shallow Linux kernel into /tmp/linux if no path is given
-scripts/run-benchmarks.sh [/path/to/linux]
-```
-
-The script just sets `REPO=` and runs `cargo bench --bench glob_comparison`. The harness prints a match-count parity table at startup so you can see whether each library is doing the same amount of work.
-
-### Filesystem walk (pattern + traversal)
-
-Median wall time, lower is better.
+Here is a benchmark. Median wall time, lower is better.
 
 | Pattern (matches)         | zlob        | glob crate              | globset + walkdir        |
 | ------------------------- | ----------: | ----------------------: | -----------------------: |
@@ -263,6 +253,15 @@ Median wall time, lower is better.
 | `**/*.c` (36 685)         | **24.2 ms** | 49.2 ms &nbsp; (2.0×)   | 43.8 ms &nbsp; (1.8×)    |
 
 > Hardware / config: Linux x86_64 Intel(R) Core(TM) i7-14700K, 14 cores (28vcpu), ReleaseFast static build via `zig 0.16.0` & `cargo bench` via criterion
+
+Reproduce with:
+
+```bash
+# clones a shallow Linux kernel into /tmp/linux if no path is given
+scripts/run-benchmarks.sh [/path/to/linux]
+```
+
+The script just sets `REPO=` and runs `cargo bench --bench glob_comparison`. The harness prints a match-count parity table at startup so you can see whether each library is doing the same amount of work.
 
 ## Naming
 
