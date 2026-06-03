@@ -151,10 +151,89 @@ pub const WalkerConfig = struct {
     /// If true and a directory cannot be opened, the walk aborts.
     abort_on_error: bool = false,
 
+    /// Follow directory symlinks during recursion.
+    follow_symlinks: bool = false,
+
     /// Filesystem provider for ALTDIRFUNC support.
     /// When set with valid callbacks, uses custom directory functions instead of real filesystem.
     fs: AltFs = AltFs.real_fs,
 };
+
+/// Identifies a filesystem object across remounts within a single walk.
+/// Used to break symlink cycles when follow_symlinks is enabled.
+pub const InodeKey = struct { dev: u64, ino: u64 };
+
+const has_libc_for_stat = builtin.link_libc and (builtin.os.tag == .macos or
+    builtin.os.tag == .freebsd or builtin.os.tag == .netbsd or
+    builtin.os.tag == .openbsd or builtin.os.tag == .dragonfly or
+    builtin.os.tag == .linux);
+
+// File-mode masks (POSIX) for stat.mode dir-check.
+const S_IFMT: u32 = 0o170000;
+const S_IFDIR: u32 = 0o040000;
+
+inline fn keyFromCStat(st: std.c.Stat) InodeKey {
+    return .{
+        .dev = @bitCast(@as(i64, @intCast(st.dev))),
+        .ino = @intCast(st.ino),
+    };
+}
+
+inline fn isDirMode(mode: anytype) bool {
+    return (@as(u32, @intCast(mode)) & S_IFMT) == S_IFDIR;
+}
+
+// On Linux, std 0.16 dropped the `Stat`/`fstat`/`fstatat` wrappers; `statx`
+// is the only raw stat syscall left. We only need (dev, ino) and the file
+// type, so request just TYPE | INO.
+const linux_statx_mask = if (builtin.os.tag == .linux)
+    std.os.linux.STATX{ .TYPE = true, .INO = true }
+else
+    undefined;
+
+inline fn keyFromStatx(stx: std.os.linux.Statx) InodeKey {
+    // Recombine the split major/minor into a single device identifier. Any
+    // injective combination works — this is only ever compared for equality
+    // within one walk to break cycles.
+    const dev = (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor);
+    return .{ .dev = dev, .ino = stx.ino };
+}
+
+/// Best-effort fstat on an open dir fd to obtain (dev, ino). Returns null
+/// when libc is unavailable on the target or the stat call fails.
+fn statFd(fd: std.posix.fd_t) ?InodeKey {
+    if (builtin.os.tag == .linux) {
+        var stx: std.os.linux.Statx = undefined;
+        const rc = std.os.linux.statx(fd, "", std.os.linux.AT.EMPTY_PATH, linux_statx_mask, &stx);
+        if (std.os.linux.errno(rc) != .SUCCESS) return null;
+        return keyFromStatx(stx);
+    }
+    if (!has_libc_for_stat) return null;
+    var st: std.c.Stat = undefined;
+    if (std.c.fstat(fd, &st) != 0) return null;
+    return keyFromCStat(st);
+}
+
+/// Resolved symlink target via stat(FOLLOW).
+const ResolvedSym = struct { is_dir: bool, key: InodeKey };
+
+/// Best-effort stat(FOLLOW) on a symlink. Used as a pre-flight before
+/// openat() so we can skip non-dir targets and detected cycles without
+/// paying for the open+close round-trip.
+fn statAtFollow(dir_fd: std.posix.fd_t, name_z: [*:0]const u8) ?ResolvedSym {
+    if (builtin.os.tag == .linux) {
+        var stx: std.os.linux.Statx = undefined;
+        // flags = 0 → follow symlinks (no AT.SYMLINK_NOFOLLOW).
+        const rc = std.os.linux.statx(dir_fd, name_z, 0, linux_statx_mask, &stx);
+        if (std.os.linux.errno(rc) != .SUCCESS) return null;
+        return .{ .is_dir = isDirMode(stx.mode), .key = keyFromStatx(stx) };
+    }
+
+    if (!has_libc_for_stat) return null;
+    var st: std.c.Stat = undefined;
+    if (std.c.fstatat(dir_fd, name_z, &st, 0) != 0) return null;
+    return .{ .is_dir = isDirMode(st.mode), .key = keyFromCStat(st) };
+}
 
 inline fn shouldSkipEntry(name: []const u8, hidden: HiddenConfig) bool {
     if (name.len == 0) return true;
@@ -208,6 +287,11 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
     // Initial capacity 64, which covers most real-world directory trees without
     // reallocation. Grows as needed for pathological cases (huge flat dirs).
     dir_stack: std.ArrayList(DirEntry),
+
+    // Cycle-detection set for follow_symlinks. Populated lazily — only when
+    // a symlink-to-dir is descended into. Empty (and free) when follow_symlinks
+    // is disabled.
+    visited: std.AutoHashMapUnmanaged(InodeKey, void),
 
     // Current directory being processed
     current_fd: posix.fd_t,
@@ -264,10 +348,20 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             return err;
         };
 
+        var visited: std.AutoHashMapUnmanaged(InodeKey, void) = .empty;
+        if (config.follow_symlinks) {
+            visited.ensureTotalCapacity(allocator, 256) catch {};
+            // Seed with the start dir so a symlink pointing back to it is rejected.
+            if (statFd(start_fd)) |key| {
+                visited.put(allocator, key, {}) catch {};
+            }
+        }
+
         return RecursiveGetdents64Walker{
             .allocator = allocator,
             .config = config,
             .dir_stack = dir_stack,
+            .visited = visited,
             .current_fd = start_fd,
             .current_depth = 0,
             .getdents_buffer = buffer,
@@ -310,6 +404,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         }
 
         self.dir_stack.deinit(self.allocator);
+        self.visited.deinit(self.allocator);
 
         if (self.getdents_buffer.len > 0) {
             self.allocator.free(self.getdents_buffer);
@@ -395,8 +490,14 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
         const rel_path = self.path_buffer[0..self.path_len];
 
-        // If it's a directory, check filter and possibly push to stack for later processing
-        if (kind == .directory and self.current_depth < self.config.max_depth) {
+        // Decide whether to descend into this entry.
+        // - .directory: always considered (subject to dir_filter)
+        // - .sym_link: only when follow_symlinks is set, and only after we
+        //   confirm via fstatat that it resolves to a directory.
+        const may_descend = kind == .directory or
+            (self.config.follow_symlinks and kind == .sym_link);
+
+        if (may_descend and self.current_depth < self.config.max_depth) {
             // Check dir_filter before deciding to descend
             const should_descend = if (self.config.dir_filter) |filter|
                 filter.filterDir(rel_path, name)
@@ -408,26 +509,54 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                 @memcpy(name_z[0..name.len], name);
                 name_z[name.len] = 0;
 
-                if (posix.openat(self.current_fd, name_z[0..name.len :0], .{
-                    .ACCMODE = .RDONLY,
-                    .DIRECTORY = true,
-                    .CLOEXEC = true,
-                }, 0)) |subdir_fd| {
-                    // Push to stack - will be processed after current dir is exhausted
-                    // Save the actual path content since sibling dirs will overwrite path_buffer
-                    var entry: DirEntry = .{
-                        .fd = subdir_fd,
-                        .depth = self.current_depth + 1,
-                        .path_len = @intCast(self.path_len),
-                        .path_content = undefined,
-                    };
-                    const copy_len = @min(self.path_len, 256);
-                    @memcpy(entry.path_content[0..copy_len], self.path_buffer[0..copy_len]);
-                    self.dir_stack.append(self.allocator, entry) catch {
-                        // OOM — close the fd we just opened to avoid leak
-                        _ = linux.close(subdir_fd);
-                    };
-                } else |_| {}
+                // For symlink entries under follow mode: pre-flight
+                // fstatat(FOLLOW) to confirm dir + cycle BEFORE openat.
+                // Skips wasted open+close for non-dir targets and cycles —
+                // big win on symlink-heavy trees (node_modules, bazel-out).
+                const skip_descend: bool = blk: {
+                    if (kind != .sym_link) break :blk false;
+                    const res = statAtFollow(self.current_fd, name_z[0..name.len :0]) orelse break :blk true;
+                    if (!res.is_dir) break :blk true;
+                    const gop = self.visited.getOrPut(self.allocator, res.key) catch break :blk true;
+                    break :blk gop.found_existing;
+                };
+
+                if (!skip_descend) {
+                    if (posix.openat(self.current_fd, name_z[0..name.len :0], .{
+                        .ACCMODE = .RDONLY,
+                        .DIRECTORY = true,
+                        .CLOEXEC = true,
+                    }, 0)) |subdir_fd| {
+                        // Real-directory cycle bookkeeping under follow mode.
+                        // Symlinks already recorded via pre-flight above.
+                        var cycle = false;
+                        if (self.config.follow_symlinks and kind == .directory) {
+                            if (statFd(subdir_fd)) |key| {
+                                if (self.visited.getOrPut(self.allocator, key)) |gop| {
+                                    if (gop.found_existing) cycle = true;
+                                } else |_| {}
+                            }
+                        }
+
+                        if (cycle) {
+                            _ = linux.close(subdir_fd);
+                        } else {
+                            // Push to stack - processed after current dir is exhausted.
+                            // Save path content; sibling dirs overwrite path_buffer.
+                            var entry: DirEntry = .{
+                                .fd = subdir_fd,
+                                .depth = self.current_depth + 1,
+                                .path_len = @intCast(self.path_len),
+                                .path_content = undefined,
+                            };
+                            const copy_len = @min(self.path_len, 256);
+                            @memcpy(entry.path_content[0..copy_len], self.path_buffer[0..copy_len]);
+                            self.dir_stack.append(self.allocator, entry) catch {
+                                _ = linux.close(subdir_fd);
+                            };
+                        }
+                    } else |_| {}
+                }
             }
         }
 
@@ -452,6 +581,10 @@ const StdFsWalker = struct {
 
     // Stack of directories to process (LIFO order)
     dir_stack: std.ArrayList(StackEntry),
+
+    // (dev, ino) bookkeeping for follow_symlinks cycle detection.
+    // Empty when follow_symlinks is disabled.
+    visited: std.AutoHashMapUnmanaged(InodeKey, void),
 
     // Current directory being iterated
     current_dir: ?std.Io.Dir,
@@ -502,11 +635,20 @@ const StdFsWalker = struct {
             dir_stack.ensureTotalCapacity(allocator, 64) catch {};
         }
 
+        var visited: std.AutoHashMapUnmanaged(InodeKey, void) = .empty;
+        if (config.follow_symlinks) {
+            visited.ensureTotalCapacity(allocator, 256) catch {};
+            if (statFd(dir.handle)) |key| {
+                visited.put(allocator, key, {}) catch {};
+            }
+        }
+
         return StdFsWalker{
             .allocator = allocator,
             .io = io,
             .config = config,
             .dir_stack = dir_stack,
+            .visited = visited,
             .current_dir = dir,
             .reader = .{
                 .dir = dir,
@@ -560,6 +702,7 @@ const StdFsWalker = struct {
             }
         }
         self.dir_stack.deinit(self.allocator);
+        self.visited.deinit(self.allocator);
     }
 
     pub fn next(self: *StdFsWalker) !?Entry {
@@ -589,33 +732,73 @@ const StdFsWalker = struct {
                 const rel_path = self.path_buffer[0..self.path_len];
                 const kind = entry.kind;
 
-                if (kind == .directory and self.current_depth < self.config.max_depth) {
+                const may_descend = kind == .directory or
+                    (self.config.follow_symlinks and kind == .sym_link);
+
+                if (may_descend and self.current_depth < self.config.max_depth) {
                     // Check dir_filter before deciding to descend
                     const should_descend = if (self.config.dir_filter) |filter|
                         filter.filterDir(rel_path, entry.name)
                     else
                         true;
 
-                    if (should_descend) {
-                        if (self.current_dir.?.openDir(io, entry.name, .{ .iterate = true })) |subdir| {
-                            // Allocate path prefix - only what we need
-                            const path_copy = self.allocator.alloc(u8, self.path_len) catch {
-                                var sd = subdir;
-                                sd.close(io);
-                                continue;
-                            };
-                            @memcpy(path_copy, self.path_buffer[0..self.path_len]);
+                    // For symlink entries under follow mode: pre-flight
+                    // fstatat(FOLLOW) to confirm dir + cycle BEFORE openDir.
+                    // Skips wasted open+close for non-dir targets and cycles.
+                    var skip_descend = false;
+                    if (should_descend and kind == .sym_link and entry.name.len < 256) {
+                        var name_z: [256]u8 = undefined;
+                        @memcpy(name_z[0..entry.name.len], entry.name);
+                        name_z[entry.name.len] = 0;
+                        const name_zp: [*:0]const u8 = @ptrCast(&name_z);
+                        if (statAtFollow(self.current_dir.?.handle, name_zp)) |res| {
+                            if (!res.is_dir) {
+                                skip_descend = true;
+                            } else {
+                                if (self.visited.getOrPut(self.allocator, res.key)) |gop| {
+                                    if (gop.found_existing) skip_descend = true;
+                                } else |_| skip_descend = true;
+                            }
+                        } else {
+                            skip_descend = true;
+                        }
+                    } else if (should_descend and kind == .sym_link) {
+                        // Name too long for stack buffer — bail safely.
+                        skip_descend = true;
+                    }
 
-                            self.dir_stack.append(self.allocator, .{
-                                .dir = subdir,
-                                .depth = self.current_depth + 1,
-                                .path_len = self.path_len,
-                                .path_prefix = path_copy,
-                            }) catch {
-                                self.allocator.free(path_copy);
-                                var sd = subdir;
-                                sd.close(io);
-                            };
+                    if (should_descend and !skip_descend) {
+                        if (self.current_dir.?.openDir(io, entry.name, .{ .iterate = true })) |subdir| {
+                            var sub = subdir;
+                            // Real-directory cycle bookkeeping under follow mode.
+                            // Symlinks already recorded via pre-flight above.
+                            var cycle = false;
+                            if (self.config.follow_symlinks and kind == .directory) {
+                                if (statFd(sub.handle)) |key| {
+                                    if (self.visited.getOrPut(self.allocator, key)) |gop| {
+                                        if (gop.found_existing) cycle = true;
+                                    } else |_| {}
+                                }
+                            }
+                            if (cycle) {
+                                sub.close(io);
+                            } else {
+                                const path_copy = self.allocator.alloc(u8, self.path_len) catch {
+                                    sub.close(io);
+                                    continue;
+                                };
+                                @memcpy(path_copy, self.path_buffer[0..self.path_len]);
+
+                                self.dir_stack.append(self.allocator, .{
+                                    .dir = sub,
+                                    .depth = self.current_depth + 1,
+                                    .path_len = self.path_len,
+                                    .path_prefix = path_copy,
+                                }) catch {
+                                    self.allocator.free(path_copy);
+                                    sub.close(io);
+                                };
+                            }
                         } else |_| {}
                     }
                 }

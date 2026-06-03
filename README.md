@@ -41,16 +41,16 @@ One of my favourite optimizations for this project is patterns like `./**/*.{c,r
 
 ## Benchmarks
 
-Numbers below come from the criterion harness in `rust/benches/glob_comparison.rs`, comparing the `zlob` crate against the `glob` crate and the `globset` crate (paired with `walkdir` where it needs to walk the FS). The fixture is a Linux kernel checkout: **92,989 files / 6,130 directories / 36,550 `.c` files**.
+Numbers below come from the criterion harness in `rust/benches/glob_comparison.rs`, comparing the `zlob` crate against the `glob` crate and the `globset` crate (paired with `walkdir` where it needs to walk the FS). The fixture is a Linux kernel checkout: **93,638 files / 6,157 directories / 36,685 `.c` files / 99 symlinks**.
 
 Reproduce with:
 
 ```bash
-cd rust
-REPO=/path/to/linux cargo bench --bench glob_comparison
+# clones a shallow Linux kernel into /tmp/linux if no path is given
+scripts/run-benchmarks.sh [/path/to/linux]
 ```
 
-The harness prints a match-count parity table at startup so you can see whether each library is doing the same amount of work.
+The script just sets `REPO=` and runs `cargo bench --bench glob_comparison`. The harness prints a match-count parity table at startup so you can see whether each library is doing the same amount of work.
 
 ### Filesystem walk (pattern + traversal)
 
@@ -58,16 +58,14 @@ Median wall time, lower is better. Speedup is **vs zlob**.
 
 | Pattern (matches)         | zlob        | glob crate              | globset + walkdir        |
 | ------------------------- | ----------: | ----------------------: | -----------------------: |
-| `fs/*.c` (73)             | **16.7 µs** | 56.2 µs &nbsp; (3.4×)   | 47.2 ms &nbsp; (~2 800×) |
-| `*/Makefile` (21)         | **13.1 µs** | 49.7 µs &nbsp; (3.8×)   | 46.4 ms &nbsp; (~3 540×) |
-| `[fk]*/*.c` (179)         | **40.3 µs** | 163 µs &nbsp; (4.0×)    | 46.8 ms &nbsp; (~1 160×) |
-| `drivers/*/*.c` (4 318)   | **988 µs**  | 2.84 ms &nbsp; (2.9×)   | 49.3 ms &nbsp; (50×)     |
-| `drivers/**/*.c` (22 058) | **9.50 ms** | 22.6 ms &nbsp; (2.4×)   | 50.2 ms &nbsp; (5.3×)    |
-| `net/**/*.c` (1 537)      | **384 µs**  | 1.05 ms &nbsp; (2.7×)   | 48.3 ms &nbsp; (126×)    |
-| `net/**/*.{c,h}` (1 817)  | **408 µs**  | n/a (no brace support)  | 47.7 ms &nbsp; (117×)    |
-| `**/*.c` (67889)      | **24.1 ms** | 19.33 s &nbsp; (~800×¹)  | 50.6 ms &nbsp; (2.1×)    |
-
-¹ The `**/*.c` row is **not a fair speed comparison**: the kernel tree contains symlinks under `scripts/dtc/include-prefixes/{arch,arm,arm64,…}` that point back into directories which already contain `.c` files. zlob doesn't follow symlinks by design, glob crate doesn't have an option to configure this behavior.
+| `fs/*.c` (73)             | **9.84 µs** | 31.9 µs &nbsp; (3.2×)   | 40.3 ms &nbsp; (~4 100×) |
+| `*/Makefile` (21)         | **11.4 µs** | 39.1 µs &nbsp; (3.4×)   | 40.4 ms &nbsp; (~3 550×) |
+| `[fk]*/*.c` (179)         | **25.0 µs** | 81.8 µs &nbsp; (3.3×)   | 41.6 ms &nbsp; (~1 660×) |
+| `drivers/*/*.c` (4 314)   | **700 µs**  | 1.70 ms &nbsp; (2.4×)   | 40.9 ms &nbsp; (58×)     |
+| `drivers/**/*.c` (22 107) | **8.23 ms** | 16.4 ms &nbsp; (2.0×)   | 41.4 ms &nbsp; (5.0×)    |
+| `net/**/*.c` (1 475)      | **230 µs**  | 597 µs &nbsp; (2.6×)    | 40.2 ms &nbsp; (175×)    |
+| `net/**/*.{c,h}` (1 747)  | **266 µs**  | n/a (no brace support)  | 40.3 ms &nbsp; (151×)    |
+| `**/*.c` (36 685)         | **24.2 ms** | 49.2 ms &nbsp; (2.0×)   | 43.8 ms &nbsp; (1.8×)    |
 
 > Hardware / config: Linux x86_64, ReleaseFast static build via `zig 0.16.0` & `cargo bench` via criterion
 
@@ -132,6 +130,7 @@ Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves l
 - `ZLOB_PERIOD` - Allows to match hidden files using `*` and `?` patterns, by default these patterns do not match hidden files
 - `ZLOB_EXTGLOB` - enable support for bash extglob patterns like `@(pattern-list)`, `!(pattern-list)`, `?(pattern-list)`, `*(pattern-list)` and `+(pattern-list)`
 
+- `ZLOB_FOLLOW_SYMLINKS` - follow symlinked directories when recursing with `**` (see [Symlinks and `**`](#symlinks-and-) below)
 - `ZLOB_NOCHECK` - if no matches found return the pattern itself as the only result
 - `ZLOB_NOMAGIC` - if the pattern contains no special characters return the pattern itself as the only result
 - `ZLOB_NOESCAPE` - disable backslash escaping
@@ -142,6 +141,26 @@ Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves l
 - `ZLOB_DOOFFS` - reserve `zlo_offs` slots in the output buffer for custom use, these slots will be filled with `NULL` and the actual results will start from `zlo_pathv[zlo_offs]`
 
 In addition to this zlob exposes `zlob_at` function that will open specific directory instead of requiring to manipulate CWD
+
+## Symlinks and `**`
+
+By default `**` does **not** descend into symlinked directories. This matches
+bash `globstar`, zsh `**`, and `walkdir` — the dominant `**` implementations.
+Symlinks are still matched by name like any other entry; only the recursion
+stops at them. POSIX `glob(3)` has no `**` at all, so there is no "glibc
+default" to diverge from here.
+
+Set `ZLOB_FOLLOW_SYMLINKS` to descend into symlinked directories. zlob keeps a
+`(dev, ino)` visited-set so it **never loops** and **never emits the same
+physical file twice**: each real directory is traversed at most once for the
+whole walk.
+
+This is a deliberate difference from `glob` crate / `nu-glob`, which follow
+symlinks with no cycle tracking. On trees where one directory is reachable
+through several symlinks (e.g. a Bazel `bazel-bin` / `bazel-out` /
+`bazel-<workspace>` layout, all pointing into the same cache), those tools emit
+every aliased path — inflating their count several-fold and looping until
+`PATH_MAX` on a true cycle. zlob returns the de-duplicated set instead.
 
 ## MatchPaths mode
 

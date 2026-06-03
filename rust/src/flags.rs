@@ -109,6 +109,12 @@ bitflags! {
         /// ```
         const EXTGLOB = ffi::ZLOB_EXTGLOB;
 
+        /// Descend into symlinked dirs when recursing with `**`. Default off
+        /// (matches bash `globstar`/zsh/`walkdir`; symlinks still match by
+        /// name). A `(dev, ino)` visited-set breaks cycles, so each physical
+        /// dir is walked once — never loops, never double-emits a file.
+        const FOLLOW_SYMLINKS = ffi::ZLOB_FOLLOW_SYMLINKS;
+
         /// Recommended modern defaults for globbing.
         ///
         /// Enables: BRACE, DOUBLESTAR_RECURSIVE, NOSORT, TILDE, TILDE_CHECK
@@ -147,6 +153,7 @@ mod tests {
         assert_eq!(ZlobFlags::GITIGNORE.bits(), 1 << 24);
         assert_eq!(ZlobFlags::DOUBLESTAR_RECURSIVE.bits(), 1 << 25);
         assert_eq!(ZlobFlags::EXTGLOB.bits(), 1 << 26);
+        assert_eq!(ZlobFlags::FOLLOW_SYMLINKS.bits(), 1 << 27);
     }
 
     #[test]

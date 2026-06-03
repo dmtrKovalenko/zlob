@@ -90,6 +90,11 @@ struct PatternSpec {
     supports_brace: bool,
     /// FS-walk sample count; smaller for the heavy ones.
     fs_samples: usize,
+    /// Also benchmark zlob with `FOLLOW_SYMLINKS` for this pattern. Only
+    /// meaningful for recursive `**` patterns over trees with directory
+    /// symlinks (e.g. the kernel's `scripts/dtc/include-prefixes/*`), where
+    /// following links changes both the result set and the walk cost.
+    bench_follow: bool,
 }
 
 const PATTERNS: &[PatternSpec] = &[
@@ -98,48 +103,56 @@ const PATTERNS: &[PatternSpec] = &[
         pattern: "fs/*.c",
         supports_brace: false,
         fs_samples: 100,
+        bench_follow: false,
     },
     PatternSpec {
         label: "top_makefile", // */Makefile        top-level makefiles
         pattern: "*/Makefile",
         supports_brace: false,
         fs_samples: 100,
+        bench_follow: false,
     },
     PatternSpec {
         label: "bracket_star_c", // [fk]*/*.c
         pattern: "[fk]*/*.c",
         supports_brace: false,
         fs_samples: 60,
+        bench_follow: false,
     },
     PatternSpec {
         label: "drivers_star_c", // drivers/*/*.c
         pattern: "drivers/*/*.c",
         supports_brace: false,
         fs_samples: 40,
+        bench_follow: false,
     },
     PatternSpec {
         label: "drivers_recursive_c", // drivers/**/*.c   STRESS: 20k+ matches (symlink-free)
         pattern: "drivers/**/*.c",
         supports_brace: false,
         fs_samples: 15,
+        bench_follow: false,
     },
     PatternSpec {
         label: "net_recursive_c", // net/**/*.c       symlink-free recursive subtree
         pattern: "net/**/*.c",
         supports_brace: false,
         fs_samples: 30,
+        bench_follow: false,
     },
     PatternSpec {
         label: "net_brace_c_h", // net/**/*.{c,h}   symlink-free recursive + brace
         pattern: "net/**/*.{c,h}",
         supports_brace: true,
         fs_samples: 30,
+        bench_follow: false,
     },
     PatternSpec {
         label: "all_recursive_c", // **/*.c           full tree - WARNING: hits symlink loops in `glob` crate
         pattern: "**/*.c",
         supports_brace: false,
         fs_samples: 10,
+        bench_follow: true,
     },
 ];
 
@@ -164,6 +177,22 @@ fn bench_fs_walk(c: &mut Criterion) {
                 black_box(r.as_ref().map(|m| m.len()).unwrap_or(0))
             });
         });
+
+        // ----- zlob + FOLLOW_SYMLINKS (only where symlinks matter) -----
+        if spec.bench_follow {
+            group.bench_with_input(
+                BenchmarkId::new("zlob_follow", spec.label),
+                spec,
+                |b, spec| {
+                    let flags = ZlobFlags::RECOMMENDED | ZlobFlags::FOLLOW_SYMLINKS;
+                    b.iter(|| {
+                        let r =
+                            zlob_at(root.to_str().unwrap(), spec.pattern, flags).expect("zlob_at");
+                        black_box(r.as_ref().map(|m| m.len()).unwrap_or(0))
+                    });
+                },
+            );
+        }
 
         // ----- glob crate (skip if pattern uses braces) -----
         if !spec.supports_brace {
@@ -292,8 +321,8 @@ fn print_parity(c: &mut Criterion) {
 
     eprintln!("\n[bench] match-count parity (FS walk / path-match):");
     eprintln!(
-        "{:<22} {:>10} {:>10} {:>10} | {:>10} {:>10} {:>10}",
-        "pattern", "zlob/fs", "glob/fs", "gset/fs", "zlob/p", "glob/p", "gset/p"
+        "{:<22} {:>10} {:>10} {:>10} {:>12} | {:>10} {:>10} {:>10}",
+        "pattern", "zlob/fs", "glob/fs", "gset/fs", "zlob+follow", "zlob/p", "glob/p", "gset/p"
     );
 
     let original_cwd = env::current_dir().ok();
@@ -305,6 +334,22 @@ fn print_parity(c: &mut Criterion) {
             .flatten()
             .map(|m| m.len())
             .unwrap_or(0);
+
+        // Unique-file count when following symlinks (deduped via (dev,ino)).
+        let zlob_follow_fs = if spec.bench_follow {
+            zlob_at(
+                root.to_str().unwrap(),
+                spec.pattern,
+                ZlobFlags::RECOMMENDED | ZlobFlags::FOLLOW_SYMLINKS,
+            )
+            .ok()
+            .flatten()
+            .map(|m| m.len())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".into())
+        } else {
+            "-".into()
+        };
 
         let glob_fs = if spec.supports_brace {
             None
@@ -359,11 +404,12 @@ fn print_parity(c: &mut Criterion) {
         };
 
         eprintln!(
-            "{:<22} {:>10} {:>10} {:>10} | {:>10} {:>10} {:>10}",
+            "{:<22} {:>10} {:>10} {:>10} {:>12} | {:>10} {:>10} {:>10}",
             spec.label,
             zlob_fs,
             glob_fs.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
             gset_fs,
+            zlob_follow_fs,
             zlob_p,
             glob_p.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
             gset_p

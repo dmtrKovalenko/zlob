@@ -38,6 +38,7 @@ pub const ZLOB_TILDE_CHECK = c.ZLOB_TILDE_CHECK;
 pub const ZLOB_GITIGNORE = c.ZLOB_GITIGNORE;
 pub const ZLOB_DOUBLESTAR_RECURSIVE = c.ZLOB_DOUBLESTAR_RECURSIVE;
 pub const ZLOB_EXTGLOB = c.ZLOB_EXTGLOB;
+pub const ZLOB_FOLLOW_SYMLINKS = c.ZLOB_FOLLOW_SYMLINKS;
 pub const ZLOB_RECOMMENDED = c.ZLOB_RECOMMENDED;
 
 // Error codes
@@ -80,9 +81,10 @@ pub const ZlobFlags = packed struct(u32) {
     gitignore: bool = false,
     doublestar_recursive: bool = false,
     extglob: bool = false,
+    follow_symlinks: bool = false,
 
     // fill the rest of 32 bits
-    _padding: u5 = 0,
+    _padding: u4 = 0,
 
     pub fn recommended() ZlobFlags {
         return ZlobFlags{
@@ -140,6 +142,7 @@ pub const ZlobFlags = packed struct(u32) {
         std.debug.assert((ZlobFlags{ .gitignore = true }).toU32() == ZLOB_GITIGNORE);
         std.debug.assert((ZlobFlags{ .doublestar_recursive = true }).toU32() == ZLOB_DOUBLESTAR_RECURSIVE);
         std.debug.assert((ZlobFlags{ .extglob = true }).toU32() == ZLOB_EXTGLOB);
+        std.debug.assert((ZlobFlags{ .follow_symlinks = true }).toU32() == ZLOB_FOLLOW_SYMLINKS);
     }
 };
 

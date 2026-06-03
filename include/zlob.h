@@ -124,6 +124,11 @@ typedef struct {
 #define ZLOB_EXTGLOB                                                           \
   (1 << 26) /* Enable extended glob patterns: ?(pat) *(pat) +(pat) @(pat)      \
                !(pat) */
+/* Descend into symlinked dirs when recursing with **. Default off (matches
+ * bash globstar/zsh/walkdir; symlinks still match by name, recursion stops at
+ * them). A (dev,ino) visited-set breaks cycles, so each physical dir is walked
+ * once — never loops, never double-emits a file. */
+#define ZLOB_FOLLOW_SYMLINKS (1 << 27)
 
 /* Recommended modern defaults for globbing:
  * - BRACE: Brace expansion {a,b,c}
