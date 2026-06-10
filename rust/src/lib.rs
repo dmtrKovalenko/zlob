@@ -147,6 +147,7 @@ mod indicies;
 mod match_paths;
 mod pattern;
 mod slices;
+pub mod walk;
 mod zlob;
 
 // Raw FFI bindings - use stub for docs.rs, generated bindings otherwise

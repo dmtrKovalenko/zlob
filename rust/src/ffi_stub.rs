@@ -218,3 +218,64 @@ unsafe extern "C" {
         out: *mut zlob_indices_t,
     ) -> c_int;
 }
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zlob_walk_options_t {
+    pub flags: u32,
+    pub meta_mask: u32,
+    pub threads: u16,
+    pub max_depth: u16,
+    pub errfunc: Option<unsafe extern "C" fn(epath: *const c_char, eerrno: c_int) -> c_int>,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zlob_walk_entry_t {
+    pub path: *const c_char,
+    pub path_len: usize,
+    pub rel_off: u32,
+    pub basename_off: u32,
+    pub kind: u8,
+    pub depth: u16,
+    pub meta_valid: u32,
+    pub size: u64,
+    pub mtime_ns: i64,
+    pub atime_ns: i64,
+    pub ctime_ns: i64,
+    pub btime_ns: i64,
+    pub inode: u64,
+    pub nlink: u32,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zlob_walk_result_t {
+    pub entries: *mut zlob_walk_entry_t,
+    pub count: usize,
+    pub _storage: *mut core::ffi::c_void,
+}
+
+pub type zlob_walk_cb = Option<
+    unsafe extern "C" fn(entry: *const zlob_walk_entry_t, ctx: *mut core::ffi::c_void) -> c_int,
+>;
+
+unsafe extern "C" {
+    pub fn zlob_walk(
+        root: *const c_char,
+        options: *const zlob_walk_options_t,
+        cb: zlob_walk_cb,
+        ctx: *mut core::ffi::c_void,
+    ) -> c_int;
+
+    pub fn zlob_walk_collect(
+        root: *const c_char,
+        options: *const zlob_walk_options_t,
+        out: *mut zlob_walk_result_t,
+    ) -> c_int;
+
+    pub fn zlob_walk_result_free(result: *mut zlob_walk_result_t);
+}

@@ -5,6 +5,15 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <sys/stat.h>
+
+static int zlob_test_count_cb(const zlob_walk_entry_t *e, void *ctx) {
+  (void)e;
+  size_t *n = (size_t *)ctx;
+  (*n)++;
+  return 0;
+}
+
 #define TEST(name) printf("  [TEST] %s\n", name)
 #define PASS() printf("    ✓ PASS\n")
 #define FAIL(msg)                                                              \
@@ -354,6 +363,113 @@ int main(void) {
       FAIL("Expected ZLOB_NOMATCH");
     printf("    Correctly returned ZLOB_NOMATCH\n");
     PASS();
+  }
+
+  // zlob_walk() / zlob_walk_collect() - Parallel file walker
+  printf("zlob_walk() - Parallel File Walker\n");
+
+  char walk_root[] = "/tmp/zlob_walk_capi_XXXXXX";
+  if (mkdtemp(walk_root) == NULL)
+    FAIL("mkdtemp failed");
+
+  {
+    char path[512];
+    FILE *f;
+
+    snprintf(path, sizeof(path), "%s/sub", walk_root);
+    mkdir(path, 0755);
+
+    snprintf(path, sizeof(path), "%s/.gitignore", walk_root);
+    f = fopen(path, "w");
+    fputs("*.log\n", f);
+    fclose(f);
+
+    snprintf(path, sizeof(path), "%s/hello.txt", walk_root);
+    f = fopen(path, "w");
+    fputs("hello", f); /* 5 bytes */
+    fclose(f);
+
+    snprintf(path, sizeof(path), "%s/noise.log", walk_root);
+    f = fopen(path, "w");
+    fclose(f);
+
+    snprintf(path, sizeof(path), "%s/sub/inner.txt", walk_root);
+    f = fopen(path, "w");
+    fclose(f);
+  }
+
+  TEST("zlob_walk_collect with gitignore + size metadata");
+  {
+    zlob_walk_options_t opts = {0};
+    opts.flags = ZLOB_WALK_GITIGNORE | ZLOB_WALK_SORT;
+    opts.meta_mask = ZLOB_META_SIZE;
+    opts.threads = 1;
+
+    zlob_walk_result_t res;
+    int rc = zlob_walk_collect(walk_root, &opts, &res);
+    if (rc != 0)
+      FAIL("zlob_walk_collect failed");
+
+    /* .gitignore + hello.txt + sub + sub/inner.txt (noise.log ignored) */
+    if (res.count != 4) {
+      printf("    got %zu entries\n", res.count);
+      FAIL("Expected 4 entries");
+    }
+
+    int found_hello = 0, found_log = 0;
+    for (size_t i = 0; i < res.count; i++) {
+      const zlob_walk_entry_t *e = &res.entries[i];
+      if (e->path[e->path_len] != '\0')
+        FAIL("Entry path not NUL-terminated");
+      const char *base = e->path + e->basename_off;
+      if (strcmp(base, "hello.txt") == 0) {
+        found_hello = 1;
+        if (!(e->meta_valid & ZLOB_META_SIZE))
+          FAIL("hello.txt size not valid");
+        if (e->size != 5)
+          FAIL("hello.txt size != 5");
+        if (e->kind != ZLOB_WALK_KIND_FILE)
+          FAIL("hello.txt not a file");
+        if (e->depth != 1)
+          FAIL("hello.txt depth != 1");
+      }
+      if (strcmp(base, "noise.log") == 0)
+        found_log = 1;
+    }
+    if (!found_hello)
+      FAIL("hello.txt not found");
+    if (found_log)
+      FAIL("noise.log should be gitignored");
+
+    zlob_walk_result_free(&res);
+    if (res.entries != NULL || res.count != 0)
+      FAIL("result not cleared after free");
+    PASS();
+  }
+
+  TEST("zlob_walk streaming callback");
+  {
+    zlob_walk_options_t opts = {0};
+    opts.threads = 1;
+
+    size_t seen = 0;
+    int rc = zlob_walk(walk_root, &opts, zlob_test_count_cb, &seen);
+    if (rc != 0)
+      FAIL("zlob_walk failed");
+    /* no gitignore flag: .gitignore, hello.txt, noise.log, sub, sub/inner.txt */
+    if (seen != 5) {
+      printf("    got %zu entries\n", seen);
+      FAIL("Expected 5 entries");
+    }
+    PASS();
+  }
+
+  /* best-effort cleanup */
+  {
+    char cmd[600];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", walk_root);
+    if (system(cmd) != 0) { /* ignore */
+    }
   }
 
   return 0;

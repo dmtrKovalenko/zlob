@@ -28,6 +28,10 @@ pub const hasWildcardsWithFlags = zlob.hasWildcards;
 pub const hasWildcardsBasic = zlob.hasWildcardsBasic;
 pub const ZlobFlags = zlob.ZlobFlags;
 
+// Parallel recursive file walker (walkdir/ignore replacement).
+// Usage: zlob.walk.collect(alloc, ".", .{}) or zlob.walk.run(...).
+pub const walk = zlob.walk;
+
 // Compiled pattern + indices APIs (in-memory matching, no filesystem).
 pub const CompiledPattern = zlob.compiled_pattern.CompiledPattern;
 pub const CompiledPatternKind = zlob.compiled_pattern.CompiledPatternKind;

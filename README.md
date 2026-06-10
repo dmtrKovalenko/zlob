@@ -223,6 +223,85 @@ zlobfree(&pzlob);
 This allows a very fast SIMD processing of the paths and supports **NOT ALL** the features of the standard FS globbing except `ALTDIRFUNC` which is not applicable because this mode is done to avoid using ALTDIRFUNC all along. Make sure that if you will use `ZLOB_TILDE` flag the paths input have to be absolute. Other flags like nomagic might not work as expected because they generally make very little sense.
 
 
+## File walker (walkdir / ignore replacement)
+
+zlob also exposes its traversal engine directly: a parallel recursive file
+walker designed to replace the Rust `walkdir` and `ignore` crates (and plain
+`readdir` loops in C), available from Zig, Rust and C.
+
+- **Parallel**: one directory = one task on a worker pool (one thread per CPU,
+  capped at 16). Directories open via `openat()` relative to refcounted parent
+  fds — no path re-resolution.
+- **Bulk metadata**: pass a mask of the attributes you need (size, mtime,
+  inode, mode, ...) and only those are fetched. On macOS this maps to
+  `getattrlistbulk` — one syscall per directory batch returns names *and*
+  metadata. On Linux it's `getdents64` + `statx` (inode comes free from the
+  dirent). Windows currently uses the portable fallback; an
+  `NtQueryDirectoryFile`-based backend is planned.
+- **Nested .gitignore**: gitignore files are detected from the directory
+  listing itself (no speculative opens), parsed once into immutable matchers
+  shared down the tree via refcounted chains, and matched lock-free in
+  parallel with deepest-file-wins git semantics. Ignored directories are
+  pruned before they are ever opened.
+
+Rust (`zlob::walk`), defaults mirror the `ignore` crate:
+
+```rust
+use zlob::walk::{WalkBuilder, WalkState, WalkMetadata};
+
+// Materialize everything in one FFI call (fastest):
+let results = WalkBuilder::new(".")
+    .metadata(WalkMetadata { size: true, modified: true, ..Default::default() })
+    .build()?;
+for entry in results.iter() {
+    println!("{} {:?}", entry.path().display(), entry.size());
+}
+
+// Or stream in parallel, ignore-crate style:
+WalkBuilder::new(".").run(|entry| {
+    println!("{}", entry.path().display());
+    WalkState::Continue
+})?;
+```
+
+C (`zlob_walk` / `zlob_walk_collect`, see `zlob.h`):
+
+```c
+zlob_walk_options_t opts = {0};
+opts.flags = ZLOB_WALK_GITIGNORE;
+opts.meta_mask = ZLOB_META_SIZE | ZLOB_META_MTIME;
+
+zlob_walk_result_t res;
+if (zlob_walk_collect(".", &opts, &res) == 0) {
+    for (size_t i = 0; i < res.count; i++)
+        printf("%s (%llu bytes)\n", res.entries[i].path,
+               (unsigned long long)res.entries[i].size);
+    zlob_walk_result_free(&res);
+}
+```
+
+Zig (`zlob.walk`):
+
+```zig
+var results = try zlob.walk.collect(allocator, ".", .{
+    .meta = .{ .size = true, .mtime = true },
+});
+defer results.deinit();
+for (results.entries) |*e| std.debug.print("{s}\n", .{e.path});
+```
+
+Measured on a real 185k-entry repository (warm cache, i7-14700K, best of 5,
+`cargo run --release --example walk_bench`):
+
+| workload | zlob | competitor |
+|---|---|---|
+| plain walk (185,737 entries) | **27.4 ms** | walkdir 90.9 ms |
+| gitignore walk, serial (5,884 entries) | **2.4 ms** | ignore 8.0 ms |
+| gitignore walk, parallel | **0.64 ms** | ignore parallel 4.9 ms |
+| walk + size/mtime metadata | **24.3 ms** | walkdir + `metadata()` 226 ms |
+
+Entry counts agree with `walkdir` and `ignore` exactly on the same trees.
+
 ## Compilation
 
 Obviously to compile zlob as a C library you have to have installed `zig` toolchain (**only 0.16.0**) and then you can use standard make commands:

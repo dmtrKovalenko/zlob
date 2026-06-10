@@ -42,7 +42,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 glob = "0.3"
 globset = "0.4"
 walkdir = "2"
+ignore = "0.4"
 
 [[bench]]
 name = "glob_comparison"
+harness = false
+
+[[bench]]
+name = "walk_comparison"
 harness = false

@@ -29,6 +29,7 @@ extern "C" {
 #endif
 
 #include <stddef.h>
+#include <stdint.h>
 
 /**
  * zlob_dirent_t - Directory entry for ALTDIRFUNC callbacks
@@ -351,6 +352,107 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
                                               const zlob_slice_t *paths,
                                               size_t path_count, int flags,
                                               zlob_indices_t *out);
+
+/* ==========================================================================
+ * Parallel recursive file walker (replacement for walkdir / the ignore crate)
+ *
+ * Directory trees are traversed by a pool of worker threads. Metadata is
+ * fetched in bulk where the OS allows it (getattrlistbulk on macOS, statx on
+ * Linux) and only the attributes requested in `meta_mask` are paid for.
+ * .gitignore handling supports nested files and runs in parallel.
+ * ========================================================================== */
+
+/** Metadata attribute bits for zlob_walk_options_t.meta_mask and
+ *  zlob_walk_entry_t.meta_valid. */
+#define ZLOB_META_SIZE (1u << 0)
+#define ZLOB_META_MTIME (1u << 1)
+#define ZLOB_META_ATIME (1u << 2)
+#define ZLOB_META_CTIME (1u << 3)
+#define ZLOB_META_BTIME (1u << 4) /* creation time (not on all filesystems) */
+#define ZLOB_META_INODE (1u << 5)
+#define ZLOB_META_NLINK (1u << 6)
+#define ZLOB_META_MODE (1u << 7) /* permission bits (mode & 07777) */
+#define ZLOB_META_UID (1u << 8)
+#define ZLOB_META_GID (1u << 9)
+#define ZLOB_META_ALL 0x3FFu
+
+/* Walk behavior flags (zlob_walk_options_t.flags). All-zero options give a
+ * plain walkdir-style traversal: hidden files included, .gitignore not
+ * consulted, directories reported. */
+#define ZLOB_WALK_GITIGNORE (1u << 0) /* honor (nested) .gitignore files; also skips .git */
+#define ZLOB_WALK_SKIP_HIDDEN (1u << 1) /* skip dotfiles and don't descend into dot-dirs */
+#define ZLOB_WALK_FOLLOW_SYMLINKS (1u << 2)
+#define ZLOB_WALK_NO_REPORT_DIRS (1u << 3) /* yield only non-directory entries */
+#define ZLOB_WALK_SORT (1u << 4) /* sort zlob_walk_collect() results by path */
+#define ZLOB_WALK_ABORT_ON_ERROR (1u << 5)
+#define ZLOB_WALK_KEEP_GIT_DIR (1u << 6) /* with GITIGNORE: still enter .git dirs */
+
+/** Entry kinds. */
+#define ZLOB_WALK_KIND_UNKNOWN 0
+#define ZLOB_WALK_KIND_FILE 1
+#define ZLOB_WALK_KIND_DIR 2
+#define ZLOB_WALK_KIND_SYMLINK 3
+
+/** Error callback: return non-zero to abort the walk. */
+typedef int (*zlob_walk_errfunc_t)(const char *epath, int eerrno);
+
+typedef struct zlob_walk_options {
+    uint32_t flags;     /* ZLOB_WALK_* bits */
+    uint32_t meta_mask; /* ZLOB_META_* bits to fetch per entry */
+    uint16_t threads;   /* worker threads; 0 = one per CPU, 1 = caller thread */
+    uint16_t max_depth; /* 0 = unlimited; 1 = direct children only */
+    zlob_walk_errfunc_t errfunc; /* optional, may be NULL */
+} zlob_walk_options_t;
+
+typedef struct zlob_walk_entry {
+    const char *path;      /* full path (root joined with relative), NUL-terminated */
+    size_t path_len;       /* strlen(path) */
+    uint32_t rel_off;      /* path + rel_off = path relative to the walk root */
+    uint32_t basename_off; /* path + basename_off = entry name */
+    uint8_t kind;          /* ZLOB_WALK_KIND_* */
+    uint16_t depth;        /* root children have depth 1 */
+    uint32_t meta_valid;   /* which ZLOB_META_* fields below are filled */
+    uint64_t size;
+    int64_t mtime_ns; /* nanoseconds since the epoch */
+    int64_t atime_ns;
+    int64_t ctime_ns;
+    int64_t btime_ns;
+    uint64_t inode;
+    uint32_t nlink;
+    uint32_t mode; /* permission bits only; file type is in `kind` */
+    uint32_t uid;
+    uint32_t gid;
+} zlob_walk_entry_t;
+
+/** Visitor: return 0 to continue, 1 to skip this directory (not descend),
+ *  2 to stop the whole walk.
+ *
+ *  With threads != 1 the callback is invoked CONCURRENTLY from multiple
+ *  worker threads and must be thread-safe. The entry and its strings are
+ *  only valid for the duration of the call. */
+typedef int (*zlob_walk_cb)(const zlob_walk_entry_t *entry, void *ctx);
+
+/** Streaming parallel walk of `root`.
+ *  `options` may be NULL for defaults.
+ *  Returns 0 on success (including when the callback returned 2 to stop
+ *  early), ZLOB_ABORTED when aborted via errfunc/ZLOB_WALK_ABORT_ON_ERROR,
+ *  ZLOB_NOSPACE on OOM. */
+int zlob_walk(const char *root, const zlob_walk_options_t *options,
+              zlob_walk_cb cb, void *ctx);
+
+typedef struct zlob_walk_result {
+    zlob_walk_entry_t *entries;
+    size_t count;
+    void *_storage; /* internal — do not touch */
+} zlob_walk_result_t;
+
+/** Walks `root` and materializes all entries in one call — the fastest path
+ *  for FFI consumers (no per-entry callback crossing). Free the result with
+ *  zlob_walk_result_free(). Returns 0, ZLOB_ABORTED or ZLOB_NOSPACE. */
+int zlob_walk_collect(const char *root, const zlob_walk_options_t *options,
+                      zlob_walk_result_t *out);
+
+void zlob_walk_result_free(zlob_walk_result_t *result);
 
 #ifdef __cplusplus
 }

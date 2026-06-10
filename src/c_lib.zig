@@ -728,3 +728,203 @@ pub export fn zlob_pattern_match_paths_indices_at_slice(
 
     return writeIndicesResult(out, indices);
 }
+
+// ============================================================================
+// Parallel file walker C API (see include/zlob.h "Parallel recursive file
+// walker" section). Callbacks may run concurrently from worker threads.
+// ============================================================================
+
+const walk = zlob_impl.walk;
+
+pub const zlob_walk_errfunc_t = ?*const fn (epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int;
+pub const zlob_walk_cb = *const fn (entry: *const zlob_walk_entry_t, ctx: ?*anyopaque) callconv(.c) c_int;
+
+pub const zlob_walk_options_t = extern struct {
+    flags: u32 = 0,
+    meta_mask: u32 = 0,
+    threads: u16 = 0,
+    max_depth: u16 = 0,
+    errfunc: zlob_walk_errfunc_t = null,
+};
+
+pub const zlob_walk_entry_t = extern struct {
+    path: [*:0]const u8,
+    path_len: usize,
+    rel_off: u32,
+    basename_off: u32,
+    kind: u8,
+    depth: u16,
+    meta_valid: u32,
+    size: u64,
+    mtime_ns: i64,
+    atime_ns: i64,
+    ctime_ns: i64,
+    btime_ns: i64,
+    inode: u64,
+    nlink: u32,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+};
+
+pub const zlob_walk_result_t = extern struct {
+    entries: ?[*]zlob_walk_entry_t,
+    count: usize,
+    _storage: ?*anyopaque,
+};
+
+// ABI consistency with the C header.
+comptime {
+    std.debug.assert(@sizeOf(zlob_walk_options_t) == @sizeOf(c_zlob.zlob_walk_options_t));
+    std.debug.assert(@sizeOf(zlob_walk_entry_t) == @sizeOf(c_zlob.zlob_walk_entry_t));
+    std.debug.assert(@sizeOf(zlob_walk_result_t) == @sizeOf(c_zlob.zlob_walk_result_t));
+    std.debug.assert(@offsetOf(zlob_walk_entry_t, "kind") == @offsetOf(c_zlob.zlob_walk_entry_t, "kind"));
+    std.debug.assert(@offsetOf(zlob_walk_entry_t, "meta_valid") == @offsetOf(c_zlob.zlob_walk_entry_t, "meta_valid"));
+    std.debug.assert(@offsetOf(zlob_walk_entry_t, "gid") == @offsetOf(c_zlob.zlob_walk_entry_t, "gid"));
+}
+
+const ZLOB_WALK_GITIGNORE: u32 = 1 << 0;
+const ZLOB_WALK_SKIP_HIDDEN: u32 = 1 << 1;
+const ZLOB_WALK_FOLLOW_SYMLINKS: u32 = 1 << 2;
+const ZLOB_WALK_NO_REPORT_DIRS: u32 = 1 << 3;
+const ZLOB_WALK_SORT: u32 = 1 << 4;
+const ZLOB_WALK_ABORT_ON_ERROR: u32 = 1 << 5;
+const ZLOB_WALK_KEEP_GIT_DIR: u32 = 1 << 6;
+
+fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
+    const v: zlob_walk_options_t = if (options) |p| p.* else .{};
+    const f = v.flags;
+    return .{
+        .threads = v.threads,
+        .max_depth = v.max_depth,
+        .follow_symlinks = f & ZLOB_WALK_FOLLOW_SYMLINKS != 0,
+        .include_hidden = f & ZLOB_WALK_SKIP_HIDDEN == 0,
+        .respect_gitignore = f & ZLOB_WALK_GITIGNORE != 0,
+        .skip_git_dir = f & ZLOB_WALK_KEEP_GIT_DIR == 0,
+        .report_dirs = f & ZLOB_WALK_NO_REPORT_DIRS == 0,
+        .meta = walk.MetaMask.fromInt(v.meta_mask),
+        .sort = f & ZLOB_WALK_SORT != 0,
+        .err_callback = v.errfunc,
+        .abort_on_error = f & ZLOB_WALK_ABORT_ON_ERROR != 0,
+    };
+}
+
+inline fn fillCWalkEntry(out: *zlob_walk_entry_t, e: *const walk.Entry) void {
+    out.* = .{
+        .path = @ptrCast(e.path.ptr),
+        .path_len = e.path.len,
+        .rel_off = e.rel_off,
+        .basename_off = @intCast(e.path.len - e.basename.len),
+        .kind = switch (e.kind) {
+            .file => 1,
+            .directory => 2,
+            .sym_link => 3,
+            else => 0,
+        },
+        .depth = e.depth,
+        .meta_valid = e.meta.valid.toInt(),
+        .size = e.meta.size,
+        .mtime_ns = e.meta.mtime_ns,
+        .atime_ns = e.meta.atime_ns,
+        .ctime_ns = e.meta.ctime_ns,
+        .btime_ns = e.meta.btime_ns,
+        .inode = e.meta.inode,
+        .nlink = e.meta.nlink,
+        .mode = e.meta.mode,
+        .uid = e.meta.uid,
+        .gid = e.meta.gid,
+    };
+}
+
+const CWalkCtx = struct {
+    cb: zlob_walk_cb,
+    user: ?*anyopaque,
+};
+
+fn cWalkVisit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
+    const c: *const CWalkCtx = @ptrCast(@alignCast(ctx.?));
+    var ce: zlob_walk_entry_t = undefined;
+    fillCWalkEntry(&ce, entry);
+    return switch (c.cb(&ce, c.user)) {
+        0 => .cont,
+        1 => .skip_dir,
+        else => .stop,
+    };
+}
+
+pub export fn zlob_walk(
+    root: [*:0]const u8,
+    options: ?*const zlob_walk_options_t,
+    cb: zlob_walk_cb,
+    ctx: ?*anyopaque,
+) c_int {
+    const root_slice = mem.sliceTo(root, 0);
+    var cctx = CWalkCtx{ .cb = cb, .user = ctx };
+    walk.run(allocator, root_slice, walkOptionsFromC(options), .{
+        .context = @ptrCast(&cctx),
+        .visit = cWalkVisit,
+    }) catch |err| return switch (err) {
+        error.Aborted => zlob_flags.ZLOB_ABORTED,
+        error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
+    };
+    return 0;
+}
+
+const WalkResultHolder = struct {
+    results: walk.Results,
+};
+
+pub export fn zlob_walk_collect(
+    root: [*:0]const u8,
+    options: ?*const zlob_walk_options_t,
+    out: *zlob_walk_result_t,
+) c_int {
+    out.* = .{ .entries = null, .count = 0, ._storage = null };
+
+    const root_slice = mem.sliceTo(root, 0);
+    var results = walk.collect(allocator, root_slice, walkOptionsFromC(options)) catch |err|
+        return switch (err) {
+            error.Aborted => zlob_flags.ZLOB_ABORTED,
+            error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
+        };
+
+    if (results.entries.len == 0) {
+        results.deinit();
+        return 0;
+    }
+
+    const holder = allocator.create(WalkResultHolder) catch {
+        results.deinit();
+        return zlob_flags.ZLOB_NOSPACE;
+    };
+    holder.* = .{ .results = results };
+
+    const centries = allocator.alloc(zlob_walk_entry_t, results.entries.len) catch {
+        holder.results.deinit();
+        allocator.destroy(holder);
+        return zlob_flags.ZLOB_NOSPACE;
+    };
+    for (holder.results.entries, centries) |*e, *ce| {
+        fillCWalkEntry(ce, e);
+    }
+
+    out.* = .{
+        .entries = centries.ptr,
+        .count = centries.len,
+        ._storage = @ptrCast(holder),
+    };
+    return 0;
+}
+
+pub export fn zlob_walk_result_free(result: ?*zlob_walk_result_t) void {
+    const r = result orelse return;
+    if (r.entries) |entries| {
+        allocator.free(entries[0..r.count]);
+    }
+    if (r._storage) |storage| {
+        const holder: *WalkResultHolder = @ptrCast(@alignCast(storage));
+        holder.results.deinit();
+        allocator.destroy(holder);
+    }
+    r.* = .{ .entries = null, .count = 0, ._storage = null };
+}

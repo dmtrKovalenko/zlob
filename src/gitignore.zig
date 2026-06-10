@@ -120,7 +120,8 @@ pub const GitIgnore = struct {
     }
 
     /// Parse gitignore content - takes ownership of the content slice
-    fn parseOwned(allocator: Allocator, content: []const u8) !Self {
+    /// (content must be allocated with `allocator`; freed by deinit()).
+    pub fn parseOwned(allocator: Allocator, content: []const u8) !Self {
         const PatternList = std.array_list.AlignedManaged(Pattern, null);
 
         var patterns_list = PatternList.init(allocator);
@@ -298,6 +299,14 @@ pub const GitIgnore = struct {
 
     /// Check if a path should be ignored - optimized version
     pub fn isIgnored(self: *const Self, path: []const u8, is_dir: bool) bool {
+        return self.check(path, is_dir) orelse false;
+    }
+
+    /// Tri-state match for hierarchical (nested .gitignore) resolution:
+    /// - `true`: a pattern in this file ignores the path
+    /// - `false`: a negation in this file re-includes the path
+    /// - `null`: no pattern matched — defer to parent .gitignore
+    pub fn check(self: *const Self, path: []const u8, is_dir: bool) ?bool {
         // Fast path: skip ./ prefix if present (common case: no prefix)
         const normalized_path = if (path.len > 2 and path[0] == '.' and path[1] == '/') path[2..] else path;
 
@@ -306,6 +315,12 @@ pub const GitIgnore = struct {
         else
             normalized_path;
 
+        return self.checkWithBasename(normalized_path, basename, is_dir);
+    }
+
+    /// Same as `check` but with a pre-computed basename and a path already
+    /// normalized (no `./` prefix). Hot path for walkers that know both.
+    pub fn checkWithBasename(self: *const Self, normalized_path: []const u8, basename: []const u8, is_dir: bool) ?bool {
         // Fast path: if no negations exist, we can use optimized lookups
         if (!self.has_negations) {
             if (is_dir) {
@@ -342,11 +357,11 @@ pub const GitIgnore = struct {
                 }
             }
 
-            return false;
+            return null;
         }
 
         // Slow path: has negations, must process all patterns in order
-        var ignored = false;
+        var ignored: ?bool = null;
         for (self.patterns) |pattern| {
             // For dir_only patterns checking a file: only skip if the pattern
             // cannot match a parent directory. matchPatternFast handles the
