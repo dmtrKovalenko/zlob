@@ -244,6 +244,24 @@ walker designed to replace the Rust `walkdir` and `ignore` crates (and plain
   parallel with deepest-file-wins git semantics. Ignored directories are
   pruned before they are ever opened.
 
+Two consumption modes, matching how parallel walks are actually used:
+
+1. **Collect** — `build()` / `collect()` / `zlob_walk_collect()`: workers
+   accumulate into lock-free private buffers and the whole result (paths +
+   metadata) crosses the FFI boundary **once**. Use when you want the file
+   list.
+2. **Do work per entry** — `run()` / `zlob_walk()`: your callback executes
+   *on the worker pool itself* (the ripgrep model). Slow per-file work
+   (reading contents, hashing, parsing) automatically parallelizes across
+   the same threads that traverse; free workers keep pulling directories
+   while busy ones run your code. For I/O-bound work, raise `.threads(n)`
+   beyond the CPU count.
+
+Traversal can also be narrowed with a zlob glob pattern: matching entries
+only are reported, and directories outside the pattern's literal prefix
+(everything but `src/` for `src/**/*.c`) are pruned without ever being
+opened.
+
 Rust (`zlob::walk`), defaults mirror the `ignore` crate:
 
 ```rust
@@ -257,11 +275,15 @@ for entry in results.iter() {
     println!("{} {:?}", entry.path().display(), entry.size());
 }
 
-// Or stream in parallel, ignore-crate style:
+// Or stream in parallel, ignore-crate style — the closure runs on the
+// worker threads, so heavy per-file work scales automatically:
 WalkBuilder::new(".").run(|entry| {
     println!("{}", entry.path().display());
     WalkState::Continue
 })?;
+
+// Glob-scoped traversal: only src/ is ever descended into.
+let rs_files = WalkBuilder::new(".").glob("src/**/*.rs").build()?;
 ```
 
 C (`zlob_walk` / `zlob_walk_collect`, see `zlob.h`):

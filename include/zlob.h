@@ -402,6 +402,14 @@ typedef struct zlob_walk_options {
     uint16_t threads;   /* worker threads; 0 = one per CPU, 1 = caller thread */
     uint16_t max_depth; /* 0 = unlimited; 1 = direct children only */
     zlob_walk_errfunc_t errfunc; /* optional, may be NULL */
+    /* Optional glob filter (NULL = report everything). Only entries whose
+     * root-relative path matches are reported, and directories outside the
+     * pattern's literal prefix (e.g. everything but src/ for "src/**")
+     * are pruned from traversal entirely. Matched lock-free on workers. */
+    const char *pattern;
+    /* ZLOB_* flags used to compile/match `pattern`.
+     * 0 = default (ZLOB_BRACE | ZLOB_DOUBLESTAR_RECURSIVE). */
+    uint32_t pattern_flags;
 } zlob_walk_options_t;
 
 typedef struct zlob_walk_entry {

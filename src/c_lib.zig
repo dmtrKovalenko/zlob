@@ -745,6 +745,8 @@ pub const zlob_walk_options_t = extern struct {
     threads: u16 = 0,
     max_depth: u16 = 0,
     errfunc: zlob_walk_errfunc_t = null,
+    pattern: ?[*:0]const u8 = null,
+    pattern_flags: u32 = 0,
 };
 
 pub const zlob_walk_entry_t = extern struct {
@@ -802,6 +804,11 @@ fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
         .respect_gitignore = f & ZLOB_WALK_GITIGNORE != 0,
         .skip_git_dir = f & ZLOB_WALK_KEEP_GIT_DIR == 0,
         .report_dirs = f & ZLOB_WALK_NO_REPORT_DIRS == 0,
+        .pattern = if (v.pattern) |p| mem.sliceTo(p, 0) else null,
+        .pattern_flags = if (v.pattern_flags != 0)
+            ZlobFlags.fromU32(v.pattern_flags)
+        else
+            .{ .brace = true, .doublestar_recursive = true },
         .meta = walk.MetaMask.fromInt(v.meta_mask),
         .sort = f & ZLOB_WALK_SORT != 0,
         .err_callback = v.errfunc,

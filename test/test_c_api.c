@@ -447,6 +447,25 @@ int main(void) {
     PASS();
   }
 
+  TEST("zlob_walk_collect with glob pattern filter");
+  {
+    zlob_walk_options_t opts = {0};
+    opts.threads = 1;
+    opts.pattern = "**/*.txt";
+
+    zlob_walk_result_t res;
+    int rc = zlob_walk_collect(walk_root, &opts, &res);
+    if (rc != 0)
+      FAIL("zlob_walk_collect with pattern failed");
+    /* hello.txt + sub/inner.txt */
+    if (res.count != 2) {
+      printf("    got %zu entries\n", res.count);
+      FAIL("Expected 2 entries for **/*.txt");
+    }
+    zlob_walk_result_free(&res);
+    PASS();
+  }
+
   TEST("zlob_walk streaming callback");
   {
     zlob_walk_options_t opts = {0};

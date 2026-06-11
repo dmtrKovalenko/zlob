@@ -308,3 +308,98 @@ test "walk empty root and missing root" {
         .abort_on_error = true,
     }));
 }
+
+test "walk glob pattern: filters entries and prunes out-of-scope dirs" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("glob");
+    defer t.deinit();
+
+    try t.mkdir("src");
+    try t.mkdir("src/deep");
+    try t.mkdir("lib");
+    try t.mkdir("docs");
+    try t.write("src/a.rs", "");
+    try t.write("src/b.txt", "");
+    try t.write("src/deep/e.rs", "");
+    try t.write("lib/c.rs", "");
+    try t.write("docs/d.md", "");
+    try t.write("top.rs", "");
+
+    // Recursive extension filter across the whole tree.
+    {
+        var results = try walk.collect(testing.allocator, t.root, .{
+            .threads = 1,
+            .sort = true,
+            .pattern = "**/*.rs",
+        });
+        defer results.deinit();
+        try testing.expectEqual(@as(usize, 4), results.entries.len);
+        try testing.expectEqualStrings("lib/c.rs", results.entries[0].relPath());
+        try testing.expectEqualStrings("src/a.rs", results.entries[1].relPath());
+        try testing.expectEqualStrings("src/deep/e.rs", results.entries[2].relPath());
+        try testing.expectEqualStrings("top.rs", results.entries[3].relPath());
+    }
+
+    // Anchored pattern: only the src/ subtree is reported ("src/**" also
+    // matches "src" itself — ** spans zero components, like bash globstar).
+    {
+        var results = try walk.collect(testing.allocator, t.root, .{
+            .threads = 1,
+            .sort = true,
+            .pattern = "src/**",
+        });
+        defer results.deinit();
+        for (results.entries) |*e| {
+            try testing.expect(std.mem.startsWith(u8, e.relPath(), "src"));
+        }
+        try testing.expectEqual(@as(usize, 5), results.entries.len); // src, a.rs, b.txt, deep, deep/e.rs
+    }
+
+    // Brace pattern.
+    {
+        var results = try walk.collect(testing.allocator, t.root, .{
+            .threads = 1,
+            .pattern = "**/*.{md,txt}",
+        });
+        defer results.deinit();
+        try testing.expectEqual(@as(usize, 2), results.entries.len);
+    }
+}
+
+test "walk glob pattern prunes: out-of-scope unreadable dir is never opened" {
+    // Pruning proof: an unreadable directory outside the pattern's literal
+    // prefix would fail the walk with abort_on_error — unless it was pruned
+    // before ever being opened.
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // no POSIX chmod
+    var t: TestTree = .{ .io = undefined };
+    try t.init("glob_prune");
+    defer t.deinit();
+
+    try t.mkdir("src");
+    try t.mkdir("locked");
+    try t.write("src/a.rs", "");
+    try t.write("locked/secret.rs", "");
+
+    var path_buf: [512:0]u8 = undefined;
+    const locked_path = try std.fmt.bufPrintZ(&path_buf, "{s}/locked", .{t.root});
+    if (std.c.chmod(locked_path.ptr, 0) != 0) return error.SkipZigTest;
+    defer _ = std.c.chmod(locked_path.ptr, 0o755);
+    // Root can open mode-000 dirs anyway — the pruning proof needs EACCES.
+    if (std.c.getuid() == 0) return error.SkipZigTest;
+
+    // Without a pattern the unreadable dir aborts the walk...
+    try testing.expectError(error.Aborted, walk.collect(testing.allocator, t.root, .{
+        .threads = 1,
+        .abort_on_error = true,
+    }));
+
+    // ...with a scoped pattern it is pruned before being opened.
+    var results = try walk.collect(testing.allocator, t.root, .{
+        .threads = 1,
+        .abort_on_error = true,
+        .pattern = "src/**/*.rs",
+    });
+    defer results.deinit();
+    try testing.expectEqual(@as(usize, 1), results.entries.len);
+    try testing.expectEqualStrings("src/a.rs", results.entries[0].relPath());
+}

@@ -164,6 +164,8 @@ pub struct WalkBuilder {
     meta: WalkMetadata,
     threads: u16,
     max_depth: u16,
+    pattern: Option<CString>,
+    pattern_flags: u32,
 }
 
 impl WalkBuilder {
@@ -175,6 +177,8 @@ impl WalkBuilder {
             meta: WalkMetadata::default(),
             threads: 0,
             max_depth: 0,
+            pattern: None,
+            pattern_flags: 0,
         }
     }
 
@@ -233,6 +237,35 @@ impl WalkBuilder {
         self
     }
 
+    /// Glob filter: only entries whose root-relative path matches the
+    /// pattern are reported (e.g. `**/*.rs`, `src/**`, `*.{c,h}`).
+    ///
+    /// Traversal itself is narrowed too: directories outside the pattern's
+    /// literal prefix (everything but `src/` for `src/**/*.c`) are pruned
+    /// without ever being opened. Matching is SIMD-accelerated, compiled
+    /// once per walk, and runs lock-free on the worker threads.
+    ///
+    /// Compiled with brace expansion + recursive `**` by default; use
+    /// [`Self::glob_with_flags`] for different pattern semantics.
+    /// Pass `None` to clear.
+    pub fn glob(&mut self, pattern: impl AsRef<str>) -> &mut Self {
+        self.pattern = CString::new(pattern.as_ref()).ok();
+        self.pattern_flags = 0; // library default: BRACE | DOUBLESTAR_RECURSIVE
+        self
+    }
+
+    /// Like [`Self::glob`] but with explicit [`crate::ZlobFlags`] for the
+    /// pattern (e.g. enable `EXTGLOB`, disable `BRACE`).
+    pub fn glob_with_flags(
+        &mut self,
+        pattern: impl AsRef<str>,
+        flags: crate::ZlobFlags,
+    ) -> &mut Self {
+        self.pattern = CString::new(pattern.as_ref()).ok();
+        self.pattern_flags = flags.bits() as u32;
+        self
+    }
+
     /// Number of worker threads. `0` (default) = one per CPU; `1` = run on
     /// the calling thread.
     pub fn threads(&mut self, n: usize) -> &mut Self {
@@ -254,6 +287,11 @@ impl WalkBuilder {
             threads: self.threads,
             max_depth: self.max_depth,
             errfunc: None,
+            pattern: self
+                .pattern
+                .as_ref()
+                .map_or(std::ptr::null(), |p| p.as_ptr()),
+            pattern_flags: self.pattern_flags,
         }
     }
 
@@ -710,5 +748,83 @@ mod tests {
             .abort_on_error(true)
             .build();
         assert!(err.is_err());
+    }
+}
+
+#[cfg(test)]
+mod glob_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn glob_filters_and_prunes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::create_dir(root.join("docs")).unwrap();
+        fs::write(root.join("src/main.rs"), "").unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("docs/guide.md"), "").unwrap();
+        fs::write(root.join("top.rs"), "").unwrap();
+
+        let results = WalkBuilder::new(root)
+            .git_ignore(false)
+            .hidden(false)
+            .threads(1)
+            .sort(true)
+            .glob("**/*.rs")
+            .build()
+            .unwrap();
+
+        let names: Vec<String> = results
+            .iter()
+            .map(|e| e.rel_path().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["src/lib.rs", "src/main.rs", "top.rs"]);
+
+        // Brace pattern through the default flags.
+        let braced = WalkBuilder::new(root)
+            .git_ignore(false)
+            .hidden(false)
+            .threads(1)
+            .glob("**/*.{md,rs}")
+            .build()
+            .unwrap();
+        assert_eq!(braced.len(), 4);
+
+        // Anchored pattern narrows traversal to the src/ subtree.
+        let scoped = WalkBuilder::new(root)
+            .git_ignore(false)
+            .hidden(false)
+            .threads(1)
+            .glob("src/**/*.rs")
+            .build()
+            .unwrap();
+        assert_eq!(scoped.len(), 2);
+    }
+
+    #[test]
+    fn glob_composes_with_gitignore_and_parallel_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::write(root.join("src/a.rs"), "").unwrap();
+        fs::write(root.join("target/gen.rs"), "").unwrap();
+
+        let count = AtomicUsize::new(0);
+        WalkBuilder::new(root)
+            .glob("**/*.rs")
+            .run(|entry| {
+                assert!(entry.path().extension().is_some_and(|e| e == "rs"));
+                count.fetch_add(1, Ordering::Relaxed);
+                WalkState::Continue
+            })
+            .unwrap();
+        // target/gen.rs is gitignored; only src/a.rs survives both filters.
+        assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 }

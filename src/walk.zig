@@ -34,9 +34,13 @@ const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const gitignore_mod = @import("gitignore.zig");
+const compiled_pattern = @import("compiled_pattern.zig");
 const darwin = @import("walk_darwin.zig");
 const win = @import("walk_windows.zig");
 const winos = std.os.windows;
+
+pub const ZlobFlags = @import("zlob.zig").ZlobFlags;
+pub const CompiledPattern = compiled_pattern.CompiledPattern;
 
 pub const GitIgnore = gitignore_mod.GitIgnore;
 pub const EntryKind = std.Io.File.Kind;
@@ -179,6 +183,16 @@ pub const Options = struct {
     skip_git_dir: bool = true,
     /// Report directory entries (directories are traversed either way).
     report_dirs: bool = true,
+    /// Glob filter: only entries whose root-relative path matches the
+    /// pattern are reported (e.g. "**/*.rs", "src/**", "*.{c,h}").
+    /// Traversal itself is also narrowed: directories outside the pattern's
+    /// literal prefix (e.g. everything but "src/" for "src/**/*.c") are
+    /// pruned without ever being opened. Compiled once per walk; matching
+    /// runs lock-free on the workers.
+    pattern: ?[]const u8 = null,
+    /// Flags for compiling/matching `pattern`.
+    /// Default: brace expansion + recursive `**`.
+    pattern_flags: ZlobFlags = .{ .brace = true, .doublestar_recursive = true },
     /// Metadata to fetch per entry. Keep empty if you only need names/kinds.
     meta: MetaMask = .{},
     /// Sort collected results by path (collect() only). Parallel traversal
@@ -370,6 +384,12 @@ const Shared = struct {
     failure: std.atomic.Value(u8) = .init(0),
     sink: SinkFn,
     sink_ctx: *anyopaque,
+    /// Compiled glob filter (immutable — matched lock-free from any worker).
+    pattern: ?*const CompiledPattern = null,
+    /// Literal directory prefix of the pattern ("src/lib" for
+    /// "src/lib/**/*.c", "" when the pattern starts with a wildcard) used to
+    /// prune traversal outside the pattern's scope.
+    pattern_prefix: []const u8 = &.{},
     /// Pre-computed statx mask (Linux) for the requested metadata.
     statx_mask: if (builtin.os.tag == .linux) linux.STATX else void,
     /// Symlink-cycle bookkeeping, only touched when follow_symlinks is set.
@@ -545,8 +565,10 @@ fn processDir(sh: *Shared, w: *Worker, task: *DirTask) WalkError!void {
         const full = w.path_buf[0 .. prefix_len + name.len];
         const basename = full[prefix_len..];
 
+        const rel_path = full[sh.root_prefix_len..];
+
         if (cur_ignore) |ig| {
-            if (chainIgnored(ig, full[sh.root_prefix_len..], basename, is_dir)) continue;
+            if (chainIgnored(ig, rel_path, basename, is_dir)) continue;
         }
 
         // Symlink-to-directory resolution under follow mode (pre-flight stat
@@ -562,7 +584,11 @@ fn processDir(sh: *Shared, w: *Worker, task: *DirTask) WalkError!void {
         }
 
         var action: VisitAction = .cont;
-        if (se.kind != .directory or opts.report_dirs) {
+        var report = se.kind != .directory or opts.report_dirs;
+        if (report) {
+            if (sh.pattern) |cp| report = cp.matches(rel_path, opts.pattern_flags);
+        }
+        if (report) {
             var entry = Entry{
                 .path = full,
                 .rel_off = sh.root_prefix_len,
@@ -577,6 +603,11 @@ fn processDir(sh: *Shared, w: *Worker, task: *DirTask) WalkError!void {
                 return;
             }
         }
+
+        // Glob scope pruning: skip whole subtrees outside the pattern's
+        // literal directory prefix without opening them.
+        if (is_dir and sh.pattern != null and !dirInPatternScope(sh.pattern_prefix, rel_path))
+            continue;
 
         if (is_dir and may_descend and action != .skip_dir) {
             // Lazily wrap the directory handle for children to openat() from.
@@ -608,6 +639,49 @@ fn processDir(sh: *Shared, w: *Worker, task: *DirTask) WalkError!void {
             try sh.queue.push(sh.gpa, sh.io, child);
         }
     }
+}
+
+/// Literal directory prefix of a glob pattern: the leading path components
+/// that contain no glob syntax. "src/lib/**/*.c" -> "src/lib";
+/// "**/*.c" -> ""; "src/*.c" -> "src". Conservative: any potentially special
+/// character ends the scan.
+fn literalPatternPrefixDirs(pattern: []const u8, flags: ZlobFlags) []const u8 {
+    var first_special: usize = pattern.len;
+    for (pattern, 0..) |ch, i| {
+        const special = switch (ch) {
+            '*', '?', '[', '\\' => true,
+            '{' => flags.brace,
+            '(' => flags.extglob,
+            else => false,
+        };
+        if (special) {
+            first_special = i;
+            break;
+        }
+    }
+    // Truncate to the last completed directory component.
+    const lit = pattern[0..first_special];
+    if (first_special == pattern.len) {
+        // Fully literal pattern: its parent dirs are the scope.
+        if (mem.lastIndexOfScalar(u8, lit, '/')) |pos| return lit[0..pos];
+        return &.{};
+    }
+    if (mem.lastIndexOfScalar(u8, lit, '/')) |pos| return lit[0..pos];
+    return &.{};
+}
+
+/// True when a directory (root-relative path) may contain entries matched by
+/// a pattern whose literal prefix is `prefix`: the dir is an ancestor of the
+/// prefix, or lives inside it.
+fn dirInPatternScope(prefix: []const u8, dir_rel: []const u8) bool {
+    if (prefix.len == 0) return true;
+    if (dir_rel.len <= prefix.len) {
+        // dir must be a leading component chain of prefix: "src" vs "src/lib"
+        return mem.startsWith(u8, prefix, dir_rel) and
+            (dir_rel.len == prefix.len or prefix[dir_rel.len] == '/');
+    }
+    // dir inside prefix scope: "src/lib/util" vs "src/lib"
+    return mem.startsWith(u8, dir_rel, prefix) and dir_rel[prefix.len] == '/';
 }
 
 /// Copies "rel/" after the root prefix in the worker path buffer and returns
@@ -1215,6 +1289,14 @@ fn walkInternal(
         }
     }
 
+    // Compile the glob filter once; matching is lock-free on the workers.
+    var compiled: ?CompiledPattern = null;
+    if (options.pattern) |p| {
+        compiled = compiled_pattern.compilePattern(gpa, p, options.pattern_flags) catch
+            return error.OutOfMemory;
+    }
+    defer if (compiled) |*c| c.deinit();
+
     var sh = Shared{
         .gpa = gpa,
         .io = options.io orelse defaultIo(),
@@ -1224,6 +1306,11 @@ fn walkInternal(
         .root_prefix_len = @intCast(prefix_len),
         .sink = sink,
         .sink_ctx = sink_ctx,
+        .pattern = if (compiled) |*c| c else null,
+        .pattern_prefix = if (options.pattern) |p|
+            literalPatternPrefixDirs(p, options.pattern_flags)
+        else
+            &.{},
         .statx_mask = linuxStatxMask(options.meta),
     };
     defer {

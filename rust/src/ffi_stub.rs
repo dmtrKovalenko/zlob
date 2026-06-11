@@ -227,6 +227,8 @@ pub struct zlob_walk_options_t {
     pub threads: u16,
     pub max_depth: u16,
     pub errfunc: Option<unsafe extern "C" fn(epath: *const c_char, eerrno: c_int) -> c_int>,
+    pub pattern: *const c_char,
+    pub pattern_flags: u32,
 }
 
 #[repr(C)]
