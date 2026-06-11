@@ -138,6 +138,7 @@
 //!     Ok(None) => println!("No files matched"),
 //!     Err(ZlobError::Aborted) => println!("Operation aborted"),
 //!     Err(ZlobError::NoSpace) => println!("Out of memory"),
+//!     Err(e) => println!("Error: {e}"),
 //! }
 //! ```
 

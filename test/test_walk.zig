@@ -366,6 +366,128 @@ test "walk glob pattern: filters entries and prunes out-of-scope dirs" {
     }
 }
 
+test "walk follow_symlinks: descends links, breaks cycles, never re-walks root" {
+    // The ntdll backend doesn't implement symlink following (documented).
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("symlinks");
+    defer t.deinit();
+
+    // The walk root is t.root/tree; outside/ is a sibling, only reachable
+    // through the symlink.
+    try t.mkdir("tree");
+    try t.mkdir("outside");
+    try t.write("tree/a.txt", "a");
+    try t.write("outside/o.txt", "o");
+
+    var lbuf: [512]u8 = undefined;
+    const cwd = std.Io.Dir.cwd();
+    // tree/link -> ../outside : descended under follow mode.
+    try cwd.symLink(t.io, "../outside", try std.fmt.bufPrint(&lbuf, "{s}/tree/link", .{t.root}), .{});
+    // tree/back -> . : resolves to the walk root itself; must not re-walk.
+    try cwd.symLink(t.io, ".", try std.fmt.bufPrint(&lbuf, "{s}/tree/back", .{t.root}), .{});
+    // outside/self -> ../outside : a cycle; the walk must terminate.
+    try cwd.symLink(t.io, "../outside", try std.fmt.bufPrint(&lbuf, "{s}/outside/self", .{t.root}), .{});
+
+    var root_buf: [512]u8 = undefined;
+    const walk_root = try std.fmt.bufPrint(&root_buf, "{s}/tree", .{t.root});
+
+    // Without follow: links are reported but never descended.
+    {
+        var results = try walk.collect(testing.allocator, walk_root, .{ .threads = 1, .sort = true });
+        defer results.deinit();
+        try testing.expectEqual(@as(usize, 3), results.entries.len); // a.txt, back, link
+        try testing.expectEqual(walk.EntryKind.sym_link, findEntry(&results, "link").?.kind);
+        try testing.expect(findEntry(&results, "link/o.txt") == null);
+    }
+
+    // With follow: link/ is descended, the self-cycle is broken, and the
+    // back-to-root link does not duplicate root entries.
+    {
+        var results = try walk.collect(testing.allocator, walk_root, .{
+            .threads = 1,
+            .sort = true,
+            .follow_symlinks = true,
+        });
+        defer results.deinit();
+
+        try testing.expect(findEntry(&results, "link/o.txt") != null);
+        // outside/ was already visited via link, so the cycle link is
+        // reported but not descended.
+        try testing.expect(findEntry(&results, "link/self") != null);
+        try testing.expect(findEntry(&results, "link/self/o.txt") == null);
+
+        var a_count: usize = 0;
+        for (results.entries) |*e| {
+            // Nothing may be reported through the root-cycling link.
+            try testing.expect(!std.mem.startsWith(u8, e.relPath(), "back/"));
+            if (std.mem.eql(u8, e.relPath(), "a.txt")) a_count += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), a_count);
+        // a.txt, back, link, link/o.txt, link/self
+        try testing.expectEqual(@as(usize, 5), results.entries.len);
+    }
+}
+
+test "walk error callback: receives path and errno, nonzero return aborts" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // no POSIX chmod
+    var t: TestTree = .{ .io = undefined };
+    try t.init("errfunc");
+    defer t.deinit();
+
+    try t.mkdir("ok");
+    try t.mkdir("locked");
+    try t.write("ok/file.txt", "x");
+    try t.write("locked/hidden.txt", "y");
+
+    var path_buf: [512:0]u8 = undefined;
+    const locked_path = try std.fmt.bufPrintZ(&path_buf, "{s}/locked", .{t.root});
+    if (std.c.chmod(locked_path.ptr, 0) != 0) return error.SkipZigTest;
+    defer _ = std.c.chmod(locked_path.ptr, 0o755);
+    // Root opens mode-000 dirs anyway; the test needs a real EACCES.
+    if (std.c.getuid() == 0) return error.SkipZigTest;
+
+    const Cb = struct {
+        var calls: usize = 0;
+        var saw_locked: bool = false;
+        var last_errno: c_int = 0;
+        fn record(epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int {
+            calls += 1;
+            last_errno = eerrno;
+            if (std.mem.endsWith(u8, std.mem.sliceTo(epath, 0), "/locked")) saw_locked = true;
+            return 0;
+        }
+        fn abort(epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int {
+            _ = epath;
+            _ = eerrno;
+            return 1;
+        }
+    };
+
+    // Ignoring the error: the rest of the tree is still walked, the locked
+    // dir itself is reported (it came from the parent's listing) but its
+    // contents are not.
+    {
+        var results = try walk.collect(testing.allocator, t.root, .{
+            .threads = 1,
+            .sort = true,
+            .err_callback = Cb.record,
+        });
+        defer results.deinit();
+        try testing.expectEqual(@as(usize, 1), Cb.calls);
+        try testing.expect(Cb.saw_locked);
+        try testing.expectEqual(@intFromEnum(std.c.E.ACCES), Cb.last_errno);
+        try testing.expectEqual(@as(usize, 3), results.entries.len); // locked, ok, ok/file.txt
+        try testing.expect(findEntry(&results, "locked/hidden.txt") == null);
+    }
+
+    // A nonzero callback return aborts the walk.
+    try testing.expectError(error.Aborted, walk.collect(testing.allocator, t.root, .{
+        .threads = 1,
+        .err_callback = Cb.abort,
+    }));
+}
+
 test "walk glob pattern prunes: out-of-scope unreadable dir is never opened" {
     // Pruning proof: an unreadable directory outside the pattern's literal
     // prefix would fail the walk with abort_on_error — unless it was pruned

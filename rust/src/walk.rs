@@ -36,6 +36,7 @@ use std::ffi::CString;
 use std::marker::PhantomData;
 use std::os::raw::{c_int, c_void};
 use std::path::Path;
+use std::sync::Mutex;
 
 // Walk behavior flags (must match include/zlob.h).
 const WALK_GITIGNORE: u32 = 1 << 0;
@@ -159,12 +160,16 @@ pub enum WalkEntryKind {
 /// For raw `walkdir` semantics use `.git_ignore(false).hidden(false)`.
 #[derive(Debug, Clone)]
 pub struct WalkBuilder {
-    root: CString,
+    /// `Err` when the root contained an interior NUL — surfaced by
+    /// [`Self::build`]/[`Self::run`] instead of silently walking elsewhere.
+    root: Result<CString, ZlobError>,
     flags: u32,
     meta: WalkMetadata,
     threads: u16,
     max_depth: u16,
-    pattern: Option<CString>,
+    /// `Err` when a pattern contained an interior NUL — surfaced by
+    /// [`Self::build`]/[`Self::run`] instead of silently dropping the filter.
+    pattern: Result<Option<CString>, ZlobError>,
     pattern_flags: u32,
 }
 
@@ -172,12 +177,12 @@ impl WalkBuilder {
     pub fn new(root: impl AsRef<Path>) -> Self {
         let bytes = path_to_bytes(root.as_ref());
         Self {
-            root: CString::new(bytes).unwrap_or_default(),
+            root: CString::new(bytes).map_err(|_| ZlobError::InvalidInput),
             flags: WALK_GITIGNORE | WALK_SKIP_HIDDEN,
             meta: WalkMetadata::default(),
             threads: 0,
             max_depth: 0,
-            pattern: None,
+            pattern: Ok(None),
             pattern_flags: 0,
         }
     }
@@ -247,9 +252,10 @@ impl WalkBuilder {
     ///
     /// Compiled with brace expansion + recursive `**` by default; use
     /// [`Self::glob_with_flags`] for different pattern semantics.
-    /// Pass `None` to clear.
     pub fn glob(&mut self, pattern: impl AsRef<str>) -> &mut Self {
-        self.pattern = CString::new(pattern.as_ref()).ok();
+        self.pattern = CString::new(pattern.as_ref())
+            .map(Some)
+            .map_err(|_| ZlobError::InvalidInput);
         self.pattern_flags = 0; // library default: BRACE | DOUBLESTAR_RECURSIVE
         self
     }
@@ -261,7 +267,9 @@ impl WalkBuilder {
         pattern: impl AsRef<str>,
         flags: crate::ZlobFlags,
     ) -> &mut Self {
-        self.pattern = CString::new(pattern.as_ref()).ok();
+        self.pattern = CString::new(pattern.as_ref())
+            .map(Some)
+            .map_err(|_| ZlobError::InvalidInput);
         self.pattern_flags = flags.bits() as u32;
         self
     }
@@ -280,19 +288,26 @@ impl WalkBuilder {
         self
     }
 
-    fn options(&self) -> ffi::zlob_walk_options_t {
-        ffi::zlob_walk_options_t {
-            flags: self.flags,
-            meta_mask: self.meta.to_mask(),
-            threads: self.threads,
-            max_depth: self.max_depth,
-            errfunc: None,
-            pattern: self
-                .pattern
-                .as_ref()
-                .map_or(std::ptr::null(), |p| p.as_ptr()),
-            pattern_flags: self.pattern_flags,
-        }
+    /// Validated root + options. The returned pattern/root pointers borrow
+    /// from `self` and stay valid for the duration of the FFI call.
+    fn checked_options(&self) -> Result<(&CString, ffi::zlob_walk_options_t), ZlobError> {
+        let root = self.root.as_ref().map_err(|e| *e)?;
+        let pattern = match self.pattern.as_ref().map_err(|e| *e)? {
+            Some(p) => p.as_ptr(),
+            None => std::ptr::null(),
+        };
+        Ok((
+            root,
+            ffi::zlob_walk_options_t {
+                flags: self.flags,
+                meta_mask: self.meta.to_mask(),
+                threads: self.threads,
+                max_depth: self.max_depth,
+                errfunc: None,
+                pattern,
+                pattern_flags: self.pattern_flags,
+            },
+        ))
     }
 
     /// Walk the tree and materialize all entries in one call.
@@ -301,13 +316,13 @@ impl WalkBuilder {
     /// accumulate into lock-free private buffers and the result crosses the
     /// FFI boundary exactly once.
     pub fn build(&self) -> Result<WalkResults, ZlobError> {
-        let opts = self.options();
+        let (root, opts) = self.checked_options()?;
         let mut out = ffi::zlob_walk_result_t {
             entries: std::ptr::null_mut(),
             count: 0,
             _storage: std::ptr::null_mut(),
         };
-        let rc = unsafe { ffi::zlob_walk_collect(self.root.as_ptr(), &opts, &mut out) };
+        let rc = unsafe { ffi::zlob_walk_collect(root.as_ptr(), &opts, &mut out) };
         match rc {
             0 => Ok(WalkResults { raw: out }),
             _ => Err(rc_to_error(rc)),
@@ -319,10 +334,20 @@ impl WalkBuilder {
     /// With more than one thread the visitor is called concurrently from
     /// worker threads, hence `Sync`. Entry borrows are only valid for the
     /// duration of the call.
+    ///
+    /// A panicking visitor stops the walk; the panic resumes on the calling
+    /// thread once the walk has wound down.
     pub fn run<F>(&self, visitor: F) -> Result<(), ZlobError>
     where
         F: Fn(WalkEntry<'_>) -> WalkState + Sync,
     {
+        struct VisitCtx<'a, F> {
+            visitor: &'a F,
+            // First panic payload from any worker; replayed after the FFI
+            // call returns (unwinding across the Zig frames is UB).
+            panic: Mutex<Option<Box<dyn std::any::Any + Send + 'static>>>,
+        }
+
         unsafe extern "C" fn trampoline<F>(
             entry: *const ffi::zlob_walk_entry_t,
             ctx: *mut c_void,
@@ -330,28 +355,41 @@ impl WalkBuilder {
         where
             F: Fn(WalkEntry<'_>) -> WalkState + Sync,
         {
-            let visitor = unsafe { &*(ctx as *const F) };
+            let ctx = unsafe { &*(ctx as *const VisitCtx<'_, F>) };
             let entry = WalkEntry {
                 raw: unsafe { &*entry },
                 _marker: PhantomData,
             };
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| visitor(entry))) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (ctx.visitor)(entry))) {
                 Ok(WalkState::Continue) => 0,
                 Ok(WalkState::SkipDir) => 1,
                 Ok(WalkState::Quit) => 2,
-                Err(_) => 2, // poison the walk on panic; don't unwind into Zig
+                Err(payload) => {
+                    let mut slot = ctx.panic.lock().unwrap_or_else(|p| p.into_inner());
+                    if slot.is_none() {
+                        *slot = Some(payload);
+                    }
+                    2 // stop the walk; don't unwind into Zig
+                }
             }
         }
 
-        let opts = self.options();
+        let (root, opts) = self.checked_options()?;
+        let ctx = VisitCtx {
+            visitor: &visitor,
+            panic: Mutex::new(None),
+        };
         let rc = unsafe {
             ffi::zlob_walk(
-                self.root.as_ptr(),
+                root.as_ptr(),
                 &opts,
                 Some(trampoline::<F>),
-                &visitor as *const F as *mut c_void,
+                &ctx as *const VisitCtx<'_, F> as *mut c_void,
             )
         };
+        if let Some(payload) = ctx.panic.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            std::panic::resume_unwind(payload);
+        }
         match rc {
             0 => Ok(()),
             _ => Err(rc_to_error(rc)),
@@ -729,6 +767,41 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 5);
         assert!(results.iter().all(|e| e.depth() == 1));
+    }
+
+    #[test]
+    fn interior_nul_is_an_error_not_a_silent_default() {
+        // A root with an interior NUL must NOT silently walk the cwd.
+        let err = WalkBuilder::new("bad\0root").build().unwrap_err();
+        assert_eq!(err, ZlobError::InvalidInput);
+        let err = WalkBuilder::new("bad\0root")
+            .run(|_| WalkState::Continue)
+            .unwrap_err();
+        assert_eq!(err, ZlobError::InvalidInput);
+
+        // A pattern with an interior NUL must NOT silently drop the filter.
+        let dir = make_tree();
+        let err = WalkBuilder::new(dir.path())
+            .glob("*.\0rs")
+            .build()
+            .unwrap_err();
+        assert_eq!(err, ZlobError::InvalidInput);
+        // A later valid pattern clears the error.
+        let ok = WalkBuilder::new(dir.path())
+            .glob("*.\0rs")
+            .glob("**/*.rs")
+            .build();
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "visitor exploded")]
+    fn visitor_panic_propagates_to_caller() {
+        let dir = make_tree();
+        let _ = WalkBuilder::new(dir.path())
+            .git_ignore(false)
+            .hidden(false)
+            .run(|_| panic!("visitor exploded"));
     }
 
     #[test]

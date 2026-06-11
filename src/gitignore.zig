@@ -119,9 +119,11 @@ pub const GitIgnore = struct {
         return rest;
     }
 
-    /// Parse gitignore content - takes ownership of the content slice
-    /// (content must be allocated with `allocator`; freed by deinit()).
+    /// Parse gitignore content - takes ownership of the content slice on
+    /// ALL paths (content must be allocated with `allocator`; freed by
+    /// deinit() on success, immediately on error).
     pub fn parseOwned(allocator: Allocator, content: []const u8) !Self {
+        errdefer allocator.free(content);
         const PatternList = std.array_list.AlignedManaged(Pattern, null);
 
         var patterns_list = PatternList.init(allocator);
@@ -197,17 +199,26 @@ pub const GitIgnore = struct {
 
         // Convert suffix ArrayLists to slices
         var suffix_patterns = std.StringHashMap([]Pattern).init(allocator);
-        errdefer suffix_patterns.deinit();
+        errdefer {
+            var it = suffix_patterns.valueIterator();
+            while (it.next()) |slice| allocator.free(slice.*);
+            suffix_patterns.deinit();
+        }
 
         var suffix_iter = suffix_map.iterator();
         while (suffix_iter.next()) |entry| {
             const slice = try entry.value_ptr.toOwnedSlice();
+            errdefer allocator.free(slice);
             try suffix_patterns.put(entry.key_ptr.*, slice);
         }
 
+        const patterns = try patterns_list.toOwnedSlice();
+        errdefer allocator.free(patterns);
+        const wildcard_patterns = try wildcard_list.toOwnedSlice();
+
         return Self{
-            .patterns = try patterns_list.toOwnedSlice(),
-            .wildcard_patterns = try wildcard_list.toOwnedSlice(),
+            .patterns = patterns,
+            .wildcard_patterns = wildcard_patterns,
             .literal_dirs = literal_dirs,
             .literal_files = literal_files,
             .suffix_patterns = suffix_patterns,

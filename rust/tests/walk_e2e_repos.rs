@@ -4,6 +4,7 @@
 //! gitignored `target/` directories, then walks each repo with:
 //!   - zlob plain      vs walkdir          (must agree exactly)
 //!   - zlob gitignore  vs the ignore crate (must agree exactly)
+//!
 //! and verifies none of the injected trash leaks through gitignore filtering.
 //!
 //! Network-bound (git clone), so it is #[ignore]d by default. Run with:

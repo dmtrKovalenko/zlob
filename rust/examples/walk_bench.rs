@@ -111,7 +111,9 @@ fn main() {
         walkdir::WalkDir::new(&root)
             .into_iter()
             .filter_map(Result::ok)
-            .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0) as usize)
+            .inspect(|e| {
+                std::hint::black_box(e.metadata().map(|m| m.len()).unwrap_or(0));
+            })
             .count()
             - 1
     });

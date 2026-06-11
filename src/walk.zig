@@ -200,9 +200,9 @@ pub const Options = struct {
     sort: bool = false,
     err_callback: ?ErrCallbackFn = null,
     abort_on_error: bool = false,
-    /// Io instance for the std_fs fallback backend (Windows etc.).
-    /// Unused by the Linux/macOS native backends. Defaults to a blocking
-    /// single-threaded Io that is safe to use from multiple workers.
+    /// Io instance used for queue synchronization and by the std_fs
+    /// fallback backend (platforms without a native scanner). Defaults to a
+    /// blocking single-threaded Io that is safe to use from multiple workers.
     io: ?std.Io = null,
 };
 
@@ -484,17 +484,20 @@ fn workerLoop(sh: *Shared, w: *Worker) void {
 
 const WalkError = error{ Aborted, OutOfMemory };
 
+/// Maps an open/scan error to the platform's errno value (they differ across
+/// OSes — e.g. ELOOP is 40 on Linux but 62 on Darwin).
 fn errnoFromOpenError(err: anyerror) c_int {
-    return switch (err) {
-        error.AccessDenied, error.PermissionDenied => 13, // EACCES
-        error.FileNotFound => 2, // ENOENT
-        error.NotDir => 20, // ENOTDIR
-        error.SymLinkLoop => 40, // ELOOP
-        error.NameTooLong => 36, // ENAMETOOLONG
-        error.SystemResources, error.OutOfMemory => 12, // ENOMEM
-        error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => 24, // EMFILE
-        else => 5, // EIO
+    const e: std.c.E = switch (err) {
+        error.AccessDenied, error.PermissionDenied => .ACCES,
+        error.FileNotFound => .NOENT,
+        error.NotDir => .NOTDIR,
+        error.SymLinkLoop => .LOOP,
+        error.NameTooLong => .NAMETOOLONG,
+        error.SystemResources, error.OutOfMemory => .NOMEM,
+        error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => .MFILE,
+        else => .IO,
     };
+    return @intFromEnum(e);
 }
 
 /// Report a per-directory error through the callback; error.Aborted when the
@@ -791,6 +794,39 @@ fn dirKeyAt(sh: *Shared, handle: Handle, name: []const u8) ?InodeKey {
     return null;
 }
 
+/// Marks the walk root itself as visited so a symlink pointing back at the
+/// root is not descended (child dirs are deduped individually, but the
+/// root's own files would otherwise be reported twice).
+fn recordRootVisited(sh: *Shared) void {
+    const root = if (sh.root_path.len == 0) "." else sh.root_path;
+    if (is_windows_backend) {
+        // Symlink following is not implemented on the ntdll backend.
+        return;
+    } else if (is_posix_backend) {
+        var path_z: [MAX_PATH:0]u8 = undefined;
+        if (root.len >= MAX_PATH) return;
+        @memcpy(path_z[0..root.len], root);
+        path_z[root.len] = 0;
+        if (builtin.os.tag == .linux) {
+            var stx: linux.Statx = undefined;
+            const rc = linux.statx(AT_FDCWD, path_z[0..root.len :0], 0, .{ .INO = true }, &stx);
+            if (linux.errno(rc) != .SUCCESS) return;
+            const dev = (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor);
+            _ = sh.visitedBefore(.{ .dev = dev, .ino = stx.ino });
+        } else {
+            var st: std.c.Stat = undefined;
+            if (std.c.fstatat(AT_FDCWD, path_z[0..root.len :0], &st, 0) != 0) return;
+            _ = sh.visitedBefore(.{
+                .dev = @bitCast(@as(i64, @intCast(st.dev))),
+                .ino = @intCast(st.ino),
+            });
+        }
+    } else {
+        const stat = std.Io.Dir.cwd().statFile(sh.io, root, .{ .follow_symlinks = true }) catch return;
+        _ = sh.visitedBefore(.{ .dev = 0, .ino = @intCast(stat.inode) });
+    }
+}
+
 const StatLite = struct { is_dir: bool, key: InodeKey };
 
 fn statEntry(sh: *Shared, handle: Handle, name: []const u8, follow: bool) ?StatLite {
@@ -828,6 +864,8 @@ fn statEntry(sh: *Shared, handle: Handle, name: []const u8, follow: bool) ?StatL
         const stat = handle.statFile(sh.io, name, .{ .follow_symlinks = follow }) catch return null;
         return .{
             .is_dir = stat.kind == .directory,
+            // std.Io stat doesn't expose the device id; same-inode dirs on
+            // different devices can be falsely deduped under follow mode.
             .key = .{ .dev = 0, .ino = @intCast(stat.inode) },
         };
     }
@@ -841,8 +879,8 @@ fn statEntry(sh: *Shared, handle: Handle, name: []const u8, follow: bool) ?StatL
 /// Returns null (and stays on the parent chain) on any read/parse problem.
 fn loadIgnoreNode(sh: *Shared, handle: Handle, task: *DirTask) WalkError!?*IgnoreNode {
     const content = readSmallFile(sh, handle, ".gitignore") orelse return null;
+    // parseOwned owns `content` on all paths, including errors.
     var gi = GitIgnore.parseOwned(sh.gpa, content) catch |err| {
-        sh.gpa.free(content);
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return null;
     };
@@ -969,6 +1007,9 @@ fn scanLinux(sh: *Shared, w: *Worker, fd: posix.fd_t) ScanFailure!void {
             const d_ino = mem.readInt(u64, w.io_buf[base..][0..8], .little);
             const reclen = mem.readInt(u16, w.io_buf[base + 16 ..][0..2], .little);
             const d_type = w.io_buf[base + 18];
+            // A zero reclen would loop forever; only a malformed (FUSE)
+            // filesystem can produce one.
+            if (reclen == 0) return error.ReadFailed;
             off += reclen;
 
             const name_ptr: [*:0]const u8 = @ptrCast(w.io_buf.ptr + base + 19);
@@ -1280,7 +1321,20 @@ fn walkInternal(
     var prefix_buf: [MAX_PATH]u8 = undefined;
     var prefix_len: usize = 0;
     if (root.len > 0) {
-        if (root.len >= MAX_PATH - 1) return error.Aborted;
+        if (root.len >= MAX_PATH - 1) {
+            // The root doesn't fit the path-assembly buffer. Report it like
+            // any other directory error rather than pretending the user
+            // aborted; the walk is then empty.
+            if (options.err_callback) |cb| {
+                var path_z: [MAX_PATH:0]u8 = undefined;
+                @memcpy(path_z[0 .. MAX_PATH - 1], root[0 .. MAX_PATH - 1]);
+                path_z[MAX_PATH - 1] = 0;
+                if (cb(&path_z, errnoFromOpenError(error.NameTooLong)) != 0)
+                    return error.Aborted;
+            }
+            if (options.abort_on_error) return error.Aborted;
+            return;
+        }
         @memcpy(prefix_buf[0..root.len], root);
         prefix_len = root.len;
         if (root[root.len - 1] != '/') {
@@ -1317,6 +1371,8 @@ fn walkInternal(
         sh.queue.deinit(gpa);
         sh.visited.deinit(gpa);
     }
+
+    if (options.follow_symlinks) recordRootVisited(&sh);
 
     // All allocations that can fail happen before the root task is queued so
     // an early error can't leak in-flight tasks.

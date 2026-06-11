@@ -10,6 +10,10 @@ pub enum ZlobError {
 
     /// Read error or operation aborted (ZLOB_ABORTED).
     Aborted,
+
+    /// An argument could not be passed to the native library, e.g. a path or
+    /// pattern containing an interior NUL byte.
+    InvalidInput,
 }
 
 impl fmt::Display for ZlobError {
@@ -17,6 +21,9 @@ impl fmt::Display for ZlobError {
         match self {
             ZlobError::NoSpace => write!(f, "out of memory"),
             ZlobError::Aborted => write!(f, "operation aborted or read error"),
+            ZlobError::InvalidInput => {
+                write!(f, "argument contains an interior NUL byte")
+            }
         }
     }
 }

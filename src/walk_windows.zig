@@ -44,6 +44,12 @@ pub const FILE_ID_BOTH_DIR_INFORMATION = extern struct {
 /// (1970-01-01) in 100ns intervals.
 const windows_epoch_offset: i64 = 116444736000000000;
 
+// Name-surrogate reparse tags — the only reparse points that behave like
+// links (matches what Rust's std considers a symlink). Other tags (cloud
+// placeholders, dedup, appexeclinks, ...) are materially regular files/dirs.
+const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA0000003;
+const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000000C;
+
 inline fn filetimeToUnixNs(ft: i64) i64 {
     return (ft -% windows_epoch_offset) *% 100;
 }
@@ -110,20 +116,27 @@ pub const Scanner = if (!supported) struct {} else struct {
                 if (!try self.refill()) return null;
             }
             const entry = if (self.use_id)
-                self.parseOne(FILE_ID_BOTH_DIR_INFORMATION)
+                try self.parseOne(FILE_ID_BOTH_DIR_INFORMATION)
             else
-                self.parseOne(w.FILE_BOTH_DIR_INFORMATION);
+                try self.parseOne(w.FILE_BOTH_DIR_INFORMATION);
             if (entry) |e| return e;
         }
     }
 
-    fn parseOne(self: *Scanner, comptime T: type) ?walk.RawEntry {
+    fn parseOne(self: *Scanner, comptime T: type) ScanError!?walk.RawEntry {
+        // Bounds-check the record before touching it: the kernel guarantees
+        // well-formed batches, but user-mode filesystem drivers (WinFsp
+        // et al.) have shipped bugs here and the cost is two compares.
+        const rec_start = self.index;
+        const name_off = @offsetOf(T, "FileName");
+        if (rec_start + name_off > self.end) return error.ReadFailed;
         // The official docs guarantee proper alignment but faulty VM /
         // sandboxing layers have been seen to break it; match std and assume
         // only 2-byte alignment.
-        const info: *align(2) T = @ptrCast(@alignCast(&self.buf[self.index]));
+        const info: *align(2) T = @ptrCast(@alignCast(&self.buf[rec_start]));
+        if (rec_start + name_off + info.FileNameLength > self.end) return error.ReadFailed;
         if (info.NextEntryOffset != 0) {
-            self.index += info.NextEntryOffset;
+            self.index = rec_start + info.NextEntryOffset;
         } else {
             self.index = self.end;
         }
@@ -136,9 +149,17 @@ pub const Scanner = if (!supported) struct {} else struct {
         const name_len = std.unicode.wtf16LeToWtf8(&self.name_buf, name_w);
 
         const attrs = info.FileAttributes;
-        const kind: walk.EntryKind = if (attrs.REPARSE_POINT)
-            .sym_link
-        else if (attrs.DIRECTORY)
+        const kind: walk.EntryKind = if (attrs.REPARSE_POINT) blk: {
+            // For directory-enumeration info classes EaSize doubles as the
+            // reparse tag when REPARSE_POINT is set (documented for
+            // FileBothDirectoryInformation and friends). Only name
+            // surrogates are links; placeholders/dedup files keep their
+            // real kind.
+            const tag: u32 = info.EaSize;
+            if (tag == IO_REPARSE_TAG_SYMLINK or tag == IO_REPARSE_TAG_MOUNT_POINT)
+                break :blk .sym_link;
+            break :blk if (attrs.DIRECTORY) .directory else .file;
+        } else if (attrs.DIRECTORY)
             .directory
         else
             .file;
