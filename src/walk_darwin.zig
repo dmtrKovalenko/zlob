@@ -76,6 +76,87 @@ extern "c" fn getattrlistbulk(
     options: u64,
 ) c_int;
 
+/// Raw 64-bit-inode directory read. This is the syscall wrapper `readdir`
+/// itself dispatches to under 64-bit inodes (the public `getdirentries`
+/// deliberately link-errors there). Calling it directly on the directory fd
+/// avoids the `dup`/`fstat`/`fstatfs`/`fcntl`/`closedir` overhead that
+/// `fdopendir` pays per directory — roughly four extra syscalls each.
+extern "c" fn __getdirentries64(fd: c_int, buf: [*]u8, bufsize: usize, basep: *u64) isize;
+
+/// macOS `struct dirent` (64-bit inode): ino(8) seekoff(8) reclen(2)
+/// namlen(2) type(1) name[]. The name begins at byte 21 of each record.
+pub const DIRENT_TYPE_OFF = 20;
+pub const DIRENT_NAME_OFF = 21;
+
+pub const DType = struct {
+    pub const UNKNOWN: u8 = 0;
+    pub const DIR: u8 = 4;
+    pub const REG: u8 = 8;
+    pub const LNK: u8 = 10;
+};
+
+/// One getdirentries64 batch. `name`s point into `buf` and are valid until
+/// the next `refill`.
+pub const DirEntries = if (!supported) struct {} else struct {
+    fd: c_int,
+    buf: []align(8) u8,
+    len: usize = 0,
+    pos: usize = 0,
+    basep: u64 = 0,
+
+    pub const Entry = struct { name: []const u8, kind: walk.EntryKind };
+
+    pub fn init(fd: c_int, buf: []align(8) u8) DirEntries {
+        return .{ .fd = fd, .buf = buf };
+    }
+
+    pub const Error = error{ReadFailed};
+
+    fn refill(self: *DirEntries) Error!bool {
+        while (true) {
+            const r = __getdirentries64(self.fd, self.buf.ptr, self.buf.len, &self.basep);
+            if (r < 0) {
+                if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+                return error.ReadFailed;
+            }
+            if (r == 0) return false;
+            self.len = @intCast(r);
+            self.pos = 0;
+            return true;
+        }
+    }
+
+    pub fn next(self: *DirEntries) Error!?Entry {
+        while (true) {
+            if (self.pos >= self.len) {
+                if (!try self.refill()) return null;
+            }
+            const rec = self.pos;
+            if (rec + DIRENT_NAME_OFF > self.len) return error.ReadFailed;
+            const reclen = readUnaligned(u16, self.buf, rec + 16);
+            const namlen = readUnaligned(u16, self.buf, rec + 18);
+            const d_type = self.buf[rec + DIRENT_TYPE_OFF];
+            // A zero reclen would spin forever; only a malformed fs yields one.
+            if (reclen < DIRENT_NAME_OFF or rec + reclen > self.len) return error.ReadFailed;
+            self.pos = rec + reclen;
+
+            const name_start = rec + DIRENT_NAME_OFF;
+            if (name_start + namlen > self.len) return error.ReadFailed;
+            const name = self.buf[name_start .. name_start + namlen];
+            if (name.len == 0) continue;
+            if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
+
+            const kind: walk.EntryKind = switch (d_type) {
+                DType.REG => .file,
+                DType.DIR => .directory,
+                DType.LNK => .sym_link,
+                else => .unknown,
+            };
+            return .{ .name = name, .kind = kind };
+        }
+    }
+};
+
 inline fn readUnaligned(comptime T: type, buf: []const u8, pos: usize) T {
     var v: T = undefined;
     @memcpy(@as([*]u8, @ptrCast(&v))[0..@sizeOf(T)], buf[pos..][0..@sizeOf(T)]);
@@ -111,6 +192,7 @@ pub const BulkScanner = if (!supported) struct {} else struct {
     primed: bool = false,
 
     pub fn init(fd: std.c.fd_t, buf: []align(8) u8, mask: walk.MetaMask) BulkScanner {
+        // TODO unify the mask so we do not need to recreate it & make the mask
         var common: u32 = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_ERROR | ATTR_CMN_NAME | ATTR_CMN_OBJTYPE;
         if (mask.btime) common |= ATTR_CMN_CRTIME;
         if (mask.mtime) common |= ATTR_CMN_MODTIME;

@@ -25,6 +25,9 @@ pub const Pattern = struct {
     is_literal: bool,
     /// Pattern text contains / (requires full path matching if not anchored)
     has_slash: bool,
+    /// Required last byte of matching strings (null if not statically known).
+    /// Used for cheap rejection of wildcard patterns before fnmatch.
+    required_last_char: ?u8,
     /// For simple suffix patterns like *.rs - the suffix without * (e.g., ".rs")
     /// Used for both suffix_patterns hash map grouping and fast matching
     suffix: ?[]const u8,
@@ -55,8 +58,16 @@ pub const GitIgnore = struct {
     literal_dirs: StringHashMap,
     /// Literal file patterns for O(1) lookup
     literal_files: StringHashMap,
-    /// Suffix patterns grouped by extension (e.g., ".rs" -> [pattern for *.rs])
-    suffix_patterns: std.StringHashMap([]Pattern),
+    /// Anchored literal paths for O(1) exact lookup
+    anchored_literal_paths: StringHashMap,
+    /// Anchored literal directory patterns that also match descendants
+    anchored_literal_dirs: []Pattern,
+    /// Simple suffix patterns like "*.rs", "*~", "*.vcxproj.filters"
+    suffix_patterns: []Pattern,
+    /// Inclusive start offset in suffix_patterns for each suffix last byte.
+    suffix_bucket_start: [256]u32,
+    /// Exclusive end offset in suffix_patterns for each suffix last byte.
+    suffix_bucket_end: [256]u32,
     /// Whether any negation pattern exists (enables early termination)
     has_negations: bool,
     /// Index of first negation pattern (for early termination)
@@ -138,14 +149,14 @@ pub const GitIgnore = struct {
         var literal_files = StringHashMap.init(allocator);
         errdefer literal_files.deinit();
 
-        var suffix_map = std.StringHashMap(PatternList).init(allocator);
-        defer {
-            var iter = suffix_map.valueIterator();
-            while (iter.next()) |list| {
-                list.deinit();
-            }
-            suffix_map.deinit();
-        }
+        var anchored_literal_paths = StringHashMap.init(allocator);
+        errdefer anchored_literal_paths.deinit();
+
+        var anchored_literal_dir_list = PatternList.init(allocator);
+        defer anchored_literal_dir_list.deinit();
+
+        var suffix_list = PatternList.init(allocator);
+        defer suffix_list.deinit();
 
         var has_negations = false;
         var first_negation_index: u16 = std.math.maxInt(u16);
@@ -169,7 +180,18 @@ pub const GitIgnore = struct {
                 }
 
                 // Categorize pattern for optimized lookup
-                if (pattern.is_literal and !pattern.anchored) {
+                if (pattern.is_literal and pattern.anchored) {
+                    const match = PatternMatch{
+                        .negated = pattern.negated,
+                        .dir_only = pattern.dir_only,
+                        .index = index,
+                    };
+                    if (pattern.dir_only) {
+                        try anchored_literal_dir_list.append(pattern);
+                    } else {
+                        try anchored_literal_paths.put(pattern.text, match);
+                    }
+                } else if (pattern.is_literal and !pattern.anchored) {
                     // Simple literal pattern - add to hash map
                     const match = PatternMatch{
                         .negated = pattern.negated,
@@ -182,12 +204,9 @@ pub const GitIgnore = struct {
                         try literal_files.put(pattern.text, match);
                     }
                 } else if (pattern.suffix) |suffix| {
+                    _ = suffix;
                     // Suffix pattern like *.rs
-                    const result = try suffix_map.getOrPut(suffix);
-                    if (!result.found_existing) {
-                        result.value_ptr.* = PatternList.init(allocator);
-                    }
-                    try result.value_ptr.append(pattern);
+                    try suffix_list.append(pattern);
                 } else {
                     // Wildcard pattern OR anchored literal pattern
                     try wildcard_list.append(pattern);
@@ -197,31 +216,41 @@ pub const GitIgnore = struct {
             }
         }
 
-        // Convert suffix ArrayLists to slices
-        var suffix_patterns = std.StringHashMap([]Pattern).init(allocator);
-        errdefer {
-            var it = suffix_patterns.valueIterator();
-            while (it.next()) |slice| allocator.free(slice.*);
-            suffix_patterns.deinit();
-        }
-
-        var suffix_iter = suffix_map.iterator();
-        while (suffix_iter.next()) |entry| {
-            const slice = try entry.value_ptr.toOwnedSlice();
-            errdefer allocator.free(slice);
-            try suffix_patterns.put(entry.key_ptr.*, slice);
-        }
-
         const patterns = try patterns_list.toOwnedSlice();
         errdefer allocator.free(patterns);
         const wildcard_patterns = try wildcard_list.toOwnedSlice();
+        errdefer allocator.free(wildcard_patterns);
+        const anchored_literal_dirs = try anchored_literal_dir_list.toOwnedSlice();
+        errdefer allocator.free(anchored_literal_dirs);
+        const suffix_patterns = try suffix_list.toOwnedSlice();
+        std.sort.block(Pattern, suffix_patterns, {}, struct {
+            fn lessThan(_: void, a: Pattern, b: Pattern) bool {
+                const a_last = a.suffix.?[a.suffix.?.len - 1];
+                const b_last = b.suffix.?[b.suffix.?.len - 1];
+                if (a_last != b_last) return a_last < b_last;
+                return a.suffix_len < b.suffix_len;
+            }
+        }.lessThan);
+        var suffix_bucket_start = [_]u32{std.math.maxInt(u32)} ** 256;
+        var suffix_bucket_end = [_]u32{0} ** 256;
+        for (suffix_patterns, 0..) |pattern, i| {
+            const last = pattern.suffix.?[pattern.suffix.?.len - 1];
+            if (suffix_bucket_start[last] == std.math.maxInt(u32)) {
+                suffix_bucket_start[last] = @intCast(i);
+            }
+            suffix_bucket_end[last] = @intCast(i + 1);
+        }
 
         return Self{
             .patterns = patterns,
             .wildcard_patterns = wildcard_patterns,
             .literal_dirs = literal_dirs,
             .literal_files = literal_files,
+            .anchored_literal_paths = anchored_literal_paths,
+            .anchored_literal_dirs = anchored_literal_dirs,
             .suffix_patterns = suffix_patterns,
+            .suffix_bucket_start = suffix_bucket_start,
+            .suffix_bucket_end = suffix_bucket_end,
             .has_negations = has_negations,
             .first_negation_index = first_negation_index,
             .allocator = allocator,
@@ -234,6 +263,20 @@ pub const GitIgnore = struct {
     pub fn parse(allocator: Allocator, content: []const u8) !Self {
         const owned = try allocator.dupe(u8, content);
         return try parseOwned(allocator, owned);
+    }
+
+    /// Extract the required last character from a pattern for early rejection.
+    /// Returns null if the last character cannot be determined (ends with *, ?, or ]).
+    fn extractRequiredLastChar(pattern: []const u8) ?u8 {
+        if (pattern.len == 0) return null;
+        var i: usize = pattern.len;
+        while (i > 0) {
+            i -= 1;
+            const c = pattern[i];
+            if (c == '*' or c == '?' or c == ']') return null;
+            return c;
+        }
+        return null;
     }
 
     /// Parse a single line - returns pattern with text as slice into line
@@ -301,6 +344,7 @@ pub const GitIgnore = struct {
             .has_double_star = mem.indexOf(u8, text, "**") != null,
             .is_literal = is_literal,
             .has_slash = has_slash,
+            .required_last_char = extractRequiredLastChar(text),
             .suffix = suffix,
             .suffix_len = suffix_len,
             .suffix_u32 = suffix_u32,
@@ -345,14 +389,14 @@ pub const GitIgnore = struct {
                 }
             }
 
-            if (glob.lastIndexOfCharSIMD(basename, '.')) |dot_pos| {
-                const suffix = basename[dot_pos..];
-                if (self.suffix_patterns.get(suffix)) |patterns| {
-                    // Any matching suffix pattern means ignored (check dir_only constraint)
-                    for (patterns) |pattern| {
-                        if (!pattern.dir_only or is_dir) return true;
-                    }
-                }
+            if (self.matchAnySuffix(basename, is_dir)) return true;
+
+            if (self.anchored_literal_paths.get(normalized_path)) |_| {
+                return true;
+            }
+
+            for (self.anchored_literal_dirs) |pattern| {
+                if (matchAnchoredLiteralDir(&pattern, normalized_path)) return true;
             }
 
             // Check wildcard patterns - these require actual pattern matching
@@ -363,6 +407,15 @@ pub const GitIgnore = struct {
                 // cannot match a parent directory. matchPatternFast handles the
                 // "is this file inside an ignored directory" check.
                 if (pattern.dir_only and !is_dir and !pattern.anchored and !pattern.has_slash) continue;
+                // Cheap rejection: if the required last char is known and doesn't
+                // match the end of the target string, skip the expensive fnmatch.
+                if (pattern.required_last_char) |rc| {
+                    if (!pattern.anchored and !pattern.has_slash) {
+                        if (basename.len == 0 or basename[basename.len - 1] != rc) continue;
+                    } else if (!pattern.has_double_star) {
+                        if (normalized_path.len == 0 or normalized_path[normalized_path.len - 1] != rc) continue;
+                    }
+                }
                 if (matchPatternFast(&pattern, normalized_path, basename)) {
                     return true;
                 }
@@ -371,20 +424,169 @@ pub const GitIgnore = struct {
             return null;
         }
 
-        // Slow path: has negations, must process all patterns in order
+        // Negation path: find the latest matching candidate. We still honor
+        // pattern order, but avoid scanning literal/suffix patterns that
+        // cannot match this basename.
         var ignored: ?bool = null;
-        for (self.patterns) |pattern| {
-            // For dir_only patterns checking a file: only skip if the pattern
-            // cannot match a parent directory. matchPatternFast handles the
-            // "is this file inside an ignored directory" check.
-            if (pattern.dir_only and !is_dir and !pattern.anchored and !pattern.has_slash) continue;
+        var best_index: u16 = 0;
 
+        if (is_dir) {
+            if (self.literal_dirs.get(basename)) |match| {
+                recordMatch(&best_index, &ignored, match.index, match.negated);
+            }
+        }
+
+        if (self.literal_files.get(basename)) |match| {
+            if (!match.dir_only or is_dir) {
+                recordMatch(&best_index, &ignored, match.index, match.negated);
+            }
+        }
+
+        self.recordSuffixMatches(basename, is_dir, &best_index, &ignored);
+
+        if (self.anchored_literal_paths.get(normalized_path)) |match| {
+            recordMatch(&best_index, &ignored, match.index, match.negated);
+        }
+
+        for (self.anchored_literal_dirs) |pattern| {
+            if (matchAnchoredLiteralDir(&pattern, normalized_path)) {
+                recordMatch(&best_index, &ignored, pattern.index, pattern.negated);
+            }
+        }
+
+        for (self.wildcard_patterns) |pattern| {
+            if (pattern.dir_only and !is_dir and !pattern.anchored and !pattern.has_slash) continue;
+            if (pattern.required_last_char) |rc| {
+                if (!pattern.anchored and !pattern.has_slash) {
+                    if (basename.len == 0 or basename[basename.len - 1] != rc) continue;
+                } else if (!pattern.has_double_star) {
+                    if (normalized_path.len == 0 or normalized_path[normalized_path.len - 1] != rc) continue;
+                }
+            }
             if (matchPatternFast(&pattern, normalized_path, basename)) {
-                ignored = !pattern.negated;
+                recordMatch(&best_index, &ignored, pattern.index, pattern.negated);
             }
         }
 
         return ignored;
+    }
+
+    inline fn recordMatch(best_index: *u16, ignored: *?bool, index: u16, negated: bool) void {
+        if (ignored.* == null or index >= best_index.*) {
+            best_index.* = index;
+            ignored.* = !negated;
+        }
+    }
+
+    inline fn matchAnchoredLiteralDir(pattern: *const Pattern, path: []const u8) bool {
+        const text = pattern.text;
+        if (mem.eql(u8, text, path)) return true;
+        return path.len > text.len and mem.startsWith(u8, path, text) and path[text.len] == '/';
+    }
+
+    inline fn tailPackedU32(basename: []const u8, suffix_len: u8) u32 {
+        var value: u32 = 0;
+        const start = basename.len - suffix_len;
+        @memcpy(@as([*]u8, @ptrCast(&value))[0..suffix_len], basename[start..][0..suffix_len]);
+        return value;
+    }
+
+    inline fn canSimdSuffixGroup(patterns: []const Pattern, index: usize) bool {
+        if (index + 4 > patterns.len) return false;
+        const len = patterns[index].suffix_len;
+        return len > 0 and len <= 4 and
+            patterns[index + 1].suffix_len == len and
+            patterns[index + 2].suffix_len == len and
+            patterns[index + 3].suffix_len == len;
+    }
+
+    inline fn matchSuffixGroup4(patterns: []const Pattern, basename: []const u8, is_dir: bool) @Vector(4, bool) {
+        const len = patterns[0].suffix_len;
+        if (basename.len < len) return @splat(false);
+        const tail: @Vector(4, u32) = @splat(tailPackedU32(basename, len));
+        const suffixes: @Vector(4, u32) = .{
+            patterns[0].suffix_u32,
+            patterns[1].suffix_u32,
+            patterns[2].suffix_u32,
+            patterns[3].suffix_u32,
+        };
+        const dir_ok: @Vector(4, bool) = .{
+            !patterns[0].dir_only or is_dir,
+            !patterns[1].dir_only or is_dir,
+            !patterns[2].dir_only or is_dir,
+            !patterns[3].dir_only or is_dir,
+        };
+        return (tail == suffixes) & dir_ok;
+    }
+
+    inline fn matchAnySuffix(self: *const Self, basename: []const u8, is_dir: bool) bool {
+        if (basename.len == 0) return false;
+        const bucket_key = basename[basename.len - 1];
+        const start = self.suffix_bucket_start[bucket_key];
+        if (start == std.math.maxInt(u32)) return false;
+        const patterns = self.suffix_patterns[start..self.suffix_bucket_end[bucket_key]];
+        var i: usize = 0;
+        while (i < patterns.len) {
+            if (canSimdSuffixGroup(patterns, i)) {
+                if (@reduce(.Or, matchSuffixGroup4(patterns[i..][0..4], basename, is_dir))) return true;
+                i += 4;
+                continue;
+            }
+            const pattern = patterns[i];
+            if ((!pattern.dir_only or is_dir) and matchSuffixFast(&pattern, basename)) return true;
+            i += 1;
+        }
+        return false;
+    }
+
+    inline fn recordSuffixMatches(self: *const Self, basename: []const u8, is_dir: bool, best_index: *u16, ignored: *?bool) void {
+        if (basename.len == 0) return;
+        const bucket_key = basename[basename.len - 1];
+        const start = self.suffix_bucket_start[bucket_key];
+        if (start == std.math.maxInt(u32)) return;
+        const patterns = self.suffix_patterns[start..self.suffix_bucket_end[bucket_key]];
+        var i: usize = 0;
+        while (i < patterns.len) {
+            if (canSimdSuffixGroup(patterns, i)) {
+                const matches = matchSuffixGroup4(patterns[i..][0..4], basename, is_dir);
+                if (matches[0]) recordMatch(best_index, ignored, patterns[i].index, patterns[i].negated);
+                if (matches[1]) recordMatch(best_index, ignored, patterns[i + 1].index, patterns[i + 1].negated);
+                if (matches[2]) recordMatch(best_index, ignored, patterns[i + 2].index, patterns[i + 2].negated);
+                if (matches[3]) recordMatch(best_index, ignored, patterns[i + 3].index, patterns[i + 3].negated);
+                i += 4;
+                continue;
+            }
+            const pattern = patterns[i];
+            if ((!pattern.dir_only or is_dir) and matchSuffixFast(&pattern, basename)) {
+                recordMatch(best_index, ignored, pattern.index, pattern.negated);
+            }
+            i += 1;
+        }
+    }
+
+    inline fn matchSuffixFast(pattern: *const Pattern, basename: []const u8) bool {
+        if (basename.len < pattern.suffix_len) return false;
+        const suffix_len = pattern.suffix_len;
+        return switch (suffix_len) {
+            1 => basename[basename.len - 1] == @as(u8, @truncate(pattern.suffix_u32)),
+            2 => blk: {
+                const tail_ptr = basename.ptr + basename.len - 2;
+                const tail: u16 = @as(*align(1) const u16, @ptrCast(tail_ptr)).*;
+                break :blk tail == @as(u16, @truncate(pattern.suffix_u32));
+            },
+            3 => blk: {
+                const tail_ptr = basename.ptr + basename.len - 3;
+                const tail_u16: u16 = @as(*align(1) const u16, @ptrCast(tail_ptr)).*;
+                const suffix_u16: u16 = @truncate(pattern.suffix_u32);
+                break :blk tail_u16 == suffix_u16 and tail_ptr[2] == pattern.suffix.?[2];
+            },
+            4 => blk: {
+                const tail_ptr = basename.ptr + basename.len - 4;
+                const tail: u32 = @as(*align(1) const u32, @ptrCast(tail_ptr)).*;
+                break :blk tail == pattern.suffix_u32;
+            },
+            else => mem.endsWith(u8, basename, pattern.suffix.?),
+        };
     }
 
     inline fn matchPatternFast(pattern: *const Pattern, path: []const u8, basename: []const u8) bool {
@@ -392,6 +594,9 @@ pub const GitIgnore = struct {
 
         // Anchored patterns match against full path only
         if (pattern.anchored) {
+            if (pattern.is_literal and !pattern.dir_only) {
+                return mem.eql(u8, text, path);
+            }
             // For directory patterns, also match paths that are inside the directory
             // e.g., pattern "rust/target" should match "rust/target/debug/foo.rs"
             if (pattern.dir_only) {
@@ -414,29 +619,7 @@ pub const GitIgnore = struct {
             // Fast path for simple suffix patterns (*.o, *.rs)
             // Use SIMD-style matching with pre-computed u32
             if (pattern.suffix_len > 0) {
-                if (basename.len < pattern.suffix_len) return false;
-
-                const suffix_len = pattern.suffix_len;
-                return switch (suffix_len) {
-                    1 => basename[basename.len - 1] == @as(u8, @truncate(pattern.suffix_u32)),
-                    2 => blk: {
-                        const tail_ptr = basename.ptr + basename.len - 2;
-                        const tail: u16 = @as(*align(1) const u16, @ptrCast(tail_ptr)).*;
-                        break :blk tail == @as(u16, @truncate(pattern.suffix_u32));
-                    },
-                    3 => blk: {
-                        const tail_ptr = basename.ptr + basename.len - 3;
-                        const tail_u16: u16 = @as(*align(1) const u16, @ptrCast(tail_ptr)).*;
-                        const suffix_u16: u16 = @truncate(pattern.suffix_u32);
-                        break :blk tail_u16 == suffix_u16 and tail_ptr[2] == pattern.suffix.?[2];
-                    },
-                    4 => blk: {
-                        const tail_ptr = basename.ptr + basename.len - 4;
-                        const tail: u32 = @as(*align(1) const u32, @ptrCast(tail_ptr)).*;
-                        break :blk tail == pattern.suffix_u32;
-                    },
-                    else => mem.endsWith(u8, basename, pattern.suffix.?),
-                };
+                return matchSuffixFast(pattern, basename);
             }
             // Literal patterns
             if (pattern.is_literal) {
@@ -448,6 +631,9 @@ pub const GitIgnore = struct {
 
         // Non-anchored patterns with / - match full path
         // For directory patterns, also match paths inside the directory
+        if (pattern.is_literal and !pattern.dir_only) {
+            return mem.eql(u8, text, path);
+        }
         if (pattern.dir_only) {
             if (path_matcher.matchGlobSimple(text, path)) return true;
             // Check if any path component matches and this is a child path
@@ -529,13 +715,8 @@ pub const GitIgnore = struct {
             }
         }
 
-        // Check anchored directory patterns (e.g., "rust/target/", "src/build/")
-        // These are stored in wildcard_patterns because they contain /
-        for (self.wildcard_patterns) |pattern| {
-            // Only check directory patterns that are anchored and literal
-            if (!pattern.dir_only) continue;
-            if (!pattern.anchored) continue;
-            if (!pattern.is_literal) continue;
+        // Check anchored literal directory patterns (e.g., "rust/target/", "src/build/")
+        for (self.anchored_literal_dirs) |pattern| {
             if (pattern.negated) continue;
 
             // For anchored literal directory patterns, check exact match
@@ -586,12 +767,7 @@ pub const GitIgnore = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        // Free suffix pattern slices
-        var suffix_iter = self.suffix_patterns.valueIterator();
-        while (suffix_iter.next()) |slice| {
-            self.allocator.free(slice.*);
-        }
-        self.suffix_patterns.deinit();
+        self.allocator.free(self.suffix_patterns);
 
         // Free duplicated keys in dir_cache
         var cache_iter = self.dir_cache.keyIterator();
@@ -602,8 +778,10 @@ pub const GitIgnore = struct {
 
         self.literal_dirs.deinit();
         self.literal_files.deinit();
+        self.anchored_literal_paths.deinit();
         self.allocator.free(self.patterns);
         self.allocator.free(self.wildcard_patterns);
+        self.allocator.free(self.anchored_literal_dirs);
         self.allocator.free(self.source);
     }
 };

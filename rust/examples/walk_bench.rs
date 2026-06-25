@@ -39,13 +39,26 @@ fn main() {
             .len()
     });
 
-    timeit("zlob plain parallel", iters, || {
+    timeit("zlob plain parallel (.build)", iters, || {
         zlob::walk::WalkBuilder::new(&root)
             .git_ignore(false)
             .hidden(false)
             .build()
             .unwrap()
             .len()
+    });
+
+    timeit("zlob plain parallel (.run)", iters, || {
+        let count = AtomicUsize::new(0);
+        zlob::walk::WalkBuilder::new(&root)
+            .git_ignore(false)
+            .hidden(false)
+            .run(|_| {
+                count.fetch_add(1, Ordering::Relaxed);
+                zlob::walk::WalkState::Continue
+            })
+            .unwrap();
+        count.load(Ordering::Relaxed)
     });
 
     timeit("walkdir", iters, || {
@@ -59,15 +72,33 @@ fn main() {
     println!();
 
     timeit("zlob gitignore serial", iters, || {
+        let count = AtomicUsize::new(0);
         zlob::walk::WalkBuilder::new(&root)
             .threads(1)
+            .run(|_| {
+                count.fetch_add(1, Ordering::Relaxed);
+                zlob::walk::WalkState::Continue
+            })
+            .unwrap();
+        count.load(Ordering::Relaxed)
+    });
+
+    timeit("zlob gitignore parallel (.run)", iters, || {
+        let count = AtomicUsize::new(0);
+        zlob::walk::WalkBuilder::new(&root)
+            .run(|_| {
+                count.fetch_add(1, Ordering::Relaxed);
+                zlob::walk::WalkState::Continue
+            })
+            .unwrap();
+        count.load(Ordering::Relaxed)
+    });
+
+    timeit("zlob gitignore parallel (.build)", iters, || {
+        zlob::walk::WalkBuilder::new(&root)
             .build()
             .unwrap()
             .len()
-    });
-
-    timeit("zlob gitignore parallel", iters, || {
-        zlob::walk::WalkBuilder::new(&root).build().unwrap().len()
     });
 
     timeit("ignore serial", iters, || {
