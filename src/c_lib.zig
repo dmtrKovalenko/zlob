@@ -792,6 +792,7 @@ const ZLOB_WALK_NO_REPORT_DIRS: u32 = 1 << 3;
 const ZLOB_WALK_SORT: u32 = 1 << 4;
 const ZLOB_WALK_ABORT_ON_ERROR: u32 = 1 << 5;
 const ZLOB_WALK_KEEP_GIT_DIR: u32 = 1 << 6;
+const ZLOB_WALK_RETAIN_IGNORE_RULES: u32 = 1 << 7;
 
 fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
     const v: zlob_walk_options_t = if (options) |p| p.* else .{};
@@ -801,8 +802,9 @@ fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
         .max_depth = v.max_depth,
         .follow_symlinks = f & ZLOB_WALK_FOLLOW_SYMLINKS != 0,
         .include_hidden = f & ZLOB_WALK_SKIP_HIDDEN == 0,
-        .respect_gitignore = f & ZLOB_WALK_GITIGNORE != 0,
+        .respect_git = f & ZLOB_WALK_GITIGNORE != 0,
         .skip_git_dir = f & ZLOB_WALK_KEEP_GIT_DIR == 0,
+        .retain_ignore_rules = f & ZLOB_WALK_RETAIN_IGNORE_RULES != 0,
         .report_dirs = f & ZLOB_WALK_NO_REPORT_DIRS == 0,
         .pattern = if (v.pattern) |p| mem.sliceTo(p, 0) else null,
         .pattern_flags = if (v.pattern_flags != 0)
@@ -873,12 +875,15 @@ pub export fn zlob_walk(
     }) catch |err| return switch (err) {
         error.Aborted => zlob_flags.ZLOB_ABORTED,
         error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
+        error.ReadFailed => zlob_flags.ZLOB_READ_FAILED,
+        error.PermissionDenied => zlob_flags.ZLOB_PERMISSION_DENIED,
+        error.NameTooLong => zlob_flags.ZLOB_NAME_TOO_LONG,
     };
     return 0;
 }
 
 const WalkResultHolder = struct {
-    results: walk.Results,
+    results: walk.WalkerResult,
 };
 
 pub export fn zlob_walk_collect(
@@ -893,10 +898,24 @@ pub export fn zlob_walk_collect(
         return switch (err) {
             error.Aborted => zlob_flags.ZLOB_ABORTED,
             error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
+            error.ReadFailed => zlob_flags.ZLOB_READ_FAILED,
+            error.PermissionDenied => zlob_flags.ZLOB_PERMISSION_DENIED,
+            error.NameTooLong => zlob_flags.ZLOB_NAME_TOO_LONG,
         };
 
     if (results.entries.len == 0) {
-        results.deinit();
+        // Keep a holder when reusable ignore rules were retained, even with no
+        // entries — the caller still wants to query them.
+        if (results.ignore_rules == null) {
+            results.deinit();
+            return 0;
+        }
+        const holder = allocator.create(WalkResultHolder) catch {
+            results.deinit();
+            return zlob_flags.ZLOB_NOSPACE;
+        };
+        holder.* = .{ .results = results };
+        out.* = .{ .entries = null, .count = 0, ._storage = @ptrCast(holder) };
         return 0;
     }
 
@@ -934,4 +953,47 @@ pub export fn zlob_walk_result_free(result: ?*zlob_walk_result_t) void {
         allocator.destroy(holder);
     }
     r.* = .{ .entries = null, .count = 0, ._storage = null };
+}
+
+/// Borrowed handle to the reusable ignore rules retained during the walk
+/// (requires ZLOB_WALK_RETAIN_IGNORE_RULES). Owned by `result`; valid until
+/// zlob_walk_result_free(). NULL when no rules were retained.
+pub export fn zlob_walk_result_ignore_rules(result: ?*const zlob_walk_result_t) ?*anyopaque {
+    const r = result orelse return null;
+    const storage = r._storage orelse return null;
+    const holder: *WalkResultHolder = @ptrCast(@alignCast(storage));
+    return @ptrCast(holder.results.ignore_rules orelse return null);
+}
+
+/// Returns nonzero when `path` (walk-root-relative) is ignored by the retained
+/// rules. `is_dir` should be nonzero for directories. `rules` is a handle from
+/// zlob_walk_result_ignore_rules().
+pub export fn zlob_ignore_rules_match(
+    rules: ?*anyopaque,
+    path: [*:0]const u8,
+    is_dir: c_int,
+) c_int {
+    const r: *const walk.IgnoreRules = @ptrCast(@alignCast(rules orelse return 0));
+    return @intFromBool(r.isIgnored(mem.sliceTo(path, 0), is_dir != 0));
+}
+
+/// Like zlob_ignore_rules_match but infers directory-ness from the path with
+/// zero syscalls: a trailing '/' marks a directory, otherwise a file.
+pub export fn zlob_ignore_rules_match_path(
+    rules: ?*anyopaque,
+    path: [*:0]const u8,
+) c_int {
+    const r: *const walk.IgnoreRules = @ptrCast(@alignCast(rules orelse return 0));
+    return @intFromBool(r.isIgnoredPath(mem.sliceTo(path, 0)));
+}
+
+/// Like zlob_ignore_rules_match but lstat()s `path` to determine
+/// directory-ness (symlinks not followed). A missing/unstattable path is
+/// treated as a non-directory. One syscall.
+pub export fn zlob_ignore_rules_match_untrusted(
+    rules: ?*anyopaque,
+    path: [*:0]const u8,
+) c_int {
+    const r: *const walk.IgnoreRules = @ptrCast(@alignCast(rules orelse return 0));
+    return @intFromBool(r.isIgnoredUntrusted(mem.sliceTo(path, 0)));
 }

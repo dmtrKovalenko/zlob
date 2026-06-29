@@ -46,6 +46,7 @@ const WALK_NO_REPORT_DIRS: u32 = 1 << 3;
 const WALK_SORT: u32 = 1 << 4;
 const WALK_ABORT_ON_ERROR: u32 = 1 << 5;
 const WALK_KEEP_GIT_DIR: u32 = 1 << 6;
+const WALK_RETAIN_IGNORE_RULES: u32 = 1 << 7;
 
 // Metadata attribute bits (must match include/zlob.h).
 const META_SIZE: u32 = 1 << 0;
@@ -234,6 +235,14 @@ impl WalkBuilder {
     /// Still descend into `.git` directories when gitignore is enabled.
     pub fn keep_git_dir(&mut self, yes: bool) -> &mut Self {
         self.set(WALK_KEEP_GIT_DIR, yes)
+    }
+
+    /// Retain the parsed ignore rules (`.gitignore` + `.ignore`, nested) so
+    /// they can be reused after the walk via [`WalkResults::ignore_rules`].
+    /// Only affects [`WalkBuilder::build`]; has no effect when
+    /// [`Self::git_ignore`] is disabled.
+    pub fn retain_ignore_rules(&mut self, yes: bool) -> &mut Self {
+        self.set(WALK_RETAIN_IGNORE_RULES, yes)
     }
 
     /// Metadata to fetch per entry (default: none).
@@ -455,6 +464,60 @@ impl WalkResults {
             raw,
             _marker: PhantomData,
         })
+    }
+
+    /// Reusable ignore rules (`.gitignore` + `.ignore`, nested) gathered during
+    /// the walk. `Some` only when [`WalkBuilder::retain_ignore_rules`] was set.
+    /// The returned matcher borrows from these results.
+    pub fn ignore_rules(&self) -> Option<IgnoreRules<'_>> {
+        let handle = unsafe { ffi::zlob_walk_result_ignore_rules(&self.raw) };
+        if handle.is_null() {
+            None
+        } else {
+            Some(IgnoreRules {
+                handle,
+                _marker: PhantomData,
+            })
+        }
+    }
+}
+
+/// A reusable view of the ignore rules a walk discovered, for checking
+/// arbitrary paths after the walk has finished. Borrows from the
+/// [`WalkResults`] it came from.
+///
+/// Resolves nested `.gitignore`/`.ignore` rules deepest-first, mirroring git.
+#[derive(Clone, Copy)]
+pub struct IgnoreRules<'a> {
+    handle: *mut c_void,
+    _marker: PhantomData<&'a ()>,
+}
+
+// The handle points into the walk result's owned, immutable rule storage.
+unsafe impl Send for IgnoreRules<'_> {}
+unsafe impl Sync for IgnoreRules<'_> {}
+
+impl IgnoreRules<'_> {
+    /// Returns whether `path` (relative to the walk root) is ignored.
+    /// Use on a trusted paths that you know exists, folders should be indicated witha trailing
+    /// forward slash.
+    ///
+    /// There is [`Self::is_ignored_untrusted`], which stats the path.
+    pub fn is_ignored(&self, path: impl AsRef<Path>) -> bool {
+        let Ok(cpath) = CString::new(path_to_bytes(path.as_ref())) else {
+            return false; // an interior NUL can't match any real path
+        };
+        unsafe { ffi::zlob_ignore_rules_match_path(self.handle, cpath.as_ptr()) != 0 }
+    }
+
+    /// Like [`Self::is_ignored`] but determines directory-ness by stat'ing the
+    /// path on disk (symlinks are not followed
+    pub fn is_ignored_untrusted(&self, path: impl AsRef<Path>) -> bool {
+        let Ok(cpath) = CString::new(path_to_bytes(path.as_ref())) else {
+            return false;
+        };
+
+        unsafe { ffi::zlob_ignore_rules_match_untrusted(self.handle, cpath.as_ptr()) != 0 }
     }
 }
 
@@ -821,6 +884,103 @@ mod tests {
             .abort_on_error(true)
             .build();
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn retained_ignore_rules_are_reusable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        // Root: ignore *.log and build/; .ignore re-includes important.tmp,
+        // while .gitignore ignores all *.tmp.
+        fs::write(root.join(".gitignore"), "*.log\nbuild/\n*.tmp\n").unwrap();
+        fs::write(root.join(".ignore"), "!important.tmp\n").unwrap();
+        // Nested rule scoped to src/.
+        fs::write(root.join("src/.gitignore"), "*.bak\n").unwrap();
+        fs::write(root.join("src/main.rs"), "").unwrap();
+
+        let results = WalkBuilder::new(root)
+            .retain_ignore_rules(true)
+            .threads(1)
+            .build()
+            .unwrap();
+
+        let rules = results.ignore_rules().expect("rules retained");
+
+        // Root-level rules (files: no trailing slash).
+        assert!(rules.is_ignored("app.log"));
+        // build/ is directory-only; the trailing slash marks it a directory.
+        assert!(rules.is_ignored("build/"));
+        // Without the slash it's treated as a file, so build/ doesn't apply.
+        assert!(!rules.is_ignored("build"));
+        assert!(rules.is_ignored("scratch.tmp"));
+        // .ignore precedence re-includes important.tmp.
+        assert!(!rules.is_ignored("important.tmp"));
+        // Nested rule only inside src/.
+        assert!(rules.is_ignored("src/old.bak"));
+        assert!(!rules.is_ignored("old.bak"));
+        assert!(!rules.is_ignored("src/main.rs"));
+
+        // The untrusted variant resolves dir-ness by stat'ing the path it is
+        // given, then matches that same string against the (root-relative)
+        // rules. A path that doesn't exist resolves to "file", so the
+        // directory-only `build/` rule does not apply; a *.tmp file rule still
+        // does. (We avoid changing the process cwd in tests.)
+        assert!(!rules.is_ignored_untrusted("build")); // missing -> file -> build/ skipped
+        assert!(rules.is_ignored_untrusted("ghost.tmp")); // missing -> file -> *.tmp applies
+    }
+
+    #[test]
+    fn ignore_rules_absent_without_opt_in() {
+        let dir = make_tree();
+        let results = WalkBuilder::new(dir.path()).build().unwrap();
+        assert!(results.ignore_rules().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_surfaces_with_abort_on_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("inner.txt"), "x").unwrap();
+        // Remove all access so opening/reading the directory fails.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Restore permissions on the way out so the tempdir can be cleaned up,
+        // regardless of how the assertions go.
+        struct Restore<'a>(&'a std::path::Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _restore = Restore(&locked);
+
+        // Skip when running as root, where mode 0o000 is not enforced.
+        if std::fs::read_dir(&locked).is_ok() {
+            return;
+        }
+
+        // Tolerated by default: the unreadable directory is skipped.
+        let ok = WalkBuilder::new(dir.path())
+            .git_ignore(false)
+            .hidden(false)
+            .build();
+        assert!(ok.is_ok());
+
+        // With abort_on_error the permission error surfaces as its own variant
+        // rather than collapsing into Aborted.
+        let err = WalkBuilder::new(dir.path())
+            .git_ignore(false)
+            .hidden(false)
+            .threads(1)
+            .abort_on_error(true)
+            .build()
+            .unwrap_err();
+        assert_eq!(err, ZlobError::PermissionDenied);
     }
 }
 

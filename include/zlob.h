@@ -144,8 +144,11 @@ typedef struct {
 
 /* Error codes returned by glob() */
 #define ZLOB_NOSPACE 1 /* Out of memory */
-#define ZLOB_ABORTED 2 /* Read error or other system error */
+#define ZLOB_ABORTED 2 /* Operation aborted (visitor/errfunc requested stop) */
 #define ZLOB_NOMATCH 3 /* No matches found */
+#define ZLOB_READ_FAILED 4 /* A directory read failed (walker) */
+#define ZLOB_PERMISSION_DENIED 5 /* A directory could not be opened/read (walker) */
+#define ZLOB_NAME_TOO_LONG 6 /* A path component exceeded NAME_MAX (walker) */
 
 /**
  * Find pathnames matching a glob pattern.
@@ -379,13 +382,14 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
 /* Walk behavior flags (zlob_walk_options_t.flags). All-zero options give a
  * plain walkdir-style traversal: hidden files included, .gitignore not
  * consulted, directories reported. */
-#define ZLOB_WALK_GITIGNORE (1u << 0) /* honor (nested) .gitignore files; also skips .git */
+#define ZLOB_WALK_GITIGNORE (1u << 0) /* honor (nested) .gitignore + .ignore files; also skips .git */
 #define ZLOB_WALK_SKIP_HIDDEN (1u << 1) /* skip dotfiles and don't descend into dot-dirs */
 #define ZLOB_WALK_FOLLOW_SYMLINKS (1u << 2)
 #define ZLOB_WALK_NO_REPORT_DIRS (1u << 3) /* yield only non-directory entries */
 #define ZLOB_WALK_SORT (1u << 4) /* sort zlob_walk_collect() results by path */
 #define ZLOB_WALK_ABORT_ON_ERROR (1u << 5)
 #define ZLOB_WALK_KEEP_GIT_DIR (1u << 6) /* with GITIGNORE: still enter .git dirs */
+#define ZLOB_WALK_RETAIN_IGNORE_RULES (1u << 7) /* keep parsed ignore rules for reuse (collect) */
 
 /** Entry kinds. */
 #define ZLOB_WALK_KIND_UNKNOWN 0
@@ -443,8 +447,9 @@ typedef int (*zlob_walk_cb)(const zlob_walk_entry_t *entry, void *ctx);
 /** Streaming parallel walk of `root`.
  *  `options` may be NULL for defaults.
  *  Returns 0 on success (including when the callback returned 2 to stop
- *  early), ZLOB_ABORTED when aborted via errfunc/ZLOB_WALK_ABORT_ON_ERROR,
- *  ZLOB_NOSPACE on OOM. */
+ *  early), ZLOB_ABORTED when aborted via errfunc, ZLOB_NOSPACE on OOM. With
+ *  ZLOB_WALK_ABORT_ON_ERROR set, a failing directory yields ZLOB_READ_FAILED,
+ *  ZLOB_PERMISSION_DENIED or ZLOB_NAME_TOO_LONG. */
 int zlob_walk(const char *root, const zlob_walk_options_t *options,
               zlob_walk_cb cb, void *ctx);
 
@@ -456,11 +461,33 @@ typedef struct zlob_walk_result {
 
 /** Walks `root` and materializes all entries in one call — the fastest path
  *  for FFI consumers (no per-entry callback crossing). Free the result with
- *  zlob_walk_result_free(). Returns 0, ZLOB_ABORTED or ZLOB_NOSPACE. */
+ *  zlob_walk_result_free(). Returns 0, ZLOB_ABORTED, ZLOB_NOSPACE, or (with
+ *  ZLOB_WALK_ABORT_ON_ERROR) ZLOB_READ_FAILED / ZLOB_PERMISSION_DENIED /
+ *  ZLOB_NAME_TOO_LONG. */
 int zlob_walk_collect(const char *root, const zlob_walk_options_t *options,
                       zlob_walk_result_t *out);
 
 void zlob_walk_result_free(zlob_walk_result_t *result);
+
+/** Borrowed handle to the ignore rules (.gitignore + .ignore) retained during
+ *  the walk. Requires ZLOB_WALK_RETAIN_IGNORE_RULES. Owned by `result`; valid
+ *  until zlob_walk_result_free(). Returns NULL when no rules were retained. */
+void *zlob_walk_result_ignore_rules(const zlob_walk_result_t *result);
+
+/** Returns nonzero when `path` (relative to the walk root, '/'-separated) is
+ *  ignored by the retained rules. `is_dir` should be nonzero for directories.
+ *  `rules` comes from zlob_walk_result_ignore_rules(); a NULL handle reports
+ *  "not ignored". */
+int zlob_ignore_rules_match(void *rules, const char *path, int is_dir);
+
+/** Like zlob_ignore_rules_match but infers directory-ness from the path with
+ *  zero syscalls: a trailing '/' marks a directory, otherwise a file. */
+int zlob_ignore_rules_match_path(void *rules, const char *path);
+
+/** Like zlob_ignore_rules_match but lstat()s `path` to determine
+ *  directory-ness (symlinks not followed); a missing/unstattable path is
+ *  treated as a non-directory. Performs one syscall. */
+int zlob_ignore_rules_match_untrusted(void *rules, const char *path);
 
 #ifdef __cplusplus
 }

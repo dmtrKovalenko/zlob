@@ -30,6 +30,9 @@ pub const ZLOB_RECOMMENDED: c_int =
 pub const ZLOB_NOSPACE: c_int = 1;
 pub const ZLOB_ABORTED: c_int = 2;
 pub const ZLOB_NOMATCH: c_int = 3;
+pub const ZLOB_READ_FAILED: c_int = 4;
+pub const ZLOB_PERMISSION_DENIED: c_int = 5;
+pub const ZLOB_NAME_TOO_LONG: c_int = 6;
 
 pub const ZLOB_DT_UNKNOWN: c_uchar = 0;
 pub const ZLOB_DT_DIR: c_uchar = 4;
@@ -280,4 +283,24 @@ unsafe extern "C" {
     ) -> c_int;
 
     pub fn zlob_walk_result_free(result: *mut zlob_walk_result_t);
+
+    pub fn zlob_walk_result_ignore_rules(
+        result: *const zlob_walk_result_t,
+    ) -> *mut core::ffi::c_void;
+
+    pub fn zlob_ignore_rules_match(
+        rules: *mut core::ffi::c_void,
+        path: *const c_char,
+        is_dir: c_int,
+    ) -> c_int;
+
+    pub fn zlob_ignore_rules_match_path(
+        rules: *mut core::ffi::c_void,
+        path: *const c_char,
+    ) -> c_int;
+
+    pub fn zlob_ignore_rules_match_untrusted(
+        rules: *mut core::ffi::c_void,
+        path: *const c_char,
+    ) -> c_int;
 }

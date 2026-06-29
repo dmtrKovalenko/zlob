@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const walk = @import("walk.zig");
+const walk = @import("types.zig");
 
 pub const supported = builtin.os.tag == .windows;
 

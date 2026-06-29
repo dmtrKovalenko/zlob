@@ -1,16 +1,8 @@
-//! ZLOB flag constants and types
-//!
-//! This module contains all glob flag definitions used across the zlob library.
-//! Flags are compatible with POSIX glob() and GNU extensions.
-//!
-//! IMPORTANT: The C header (include/zlob.h) is the single source of truth.
-//! All flag values are imported from there via @cImport to avoid duplication.
-
 const std = @import("std");
 
-// ============================================================================
-// Import flag constants from the C header (single source of truth)
-// ============================================================================
+// ==============================================================================
+// WE DEFINE FLAGS IN THE HEADER FILE NOT IN ZIG THIS IS INTENTIONAL DO NOT TOUCH
+// ==============================================================================
 const c = @cImport({
     @cInclude("zlob.h");
 });
@@ -45,9 +37,12 @@ pub const ZLOB_RECOMMENDED = c.ZLOB_RECOMMENDED;
 pub const ZLOB_NOSPACE = c.ZLOB_NOSPACE;
 pub const ZLOB_ABORTED = c.ZLOB_ABORTED;
 pub const ZLOB_NOMATCH = c.ZLOB_NOMATCH;
+pub const ZLOB_READ_FAILED = c.ZLOB_READ_FAILED;
+pub const ZLOB_PERMISSION_DENIED = c.ZLOB_PERMISSION_DENIED;
+pub const ZLOB_NAME_TOO_LONG = c.ZLOB_NAME_TOO_LONG;
 
 // ============================================================================
-// Internal flags (not in C header - Zig implementation detail)
+// Internal flags (do not add to the C header - Zig implementation detail)
 // ============================================================================
 pub const ZLOB_FLAGS_SHARED_STRINGS: c_int = 0;
 pub const ZLOB_FLAGS_OWNS_STRINGS: c_int = 1 << 0;
@@ -146,9 +141,18 @@ pub const ZlobFlags = packed struct(u32) {
     }
 };
 
+/// The single error set for all of zlob (glob and walker). The glob API only
+/// produces `OutOfMemory`/`Aborted`; the directory scanners add `ReadFailed`/
+/// `PermissionDenied`/`NameTooLong`, which are normally reported per-directory
+/// and swallowed (they only escape when `abort_on_error` upgrades them).
+/// Mapped to the `ZLOB_*` return codes at the C boundary and to `ZlobError` in
+/// the Rust crate.
 pub const ZlobError = error{
     OutOfMemory,
     Aborted,
+    ReadFailed,
+    PermissionDenied,
+    NameTooLong,
 };
 
 test "ZlobFlags bit positions match integer constants" {

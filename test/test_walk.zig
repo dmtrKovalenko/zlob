@@ -42,7 +42,7 @@ const TestTree = struct {
     }
 };
 
-fn findEntry(results: *const walk.Results, rel: []const u8) ?*const walk.Entry {
+fn findEntry(results: *const walk.WalkerResult, rel: []const u8) ?*const walk.Entry {
     for (results.entries) |*e| {
         if (std.mem.eql(u8, e.relPath(), rel)) return e;
     }
@@ -122,7 +122,7 @@ test "walk nested gitignore: deeper file overrides parent" {
     try testing.expect(findEntry(&results, "sub") != null);
 
     // Same walk with gitignore disabled sees everything.
-    var all = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .respect_gitignore = false });
+    var all = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .respect_git = false });
     defer all.deinit();
     try testing.expect(all.entries.len > results.entries.len);
     var found_git = false;
@@ -145,7 +145,7 @@ test "walk include_hidden=false skips hidden files and dirs" {
     var results = try walk.collect(testing.allocator, t.root, .{
         .threads = 1,
         .include_hidden = false,
-        .respect_gitignore = false,
+        .respect_git = false,
     });
     defer results.deinit();
 
@@ -509,8 +509,9 @@ test "walk glob pattern prunes: out-of-scope unreadable dir is never opened" {
     // Root can open mode-000 dirs anyway — the pruning proof needs EACCES.
     if (std.c.getuid() == 0) return error.SkipZigTest;
 
-    // Without a pattern the unreadable dir aborts the walk...
-    try testing.expectError(error.Aborted, walk.collect(testing.allocator, t.root, .{
+    // Without a pattern the unreadable dir aborts the walk with the specific
+    // permission error...
+    try testing.expectError(error.PermissionDenied, walk.collect(testing.allocator, t.root, .{
         .threads = 1,
         .abort_on_error = true,
     }));
@@ -525,3 +526,57 @@ test "walk glob pattern prunes: out-of-scope unreadable dir is never opened" {
     try testing.expectEqual(@as(usize, 1), results.entries.len);
     try testing.expectEqualStrings("src/a.rs", results.entries[0].relPath());
 }
+
+test "walk retains reusable IgnoreRules: nesting, negation, .ignore precedence" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("ignore_rules");
+    defer t.deinit();
+
+    // Root .gitignore ignores *.log, the build/ dir, and all *.tmp; re-includes
+    // keep.log.
+    try t.write(".gitignore", "*.log\nbuild/\n!keep.log\n*.tmp\n");
+    // Root .ignore is merged after .gitignore so it wins ties: it re-includes
+    // important.tmp that .gitignore's *.tmp would otherwise drop.
+    try t.write(".ignore", "!important.tmp\n");
+    try t.mkdir("src");
+    // Nested .gitignore under src/ ignores *.bak only within src/.
+    try t.write("src/.gitignore", "*.bak\n");
+    try t.mkdir("build");
+    try t.write("app.log", "");
+    try t.write("keep.log", "");
+    try t.write("src/main.rs", "");
+
+    var results = try walk.collect(testing.allocator, t.root, .{
+        .threads = 1,
+        .retain_ignore_rules = true,
+    });
+    defer results.deinit();
+
+    const rules = results.ignore_rules orelse return error.MissingIgnoreRules;
+
+    // Root rules.
+    try testing.expect(rules.isIgnored("app.log", false));
+    try testing.expect(!rules.isIgnored("keep.log", false)); // negation
+    try testing.expect(rules.isIgnored("build", true));
+    try testing.expect(rules.isIgnored("scratch.tmp", false)); // *.tmp from .gitignore
+    try testing.expect(!rules.isIgnored("important.tmp", false)); // .ignore re-includes
+
+    // Nested rules apply only within src/.
+    try testing.expect(rules.isIgnored("src/old.bak", false));
+    try testing.expect(!rules.isIgnored("old.bak", false)); // not ignored at root
+    try testing.expect(!rules.isIgnored("src/main.rs", false));
+
+    // A path under no special rule is not ignored.
+    try testing.expect(!rules.isIgnored("src/util/helper.rs", false));
+
+    // isIgnoredPath infers dir-ness from a trailing slash (zero syscalls).
+    try testing.expect(rules.isIgnoredPath("build/")); // dir-only rule applies
+    try testing.expect(!rules.isIgnoredPath("build")); // no slash -> treated as file
+    try testing.expect(rules.isIgnoredPath("app.log"));
+
+    // isIgnoredUntrusted lstat()s to resolve dir-ness; a missing path is a
+    // file, so the dir-only build/ rule does not apply but *.tmp does.
+    try testing.expect(!rules.isIgnoredUntrusted("build"));
+    try testing.expect(rules.isIgnoredUntrusted("scratch.tmp"));
+}
+

@@ -64,7 +64,7 @@ pub const containsExtglob = fnmatch_impl.containsExtglob;
 pub const simdFindChar = fnmatch_impl.simdFindChar;
 pub const gitignore = @import("gitignore.zig");
 pub const GitIgnore = gitignore.GitIgnore;
-pub const walk = @import("walk.zig");
+pub const walk = @import("walker/walker.zig");
 
 pub const zlob_dirent_t = extern struct {
     d_name: [*:0]const u8, // Null-terminated entry name
