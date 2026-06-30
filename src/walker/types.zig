@@ -159,7 +159,7 @@ pub const Entry = struct {
     /// `path.len` for zero-cost C interop.
     path: []const u8,
     /// Offset into `path` where the root-relative part starts.
-    rel_off: u32,
+    relative_offset: u32,
     /// Basename (slice into `path`).
     basename: []const u8,
     kind: EntryKind,
@@ -167,8 +167,8 @@ pub const Entry = struct {
     depth: u16,
     meta: Metadata,
 
-    pub inline fn relPath(self: *const Entry) []const u8 {
-        return self.path[self.rel_off..];
+    pub inline fn relativePath(self: *const Entry) []const u8 {
+        return self.path[self.relative_offset..];
     }
 };
 

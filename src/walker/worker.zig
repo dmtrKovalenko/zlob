@@ -71,7 +71,7 @@ pub const IgnoreNode = struct {
     gi: GitIgnore,
     /// Offset into the root-relative path where paths relative to this node's
     /// directory start.
-    rel_off: u32,
+    relative_offset: u32,
     refs: std.atomic.Value(u32),
 
     pub fn retain(self: *IgnoreNode) void {
@@ -333,10 +333,10 @@ fn processEntry(
     w.path_buf[prefix_len + name.len] = 0;
     const full = w.path_buf[0 .. prefix_len + name.len];
     const basename = full[prefix_len..];
-    const rel_path = full[sh.root_prefix_len..];
+    const relative_path = full[sh.root_prefix_len..];
 
     if (cur_ignore) |ig| {
-        if (chainIgnored(ig, rel_path, basename, is_dir)) return;
+        if (chainIgnored(ig, relative_path, basename, is_dir)) return;
     }
 
     if (!is_dir and opts.follow_symlinks and entry_kind == .sym_link) {
@@ -350,12 +350,12 @@ fn processEntry(
     var action: VisitAction = .cont;
     var report = entry_kind != .directory or opts.report_dirs;
     if (report) {
-        if (sh.pattern) |cp| report = cp.matches(rel_path, opts.pattern_flags);
+        if (sh.pattern) |cp| report = cp.matches(relative_path, opts.pattern_flags);
     }
     if (report) {
         var entry = Entry{
             .path = full,
-            .rel_off = sh.root_prefix_len,
+            .relative_offset = sh.root_prefix_len,
             .basename = basename,
             .kind = entry_kind,
             .depth = entry_depth,
@@ -369,7 +369,7 @@ fn processEntry(
         }
     }
 
-    if (is_dir and sh.pattern != null and !dirInPatternScope(sh.pattern_prefix, rel_path))
+    if (is_dir and sh.pattern != null and !dirInPatternScope(sh.pattern_prefix, relative_path))
         return;
 
     if (is_dir and may_descend and action != .skip_dir) {
@@ -504,7 +504,7 @@ fn openRoot(sh: *SharedWorkerState, root: []const u8) anyerror!Handle {
 fn chainIgnored(start: *IgnoreNode, rel: []const u8, basename: []const u8, is_dir: bool) bool {
     var node: ?*IgnoreNode = start;
     while (node) |n| : (node = n.parent) {
-        if (n.gi.checkWithBasename(rel[n.rel_off..], basename, is_dir)) |verdict| {
+        if (n.gi.checkWithBasename(rel[n.relative_offset..], basename, is_dir)) |verdict| {
             return verdict;
         }
     }
@@ -532,7 +532,7 @@ fn loadIgnoreNode(
     node.* = .{
         .parent = task.ignore,
         .gi = gi,
-        .rel_off = @intCast(if (task.rel.len > 0) task.rel.len + 1 else 0),
+        .relative_offset = @intCast(if (task.rel.len > 0) task.rel.len + 1 else 0),
         .refs = .init(1),
     };
     return node;

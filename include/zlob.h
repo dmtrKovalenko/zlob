@@ -382,8 +382,8 @@ typedef struct zlob_walk_options {
 typedef struct zlob_walk_entry {
   const char *path;      /* full path (root joined with relative), NUL-terminated */
   size_t path_len;       /* strlen(path) */
-  uint32_t rel_off;      /* path + rel_off = path relative to the walk root */
-  uint32_t basename_off; /* path + basename_off = entry name */
+  uint32_t relative_offset; /* path + relative_offset = path relative to the walk root */
+  uint32_t basename_offset; /* path + basename_offset = entry name */
   uint8_t kind;          /* ZLOB_WALK_KIND_* */
   uint16_t depth;        /* root children have depth 1 */
   uint32_t meta_valid;   /* which ZLOB_META_* fields below are filled */

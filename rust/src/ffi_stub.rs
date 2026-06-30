@@ -239,8 +239,8 @@ pub struct zlob_walk_options_t {
 pub struct zlob_walk_entry_t {
     pub path: *const c_char,
     pub path_len: usize,
-    pub rel_off: u32,
-    pub basename_off: u32,
+    pub relative_offset: u32,
+    pub basename_offset: u32,
     pub kind: u8,
     pub depth: u16,
     pub meta_valid: u32,

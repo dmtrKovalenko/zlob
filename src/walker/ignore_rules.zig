@@ -82,7 +82,7 @@ fn statIsDir(path: []const u8) bool {
 fn chainIgnored(start: *IgnoreNode, rel: []const u8, basename: []const u8, is_dir: bool) bool {
     var node: ?*IgnoreNode = start;
     while (node) |n| : (node = n.parent) {
-        if (n.gi.checkWithBasename(rel[n.rel_off..], basename, is_dir)) |verdict| {
+        if (n.gi.checkWithBasename(rel[n.relative_offset..], basename, is_dir)) |verdict| {
             return verdict;
         }
     }

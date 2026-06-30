@@ -240,19 +240,20 @@ walker designed to replace the Rust `walkdir` and `ignore` crates, available fro
 Traversal can also be narrowed with a one or many (z)glob patterns.
 
 ```rust
-use zlob::walk::{WalkBuilder, WalkState, WalkMetadata};
+use zlob::walk::{WalkBuilder, WalkFlags, WalkState, WalkMetadata};
 
 // Materialize everything in one FFI call (fastest):
 let results = WalkBuilder::new("/path/tofolder")
     // request metadata
-    .metadata(WalkMetadata { size: true, modified: true, ..Default::default() })
+    .metadata(WalkMetadata::SIZE | WalkMetadata::MTIME)
     .build()?;
 
 for entry in results.iter() {
     println!("{} {:?}", entry.path().display(), entry.size());
 }
 
-WalkBuilder::new(".").run(|entry| {
+// Raw walkdir-style traversal (no .gitignore, hidden shown):
+WalkBuilder::new(".").options(WalkFlags::empty()).run(|entry| {
     println!("{}", entry.path().display());
 
     WalkState::Continue

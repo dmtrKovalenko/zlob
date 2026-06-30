@@ -22,16 +22,16 @@ pub const ErrCallbackFn = *const fn (epath: [*:0]const u8, eerrno: c_int) callco
 
 pub const DirFilter = struct {
     /// Return true to descend into this directory, false to prune it.
-    /// rel_path: path relative to start directory
+    /// relative_path: path relative to start directory
     /// basename: just the directory name
-    filterDirFn: *const fn (ctx: *anyopaque, rel_path: []const u8, basename: []const u8) bool,
+    filterDirFn: *const fn (ctx: *anyopaque, relative_path: []const u8, basename: []const u8) bool,
 
     /// Context pointer passed to filterDirFn
     context: *anyopaque,
 
     /// Check if should descend into directory
-    pub inline fn filterDir(self: DirFilter, rel_path: []const u8, basename: []const u8) bool {
-        return self.filterDirFn(self.context, rel_path, basename);
+    pub inline fn filterDir(self: DirFilter, relative_path: []const u8, basename: []const u8) bool {
+        return self.filterDirFn(self.context, relative_path, basename);
     }
 };
 
@@ -488,7 +488,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         @memcpy(self.path_buffer[self.path_len..][0..name.len], name);
         self.path_len += name.len;
 
-        const rel_path = self.path_buffer[0..self.path_len];
+        const relative_path = self.path_buffer[0..self.path_len];
 
         // Decide whether to descend into this entry.
         // - .directory: always considered (subject to dir_filter)
@@ -500,7 +500,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         if (may_descend and self.current_depth < self.config.max_depth) {
             // Check dir_filter before deciding to descend
             const should_descend = if (self.config.dir_filter) |filter|
-                filter.filterDir(rel_path, name)
+                filter.filterDir(relative_path, name)
             else
                 true;
 
@@ -562,7 +562,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
         // Build result entry
         self.current_entry = .{
-            .path = rel_path,
+            .path = relative_path,
             .basename = self.path_buffer[name_in_path_start..][0..name.len],
             .kind = kind,
         };
@@ -729,7 +729,7 @@ const StdFsWalker = struct {
                 @memcpy(self.path_buffer[self.path_len..][0..entry.name.len], entry.name);
                 self.path_len += entry.name.len;
 
-                const rel_path = self.path_buffer[0..self.path_len];
+                const relative_path = self.path_buffer[0..self.path_len];
                 const kind = entry.kind;
 
                 const may_descend = kind == .directory or
@@ -738,7 +738,7 @@ const StdFsWalker = struct {
                 if (may_descend and self.current_depth < self.config.max_depth) {
                     // Check dir_filter before deciding to descend
                     const should_descend = if (self.config.dir_filter) |filter|
-                        filter.filterDir(rel_path, entry.name)
+                        filter.filterDir(relative_path, entry.name)
                     else
                         true;
 
@@ -805,7 +805,7 @@ const StdFsWalker = struct {
 
                 // Build result entry
                 self.current_entry = .{
-                    .path = rel_path,
+                    .path = relative_path,
                     .basename = self.path_buffer[name_start..][0..entry.name.len],
                     .kind = kind,
                 };

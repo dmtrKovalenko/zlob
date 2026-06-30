@@ -752,8 +752,8 @@ pub const zlob_walk_options_t = extern struct {
 pub const zlob_walk_entry_t = extern struct {
     path: [*:0]const u8,
     path_len: usize,
-    rel_off: u32,
-    basename_off: u32,
+    relative_offset: u32,
+    basename_offset: u32,
     kind: u8,
     depth: u16,
     meta_valid: u32,
@@ -820,8 +820,8 @@ inline fn fillCWalkEntry(out: *zlob_walk_entry_t, e: *const walk.Entry) void {
     out.* = .{
         .path = @ptrCast(e.path.ptr),
         .path_len = e.path.len,
-        .rel_off = e.rel_off,
-        .basename_off = @intCast(e.path.len - e.basename.len),
+        .relative_offset = e.relative_offset,
+        .basename_offset = @intCast(e.path.len - e.basename.len),
         .kind = switch (e.kind) {
             .file => 1,
             .directory => 2,

@@ -2,7 +2,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use zlob::walk::{WalkBuilder, WalkState};
+use zlob::walk::{WalkBuilder, WalkFlags, WalkMetadata, WalkState};
 
 struct TreeSpec {
     name: &'static str,
@@ -132,9 +132,11 @@ fn zlob_run_serial(root: &Path, gitignore: bool) -> u64 {
     // atomics, no synchronization taxing the single-threaded numbers.
     let mut acc: u64 = 0;
     let mut b = WalkBuilder::new(root);
-    if !gitignore {
-        b.git_ignore(false).hidden(false);
-    }
+    b.options(if gitignore {
+        WalkFlags::RECOMMENDED
+    } else {
+        WalkFlags::empty()
+    });
     b.run_serial(|e| {
         acc = acc.wrapping_add(consume_path(e.path_bytes()));
         WalkState::Continue
@@ -149,9 +151,11 @@ fn zlob_run_parallel(root: &Path, gitignore: bool) -> u64 {
     use std::sync::atomic::AtomicU64;
     let acc = AtomicU64::new(0);
     let mut b = WalkBuilder::new(root);
-    if !gitignore {
-        b.git_ignore(false).hidden(false);
-    }
+    b.options(if gitignore {
+        WalkFlags::RECOMMENDED
+    } else {
+        WalkFlags::empty()
+    });
     b.run(|e| {
         acc.fetch_add(consume_path(e.path_bytes()), Ordering::Relaxed);
         WalkState::Continue
@@ -162,9 +166,11 @@ fn zlob_run_parallel(root: &Path, gitignore: bool) -> u64 {
 
 fn zlob_collect_parallel(root: &Path, gitignore: bool) -> u64 {
     let mut b = WalkBuilder::new(root);
-    if !gitignore {
-        b.git_ignore(false).hidden(false);
-    }
+    b.options(if gitignore {
+        WalkFlags::RECOMMENDED
+    } else {
+        WalkFlags::empty()
+    });
     let results = b.build().unwrap();
     results.iter().map(|e| consume_path(e.path_bytes())).sum()
 }
@@ -217,9 +223,11 @@ fn ignore_parallel(b: &ignore::WalkBuilder) -> u64 {
 
 fn zlob_count(root: &Path, gitignore: bool) -> usize {
     let mut b = zlob::walk::WalkBuilder::new(root);
-    if !gitignore {
-        b.git_ignore(false).hidden(false);
-    }
+    b.options(if gitignore {
+        WalkFlags::RECOMMENDED
+    } else {
+        WalkFlags::empty()
+    });
     b.build().unwrap().len()
 }
 
@@ -288,15 +296,12 @@ fn bench_walk(c: &mut Criterion) {
         // nothing is materialized. Serial uses `run_serial` (plain local,
         // no atomics); parallel uses `run` (atomic shared accumulator).
         let mut b = WalkBuilder::new(root);
-        if !gitignore {
-            b.git_ignore(false).hidden(false);
-        }
-        b.metadata(zlob::walk::WalkMetadata {
-            size: true,
-            modified: true,
-            inode: true,
-            ..Default::default()
+        b.options(if gitignore {
+            WalkFlags::RECOMMENDED
+        } else {
+            WalkFlags::empty()
         });
+        b.metadata(WalkMetadata::SIZE | WalkMetadata::MTIME | WalkMetadata::INODE);
         if parallel {
             use std::sync::atomic::AtomicU64;
             let acc = AtomicU64::new(0);

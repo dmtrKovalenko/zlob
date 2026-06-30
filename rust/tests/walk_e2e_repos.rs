@@ -161,12 +161,11 @@ fn rel_to_string(p: &Path) -> String {
 /// zlob plain walk -> set of relative paths.
 fn zlob_plain_paths(root: &Path) -> std::collections::BTreeSet<String> {
     zlob::walk::WalkBuilder::new(root)
-        .git_ignore(false)
-        .hidden(false)
+        .options(zlob::walk::WalkFlags::empty())
         .build()
         .unwrap()
         .iter()
-        .map(|e| rel_to_string(e.rel_path()))
+        .map(|e| rel_to_string(e.relative_path()))
         .filter(|rel| !is_os_noise(rel))
         .collect()
 }
@@ -213,7 +212,7 @@ fn walker_parity_on_popular_repos() {
         let zlob_git = zlob::walk::WalkBuilder::new(&root).build().unwrap();
         let zlob_git_set: std::collections::BTreeSet<String> = zlob_git
             .iter()
-            .map(|e| rel_to_string(e.rel_path()))
+            .map(|e| rel_to_string(e.relative_path()))
             .filter(|rel| !is_os_noise(rel))
             .collect();
         let ignore_set = ignore_paths(&root);
@@ -230,18 +229,14 @@ fn walker_parity_on_popular_repos() {
         // Compare against the walkdir reference's lstat metadata for every
         // entry zlob reports in the plain walk.
         let zlob_meta = zlob::walk::WalkBuilder::new(&root)
-            .git_ignore(false)
-            .hidden(false)
-            .metadata(zlob::walk::WalkMetadata {
-                size: true,
-                ..Default::default()
-            })
+            .options(zlob::walk::WalkFlags::empty())
+            .metadata(zlob::walk::WalkMetadata::SIZE)
             .build()
             .unwrap();
 
         let mut meta_mismatches: Vec<String> = Vec::new();
         for e in zlob_meta.iter() {
-            let rel = rel_to_string(e.rel_path());
+            let rel = rel_to_string(e.relative_path());
             let Some(md) = walkdir_ref.get(&rel) else {
                 continue; // path-set divergence already reported above
             };

@@ -11,7 +11,7 @@
 //!   iterating `walkdir`.
 //!
 //! ```no_run
-//! use zlob::walk::WalkBuilder;
+//! use zlob::walk::{WalkBuilder, WalkFlags};
 //!
 //! // ignore-crate-style defaults: .gitignore respected, hidden skipped.
 //! let results = WalkBuilder::new("./src").build().unwrap();
@@ -21,8 +21,7 @@
 //!
 //! // Streaming + parallel, walkdir-style (no filtering):
 //! WalkBuilder::new(".")
-//!     .git_ignore(false)
-//!     .hidden(false)
+//!     .options(WalkFlags::empty())
 //!     .run(|entry| {
 //!         println!("{}", entry.path().display());
 //!         zlob::walk::WalkState::Continue
@@ -32,104 +31,98 @@
 
 use crate::error::ZlobError;
 use crate::ffi;
+use bitflags::bitflags;
 use std::ffi::CString;
 use std::marker::PhantomData;
 use std::os::raw::{c_int, c_void};
 use std::path::Path;
 use std::sync::Mutex;
 
-// Walk behavior flags (must match include/zlob.h).
-const WALK_GITIGNORE: u32 = 1 << 0;
-const WALK_SKIP_HIDDEN: u32 = 1 << 1;
-const WALK_FOLLOW_SYMLINKS: u32 = 1 << 2;
-const WALK_NO_REPORT_DIRS: u32 = 1 << 3;
-const WALK_SORT: u32 = 1 << 4;
-const WALK_ABORT_ON_ERROR: u32 = 1 << 5;
-const WALK_KEEP_GIT_DIR: u32 = 1 << 6;
+bitflags! {
+    /// Behavior options for a [`WalkBuilder`]. Combine with `|`.
+    ///
+    /// The default ([`WalkBuilder::new`]) is [`WalkFlags::RECOMMENDED`] —
+    /// `ignore`-crate semantics: nested `.gitignore`/`.ignore` honored and
+    /// hidden (dot) entries skipped. For raw `walkdir` semantics (no filtering)
+    /// pass [`WalkFlags::empty`].
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use zlob::walk::{WalkBuilder, WalkFlags};
+    /// // raw traversal, sorted, directories suppressed
+    /// let r = WalkBuilder::new(".")
+    ///     .options(WalkFlags::SORT | WalkFlags::NO_REPORT_DIRS)
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    ///
+    /// Bit values must match `ZLOB_WALK_*` in `include/zlob.h`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct WalkFlags: u32 {
+        /// Honor nested `.gitignore`/`.ignore` files; also skips `.git` dirs.
+        const GITIGNORE       = 1 << 0;
+        /// Skip hidden (dot) files and don't descend into dot-directories.
+        const SKIP_HIDDEN     = 1 << 1;
+        /// Follow symlinked directories (cycles are detected and broken).
+        const FOLLOW_SYMLINKS = 1 << 2;
+        /// Do **not** report directory entries (they are still traversed).
+        const NO_REPORT_DIRS  = 1 << 3;
+        /// Sort [`WalkBuilder::build`] results by path.
+        const SORT            = 1 << 4;
+        /// Abort on the first directory error (default: skip unreadable dirs).
+        const ABORT_ON_ERROR  = 1 << 5;
+        /// With [`Self::GITIGNORE`]: still descend into `.git` directories.
+        const KEEP_GIT_DIR    = 1 << 6;
 
-// Metadata attribute bits (must match include/zlob.h).
-const META_SIZE: u32 = 1 << 0;
-const META_MTIME: u32 = 1 << 1;
-const META_ATIME: u32 = 1 << 2;
-const META_CTIME: u32 = 1 << 3;
-const META_BTIME: u32 = 1 << 4;
-const META_INODE: u32 = 1 << 5;
-const META_NLINK: u32 = 1 << 6;
-const META_MODE: u32 = 1 << 7;
-const META_UID: u32 = 1 << 8;
-const META_GID: u32 = 1 << 9;
-
-/// Which metadata attributes the walker should fetch per entry.
-///
-/// Keep it `default()` (nothing) when you only need names and kinds — the
-/// walker then never stats anything. On macOS all requested attributes are
-/// fetched in bulk (one syscall per directory batch) via `getattrlistbulk`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WalkMetadata {
-    pub size: bool,
-    pub modified: bool,
-    pub accessed: bool,
-    pub changed: bool,
-    /// Creation (birth) time — not available on all filesystems.
-    pub created: bool,
-    pub inode: bool,
-    pub nlink: bool,
-    /// Permission bits (mode & 0o7777).
-    pub mode: bool,
-    pub uid: bool,
-    pub gid: bool,
+        /// `ignore`-crate-style defaults: [`Self::GITIGNORE`] | [`Self::SKIP_HIDDEN`].
+        const RECOMMENDED     = Self::GITIGNORE.bits() | Self::SKIP_HIDDEN.bits();
+    }
 }
 
-impl WalkMetadata {
-    /// Request every supported attribute.
-    pub fn all() -> Self {
-        Self {
-            size: true,
-            modified: true,
-            accessed: true,
-            changed: true,
-            created: true,
-            inode: true,
-            nlink: true,
-            mode: true,
-            uid: true,
-            gid: true,
-        }
-    }
+bitflags! {
+    /// Which metadata attributes the walker should fetch per entry.
+    ///
+    /// Empty (the default) means names and kinds only — the walker never stats
+    /// anything. On macOS every requested attribute is fetched in bulk (one
+    /// `getattrlistbulk` syscall per directory batch).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use zlob::walk::{WalkBuilder, WalkMetadata};
+    /// let r = WalkBuilder::new(".")
+    ///     .metadata(WalkMetadata::SIZE | WalkMetadata::MTIME)
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    ///
+    /// Bit values must match `ZLOB_META_*` in `include/zlob.h`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct WalkMetadata: u32 {
+        /// File size in bytes.
+        const SIZE  = 1 << 0;
+        /// Modification time.
+        const MTIME = 1 << 1;
+        /// Access time.
+        const ATIME = 1 << 2;
+        /// Status-change time.
+        const CTIME = 1 << 3;
+        /// Creation (birth) time — not available on all filesystems.
+        const BTIME = 1 << 4;
+        /// Inode number.
+        const INODE = 1 << 5;
+        /// Hard-link count.
+        const NLINK = 1 << 6;
+        /// Permission bits (mode & 0o7777).
+        const MODE  = 1 << 7;
+        /// Owner user id.
+        const UID   = 1 << 8;
+        /// Owner group id.
+        const GID   = 1 << 9;
 
-    fn to_mask(self) -> u32 {
-        let mut m = 0;
-        if self.size {
-            m |= META_SIZE;
-        }
-        if self.modified {
-            m |= META_MTIME;
-        }
-        if self.accessed {
-            m |= META_ATIME;
-        }
-        if self.changed {
-            m |= META_CTIME;
-        }
-        if self.created {
-            m |= META_BTIME;
-        }
-        if self.inode {
-            m |= META_INODE;
-        }
-        if self.nlink {
-            m |= META_NLINK;
-        }
-        if self.mode {
-            m |= META_MODE;
-        }
-        if self.uid {
-            m |= META_UID;
-        }
-        if self.gid {
-            m |= META_GID;
-        }
-        m
+        /// Every supported attribute.
+        const ALL   = 0x3FF;
     }
 }
 
@@ -155,15 +148,15 @@ pub enum WalkEntryKind {
 
 /// Builder for a parallel directory walk.
 ///
-/// Defaults mirror the `ignore` crate: `.gitignore` files (nested included)
-/// are respected, hidden entries are skipped, directories are reported.
-/// For raw `walkdir` semantics use `.git_ignore(false).hidden(false)`.
+/// Defaults to [`WalkFlags::RECOMMENDED`] (mirrors the `ignore` crate:
+/// `.gitignore` files honored, hidden entries skipped, directories reported).
+/// For raw `walkdir` semantics use `.options(WalkFlags::empty())`.
 #[derive(Debug, Clone)]
 pub struct WalkBuilder {
     /// `Err` when the root contained an interior NUL — surfaced by
     /// [`Self::build`]/[`Self::run`] instead of silently walking elsewhere.
     root: Result<CString, ZlobError>,
-    flags: u32,
+    flags: WalkFlags,
     meta: WalkMetadata,
     threads: u16,
     max_depth: u16,
@@ -178,8 +171,8 @@ impl WalkBuilder {
         let bytes = path_to_bytes(root.as_ref());
         Self {
             root: CString::new(bytes).map_err(|_| ZlobError::InvalidInput),
-            flags: WALK_GITIGNORE | WALK_SKIP_HIDDEN,
-            meta: WalkMetadata::default(),
+            flags: WalkFlags::RECOMMENDED,
+            meta: WalkMetadata::empty(),
             threads: 0,
             max_depth: 0,
             pattern: Ok(None),
@@ -187,56 +180,22 @@ impl WalkBuilder {
         }
     }
 
-    fn set(&mut self, bit: u32, on: bool) -> &mut Self {
-        if on {
-            self.flags |= bit;
-        } else {
-            self.flags &= !bit;
-        }
+    /// Set the walk behavior flags, replacing any previously set flags
+    /// (default: [`WalkFlags::RECOMMENDED`]).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use zlob::walk::{WalkBuilder, WalkFlags};
+    /// // raw traversal (walkdir-style): no gitignore, hidden shown
+    /// let r = WalkBuilder::new(".").options(WalkFlags::empty()).build().unwrap();
+    /// ```
+    pub fn options(&mut self, flags: WalkFlags) -> &mut Self {
+        self.flags = flags;
         self
     }
 
-    /// Honor `.gitignore` files, including nested ones (default: `true`).
-    /// Also skips `.git` directories while enabled.
-    pub fn git_ignore(&mut self, yes: bool) -> &mut Self {
-        self.set(WALK_GITIGNORE, yes)
-    }
-
-    /// Skip hidden (dot) files and directories (default: `true`).
-    pub fn hidden(&mut self, skip: bool) -> &mut Self {
-        self.set(WALK_SKIP_HIDDEN, skip)
-    }
-
-    /// Follow symbolic links to directories (default: `false`).
-    /// Cycles are detected and broken.
-    pub fn follow_links(&mut self, yes: bool) -> &mut Self {
-        self.set(WALK_FOLLOW_SYMLINKS, yes)
-    }
-
-    /// Report directory entries themselves (default: `true`).
-    pub fn report_dirs(&mut self, yes: bool) -> &mut Self {
-        self.set(WALK_NO_REPORT_DIRS, !yes)
-    }
-
-    /// Sort [`WalkBuilder::build`] results by path (default: `false`).
-    /// Parallel traversal is inherently unordered; sorting happens once at
-    /// the end.
-    pub fn sort(&mut self, yes: bool) -> &mut Self {
-        self.set(WALK_SORT, yes)
-    }
-
-    /// Abort the walk on the first directory error (default: `false`,
-    /// unreadable directories are skipped).
-    pub fn abort_on_error(&mut self, yes: bool) -> &mut Self {
-        self.set(WALK_ABORT_ON_ERROR, yes)
-    }
-
-    /// Still descend into `.git` directories when gitignore is enabled.
-    pub fn keep_git_dir(&mut self, yes: bool) -> &mut Self {
-        self.set(WALK_KEEP_GIT_DIR, yes)
-    }
-
-    /// Metadata to fetch per entry (default: none).
+    /// Metadata to fetch per entry (default: [`WalkMetadata::empty`]).
     pub fn metadata(&mut self, meta: WalkMetadata) -> &mut Self {
         self.meta = meta;
         self
@@ -298,8 +257,8 @@ impl WalkBuilder {
         Ok((
             root,
             ffi::zlob_walk_options_t {
-                flags: self.flags,
-                meta_mask: self.meta.to_mask(),
+                flags: self.flags.bits(),
+                meta_mask: self.meta.bits(),
                 threads: self.threads,
                 max_depth: self.max_depth,
                 errfunc: None,
@@ -515,7 +474,7 @@ impl WalkResults {
 
     /// Reusable ignore rules (`.gitignore` + `.ignore`, nested) gathered during
     /// the walk, for testing arbitrary paths afterwards. Always `Some` after a
-    /// successful [`WalkBuilder::build`] (empty when `.git_ignore(false)` or the
+    /// successful [`WalkBuilder::build`] (empty when `GITIGNORE` was off or the
     /// tree had no ignore files). The returned matcher borrows from these
     /// results.
     pub fn ignore_rules(&self) -> Option<IgnoreRules<'_>> {
@@ -606,14 +565,24 @@ impl<'a> WalkEntry<'a> {
 
     /// Path relative to the walk root.
     #[inline]
-    pub fn rel_path(&self) -> &'a Path {
-        bytes_to_path(&self.path_bytes()[self.raw.rel_off as usize..])
+    pub fn relative_path(&self) -> &'a Path {
+        bytes_to_path(&self.path_bytes()[self.raw.relative_offset as usize..])
+    }
+
+    /// Raw bytes of the path relative to the walk root.
+    ///
+    /// Same slice [`Self::relative_path`] wraps, but skips the `Path` round-trip —
+    /// useful when the consumer wants a `String`/`&str` directly and would
+    /// otherwise pay for `to_string_lossy()` over a borrowed `OsStr`.
+    #[inline]
+    pub fn relative_path_bytes(&self) -> &'a [u8] {
+        &self.path_bytes()[self.raw.relative_offset as usize..]
     }
 
     /// The entry's name (final path component).
     #[inline]
     pub fn file_name(&self) -> &'a Path {
-        bytes_to_path(&self.path_bytes()[self.raw.basename_off as usize..])
+        bytes_to_path(&self.path_bytes()[self.raw.basename_offset as usize..])
     }
 
     /// Depth below the root — direct children of the root are at depth 1.
@@ -647,54 +616,54 @@ impl<'a> WalkEntry<'a> {
         self.raw.kind == 3
     }
 
-    fn meta(&self, bit: u32) -> bool {
-        self.raw.meta_valid & bit != 0
+    fn meta(&self, bit: WalkMetadata) -> bool {
+        self.raw.meta_valid & bit.bits() != 0
     }
 
-    /// File size in bytes (requires `WalkMetadata.size`).
+    /// File size in bytes (requires [`WalkMetadata::SIZE`]).
     pub fn size(&self) -> Option<u64> {
-        self.meta(META_SIZE).then_some(self.raw.size)
+        self.meta(WalkMetadata::SIZE).then_some(self.raw.size)
     }
 
     /// Modification time, nanoseconds since the Unix epoch.
     pub fn modified_ns(&self) -> Option<i64> {
-        self.meta(META_MTIME).then_some(self.raw.mtime_ns)
+        self.meta(WalkMetadata::MTIME).then_some(self.raw.mtime_ns)
     }
 
     /// Access time, nanoseconds since the Unix epoch.
     pub fn accessed_ns(&self) -> Option<i64> {
-        self.meta(META_ATIME).then_some(self.raw.atime_ns)
+        self.meta(WalkMetadata::ATIME).then_some(self.raw.atime_ns)
     }
 
     /// Status-change time, nanoseconds since the Unix epoch.
     pub fn changed_ns(&self) -> Option<i64> {
-        self.meta(META_CTIME).then_some(self.raw.ctime_ns)
+        self.meta(WalkMetadata::CTIME).then_some(self.raw.ctime_ns)
     }
 
     /// Creation (birth) time, nanoseconds since the Unix epoch.
     pub fn created_ns(&self) -> Option<i64> {
-        self.meta(META_BTIME).then_some(self.raw.btime_ns)
+        self.meta(WalkMetadata::BTIME).then_some(self.raw.btime_ns)
     }
 
     pub fn inode(&self) -> Option<u64> {
-        self.meta(META_INODE).then_some(self.raw.inode)
+        self.meta(WalkMetadata::INODE).then_some(self.raw.inode)
     }
 
     pub fn nlink(&self) -> Option<u32> {
-        self.meta(META_NLINK).then_some(self.raw.nlink)
+        self.meta(WalkMetadata::NLINK).then_some(self.raw.nlink)
     }
 
     /// Permission bits (mode & 0o7777); the file type is in [`Self::kind`].
     pub fn mode(&self) -> Option<u32> {
-        self.meta(META_MODE).then_some(self.raw.mode)
+        self.meta(WalkMetadata::MODE).then_some(self.raw.mode)
     }
 
     pub fn uid(&self) -> Option<u32> {
-        self.meta(META_UID).then_some(self.raw.uid)
+        self.meta(WalkMetadata::UID).then_some(self.raw.uid)
     }
 
     pub fn gid(&self) -> Option<u32> {
-        self.meta(META_GID).then_some(self.raw.gid)
+        self.meta(WalkMetadata::GID).then_some(self.raw.gid)
     }
 }
 
@@ -743,14 +712,14 @@ mod tests {
     fn build_respects_gitignore() {
         let dir = make_tree();
         let results = WalkBuilder::new(dir.path())
+            .options(WalkFlags::RECOMMENDED | WalkFlags::SORT)
             .threads(1)
-            .sort(true)
             .build()
             .unwrap();
 
         let names: Vec<String> = results
             .iter()
-            .map(|e| e.rel_path().to_string_lossy().into_owned())
+            .map(|e| e.relative_path().to_string_lossy().into_owned())
             .collect();
 
         // hidden(.gitignore) skipped, target/ and *.log ignored
@@ -761,16 +730,14 @@ mod tests {
     fn build_plain_walkdir_mode() {
         let dir = make_tree();
         let results = WalkBuilder::new(dir.path())
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::SORT)
             .threads(1)
-            .sort(true)
             .build()
             .unwrap();
 
         let names: Vec<String> = results
             .iter()
-            .map(|e| e.rel_path().to_string_lossy().into_owned())
+            .map(|e| e.relative_path().to_string_lossy().into_owned())
             .collect();
         assert_eq!(
             names,
@@ -800,15 +767,9 @@ mod tests {
     fn metadata_size_and_mtime() {
         let dir = make_tree();
         let results = WalkBuilder::new(dir.path())
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::empty())
             .threads(1)
-            .metadata(WalkMetadata {
-                size: true,
-                modified: true,
-                inode: true,
-                ..Default::default()
-            })
+            .metadata(WalkMetadata::SIZE | WalkMetadata::MTIME | WalkMetadata::INODE)
             .build()
             .unwrap();
 
@@ -826,8 +787,7 @@ mod tests {
         let dir = make_tree();
         let count = AtomicUsize::new(0);
         WalkBuilder::new(dir.path())
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::empty())
             .run(|_entry| {
                 count.fetch_add(1, Ordering::Relaxed);
                 WalkState::Continue
@@ -847,8 +807,7 @@ mod tests {
         let mut names: Vec<String> = Vec::new();
         let not_sync: Rc<u8> = Rc::new(0); // a !Sync witness held across calls
         WalkBuilder::new(dir.path())
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::empty())
             // Even with many threads configured, run_serial ignores it and
             // runs single-threaded, so this borrow is sound.
             .threads(8)
@@ -866,8 +825,7 @@ mod tests {
         let dir = make_tree();
         let mut count = 0usize;
         WalkBuilder::new(dir.path())
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::empty())
             .run_serial(|entry| {
                 count += 1;
                 if entry.is_dir() {
@@ -886,8 +844,7 @@ mod tests {
         let dir = make_tree();
         let count = AtomicUsize::new(0);
         WalkBuilder::new(dir.path())
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::empty())
             .threads(1)
             .run(|entry| {
                 count.fetch_add(1, Ordering::Relaxed);
@@ -916,8 +873,7 @@ mod tests {
     fn max_depth_limits() {
         let dir = make_tree();
         let results = WalkBuilder::new(dir.path())
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::empty())
             .threads(1)
             .max_depth(Some(1))
             .build()
@@ -956,8 +912,7 @@ mod tests {
     fn visitor_panic_propagates_to_caller() {
         let dir = make_tree();
         let _ = WalkBuilder::new(dir.path())
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::empty())
             .run(|_| panic!("visitor exploded"));
     }
 
@@ -975,7 +930,7 @@ mod tests {
         assert!(missing.is_empty());
 
         let err = WalkBuilder::new("/definitely/not/a/real/path/zlob")
-            .abort_on_error(true)
+            .options(WalkFlags::RECOMMENDED | WalkFlags::ABORT_ON_ERROR)
             .build();
         assert!(err.is_err());
     }
@@ -1062,21 +1017,63 @@ mod tests {
 
         // Tolerated by default: the unreadable directory is skipped.
         let ok = WalkBuilder::new(dir.path())
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::empty())
             .build();
         assert!(ok.is_ok());
 
         // With abort_on_error the permission error surfaces as its own variant
         // rather than collapsing into Aborted.
         let err = WalkBuilder::new(dir.path())
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::ABORT_ON_ERROR)
             .threads(1)
-            .abort_on_error(true)
             .build()
             .unwrap_err();
         assert_eq!(err, ZlobError::PermissionDenied);
+    }
+
+    // Guards against drift between the Rust bitflags and the C header. The
+    // walk/meta constants come from bindgen (real build only).
+    #[cfg(not(docsrs))]
+    #[test]
+    fn flag_values_match_c_header() {
+        assert_eq!(WalkFlags::GITIGNORE.bits(), ffi::ZLOB_WALK_GITIGNORE as u32);
+        assert_eq!(
+            WalkFlags::SKIP_HIDDEN.bits(),
+            ffi::ZLOB_WALK_SKIP_HIDDEN as u32
+        );
+        assert_eq!(
+            WalkFlags::FOLLOW_SYMLINKS.bits(),
+            ffi::ZLOB_WALK_FOLLOW_SYMLINKS as u32
+        );
+        assert_eq!(
+            WalkFlags::NO_REPORT_DIRS.bits(),
+            ffi::ZLOB_WALK_NO_REPORT_DIRS as u32
+        );
+        assert_eq!(WalkFlags::SORT.bits(), ffi::ZLOB_WALK_SORT as u32);
+        assert_eq!(
+            WalkFlags::ABORT_ON_ERROR.bits(),
+            ffi::ZLOB_WALK_ABORT_ON_ERROR as u32
+        );
+        assert_eq!(
+            WalkFlags::KEEP_GIT_DIR.bits(),
+            ffi::ZLOB_WALK_KEEP_GIT_DIR as u32
+        );
+        assert_eq!(
+            WalkFlags::RECOMMENDED,
+            WalkFlags::GITIGNORE | WalkFlags::SKIP_HIDDEN
+        );
+
+        assert_eq!(WalkMetadata::SIZE.bits(), ffi::ZLOB_META_SIZE as u32);
+        assert_eq!(WalkMetadata::MTIME.bits(), ffi::ZLOB_META_MTIME as u32);
+        assert_eq!(WalkMetadata::ATIME.bits(), ffi::ZLOB_META_ATIME as u32);
+        assert_eq!(WalkMetadata::CTIME.bits(), ffi::ZLOB_META_CTIME as u32);
+        assert_eq!(WalkMetadata::BTIME.bits(), ffi::ZLOB_META_BTIME as u32);
+        assert_eq!(WalkMetadata::INODE.bits(), ffi::ZLOB_META_INODE as u32);
+        assert_eq!(WalkMetadata::NLINK.bits(), ffi::ZLOB_META_NLINK as u32);
+        assert_eq!(WalkMetadata::MODE.bits(), ffi::ZLOB_META_MODE as u32);
+        assert_eq!(WalkMetadata::UID.bits(), ffi::ZLOB_META_UID as u32);
+        assert_eq!(WalkMetadata::GID.bits(), ffi::ZLOB_META_GID as u32);
+        assert_eq!(WalkMetadata::ALL.bits(), ffi::ZLOB_META_ALL as u32);
     }
 }
 
@@ -1097,24 +1094,21 @@ mod glob_tests {
         fs::write(root.join("top.rs"), "").unwrap();
 
         let results = WalkBuilder::new(root)
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::SORT)
             .threads(1)
-            .sort(true)
             .glob("**/*.rs")
             .build()
             .unwrap();
 
         let names: Vec<String> = results
             .iter()
-            .map(|e| e.rel_path().to_string_lossy().into_owned())
+            .map(|e| e.relative_path().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["src/lib.rs", "src/main.rs", "top.rs"]);
 
         // Brace pattern through the default flags.
         let braced = WalkBuilder::new(root)
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::empty())
             .threads(1)
             .glob("**/*.{md,rs}")
             .build()
@@ -1123,8 +1117,7 @@ mod glob_tests {
 
         // Anchored pattern narrows traversal to the src/ subtree.
         let scoped = WalkBuilder::new(root)
-            .git_ignore(false)
-            .hidden(false)
+            .options(WalkFlags::empty())
             .threads(1)
             .glob("src/**/*.rs")
             .build()
