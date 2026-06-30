@@ -1,13 +1,3 @@
-# Makefile for zlob - POSIX glob library
-#
-# Targets:
-#   make          - Build the shared library
-#   make install  - Install library and headers (requires sudo)
-#   make test     - Run all tests (Zig + Rust, plus C API on Linux/macOS)
-#   make dev      - Build all: Zig, C library, and Rust bindings
-#   make dev-test - Run all tests including libc comparison
-#   make clean    - Remove build artifacts
-
 PREFIX ?= /usr/local
 LIBDIR = $(PREFIX)/lib
 INCLUDEDIR = $(PREFIX)/include
@@ -18,6 +8,9 @@ ZIG = zig
 CC ?= gcc
 CFLAGS = -Wall -Wextra -O2
 CARGO ?= cargo
+CLANG_FORMAT ?= clang-format
+
+C_FORMAT_FILES = include/zlob.h test/test_c_api.c
 
 # Detect OS for library extension
 UNAME_S := $(shell uname -s)
@@ -32,7 +25,7 @@ else
     LIBEXT = dll
 endif
 
-.PHONY: all build install uninstall test clean cli install-cli uninstall-cli dev dev-test test-libc help
+.PHONY: all build install uninstall test clean cli install-cli uninstall-cli dev dev-test test-libc format format-check help
 
 all: build
 
@@ -173,10 +166,16 @@ test-libc: build
 	@echo "========================================"
 	./test/test_libc_comparison.sh
 
-format: 
-	zig fmt src/
+format:
+	zig fmt src/ test/ bench/
+	$(CLANG_FORMAT) -i $(C_FORMAT_FILES)
+	cd rust && cargo fmt --all
 
-# Help
+format-check:
+	zig fmt --check src/ test/ bench/
+	$(CLANG_FORMAT) --dry-run --Werror $(C_FORMAT_FILES)
+	cd rust && cargo fmt --check
+
 help:
 	@echo "zlob - faster and more correct glob library, 100% POSIX compatible"
 	@echo ""
@@ -192,11 +191,14 @@ help:
 	@echo "Development:"
 	@echo "  make dev          - Build all: Zig, C, and Rust"
 	@echo "  make dev-test     - Run all tests: Zig, C, Rust, and libc comparison"
+	@echo "  make format       - Format Zig and C sources (zig fmt + clang-format)"
+	@echo "  make format-check - Verify Zig and C sources are formatted (no changes)"
 	@echo ""
 	@echo "Variables:"
 	@echo "  PREFIX        - Installation prefix (default: /usr/local)"
 	@echo "  CC            - C compiler (default: gcc)"
 	@echo "  CARGO         - Cargo command (default: cargo)"
+	@echo "  CLANG_FORMAT  - clang-format command (default: clang-format)"
 	@echo "  TEST_DIR      - Directory for libc comparison tests"
 	@echo ""
 	@echo "Examples:"

@@ -118,9 +118,8 @@ pub const SharedWorkerState = struct {
     /// Symlink-cycle bookkeeping, only touched when follow_symlinks is set.
     visited_mutex: std.Io.Mutex = .init,
     visited: std.AutoHashMapUnmanaged(InodeKey, void) = .empty,
-    /// Retained ignore rules (set only when `retain_ignore_rules`). Workers
-    /// register each parsed node here under `retain_mutex`.
-    retain: ?*IgnoreRules = null,
+    /// Reusable ignore rules. Workers register each parsed `.gitignore`/ `.ignore`
+    ignore_rules: *IgnoreRules,
     retain_mutex: std.Io.Mutex = .init,
     /// Lazy worker spawning: helper threads are created only once the walk has
     /// demonstrably parallel work, so shallow trees never pay the spawn cost.
@@ -150,10 +149,12 @@ pub const SharedWorkerState = struct {
     fn ensureWorkers(sh: *SharedWorkerState) void {
         if (sh.threads.len == 0) return;
         if (sh.spawn_started.swap(true, .acq_rel)) return;
+
         for (sh.threads, 1..) |*t, i| {
             t.* = std.Thread.spawn(.{}, workerLoop, .{ sh, &sh.workers[i] }) catch break;
             sh.spawned += 1;
         }
+
         // A worker may have parked between its empty-queue check and now; wake
         // freshly spawned threads so none miss the work that triggered spawn.
         sh.queue.wakeAll(sh.io);
@@ -217,22 +218,29 @@ pub fn freeTask(sh: *SharedWorkerState, t: *DirTask) void {
     sh.allocator.destroy(t);
 }
 
-pub fn workerLoop(state: *SharedWorkerState, w: *Worker) void {
-    // Spawn helpers once worker 0 (the calling thread) has uncovered more than
-    // a couple of pending directories: enough fan-out to amortize the cost.
+pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
+    // Lazy spawning is driven only by worker 0 (the calling thread): once it
+    // has uncovered more than a couple of pending directories there is enough
+    // fan-out to amortize the helper-thread cost. Helper workers (id != 0)
+    // never run this, and worker 0 stops checking once it has spawned them, so
+    // the steady-state loop carries no spawn bookkeeping.
     const spawn_threshold = 2;
+    var may_spawn = worker.id == 0;
 
-    while (state.queue.pop(state.io, w.id)) |task| {
+    while (state.queue.pop(state.io, worker.id)) |task| {
         if (!state.abort_signal.load(.acquire)) {
-            processDir(state, w, task) catch |err| switch (err) {
+            processDir(state, worker, task) catch |err| switch (err) {
                 error.OutOfMemory => state.fail(.oom),
                 error.ReadFailed => state.fail(.read_failed),
                 error.PermissionDenied => state.fail(.permission_denied),
                 error.NameTooLong => state.fail(.name_too_long),
                 error.Aborted => state.fail(.aborted),
             };
-            if (w.id == 0 and state.queue.queued.load(.monotonic) > spawn_threshold)
+
+            if (may_spawn and state.queue.queued.load(.monotonic) > spawn_threshold) {
                 state.ensureWorkers();
+                may_spawn = false; // spawned once; never check again
+            }
         }
         freeTask(state, task);
         state.queue.taskDone(state.io);
@@ -251,6 +259,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     scan.scanDir(sh, w, handle) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
+            @branchHint(.cold);
             const prefix = taskPrefixLen(sh, w, task);
             try reportError(sh, w.path_buf[0..prefix -| 1], err);
             return;
@@ -260,13 +269,14 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     var ignore: ?*IgnoreNode = task.ignore;
     var own_ignore = false;
     if (sh.options.respect_git and (w.saw_gitignore or w.saw_ignore)) {
+        @branchHint(.unlikely);
         if (try loadIgnoreNode(sh, handle, task, w.saw_gitignore, w.saw_ignore)) |node| {
             ignore = node;
             own_ignore = true;
-            if (sh.retain) |rules| {
+            {
                 sh.retain_mutex.lockUncancelable(sh.io);
                 defer sh.retain_mutex.unlock(sh.io);
-                rules.put(task.rel, node) catch return error.OutOfMemory;
+                sh.ignore_rules.put(task.rel, node) catch return error.OutOfMemory;
             }
         }
     }
@@ -301,14 +311,24 @@ fn processEntry(
     handle_consumed: *bool,
 ) WalkError!void {
     const opts = &sh.options;
-    if (sh.abort_signal.load(.monotonic) or name.len == 0) return;
+    if (sh.abort_signal.load(.monotonic) or name.len == 0) {
+        @branchHint(.unlikely);
+        return;
+    }
     if (!opts.include_hidden and name[0] == '.') return;
 
     var is_dir = entry_kind == .directory;
     if (opts.respect_git and opts.skip_git_dir and is_dir and
-        mem.eql(u8, name, ".git")) return;
+        mem.eql(u8, name, ".git"))
+    {
+        @branchHint(.unlikely);
+        return;
+    }
 
-    if (prefix_len + name.len >= MAX_PATH) return;
+    if (prefix_len + name.len >= MAX_PATH) {
+        @branchHint(.cold);
+        return;
+    }
     @memcpy(w.path_buf[prefix_len..][0..name.len], name);
     w.path_buf[prefix_len + name.len] = 0;
     const full = w.path_buf[0 .. prefix_len + name.len];
@@ -343,6 +363,7 @@ fn processEntry(
         };
         action = sh.sink(sh.sink_ctx, w.id, &entry);
         if (action == .stop) {
+            @branchHint(.cold);
             sh.abort_signal.store(true, .release);
             return;
         }

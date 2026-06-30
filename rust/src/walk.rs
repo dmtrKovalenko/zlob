@@ -46,7 +46,6 @@ const WALK_NO_REPORT_DIRS: u32 = 1 << 3;
 const WALK_SORT: u32 = 1 << 4;
 const WALK_ABORT_ON_ERROR: u32 = 1 << 5;
 const WALK_KEEP_GIT_DIR: u32 = 1 << 6;
-const WALK_RETAIN_IGNORE_RULES: u32 = 1 << 7;
 
 // Metadata attribute bits (must match include/zlob.h).
 const META_SIZE: u32 = 1 << 0;
@@ -235,14 +234,6 @@ impl WalkBuilder {
     /// Still descend into `.git` directories when gitignore is enabled.
     pub fn keep_git_dir(&mut self, yes: bool) -> &mut Self {
         self.set(WALK_KEEP_GIT_DIR, yes)
-    }
-
-    /// Retain the parsed ignore rules (`.gitignore` + `.ignore`, nested) so
-    /// they can be reused after the walk via [`WalkResults::ignore_rules`].
-    /// Only affects [`WalkBuilder::build`]; has no effect when
-    /// [`Self::git_ignore`] is disabled.
-    pub fn retain_ignore_rules(&mut self, yes: bool) -> &mut Self {
-        self.set(WALK_RETAIN_IGNORE_RULES, yes)
     }
 
     /// Metadata to fetch per entry (default: none).
@@ -523,8 +514,10 @@ impl WalkResults {
     }
 
     /// Reusable ignore rules (`.gitignore` + `.ignore`, nested) gathered during
-    /// the walk. `Some` only when [`WalkBuilder::retain_ignore_rules`] was set.
-    /// The returned matcher borrows from these results.
+    /// the walk, for testing arbitrary paths afterwards. Always `Some` after a
+    /// successful [`WalkBuilder::build`] (empty when `.git_ignore(false)` or the
+    /// tree had no ignore files). The returned matcher borrows from these
+    /// results.
     pub fn ignore_rules(&self) -> Option<IgnoreRules<'_>> {
         let handle = unsafe { ffi::zlob_walk_result_ignore_rules(&self.raw) };
         if handle.is_null() {
@@ -1000,13 +993,9 @@ mod tests {
         fs::write(root.join("src/.gitignore"), "*.bak\n").unwrap();
         fs::write(root.join("src/main.rs"), "").unwrap();
 
-        let results = WalkBuilder::new(root)
-            .retain_ignore_rules(true)
-            .threads(1)
-            .build()
-            .unwrap();
+        let results = WalkBuilder::new(root).threads(1).build().unwrap();
 
-        let rules = results.ignore_rules().expect("rules retained");
+        let rules = results.ignore_rules().expect("rules always present");
 
         // Root-level rules (files: no trailing slash).
         assert!(rules.is_ignored("app.log"));
@@ -1032,10 +1021,16 @@ mod tests {
     }
 
     #[test]
-    fn ignore_rules_absent_without_opt_in() {
+    fn ignore_rules_always_available() {
+        // Rules are now always returned (no opt-in flag). With git_ignore on,
+        // the tree's rules are queryable.
         let dir = make_tree();
         let results = WalkBuilder::new(dir.path()).build().unwrap();
-        assert!(results.ignore_rules().is_none());
+        let rules = results.ignore_rules().expect("rules always present");
+        // make_tree() gitignores target/ and *.log.
+        assert!(rules.is_ignored("target/"));
+        assert!(rules.is_ignored("debug.log"));
+        assert!(!rules.is_ignored("Cargo.toml"));
     }
 
     #[cfg(unix)]

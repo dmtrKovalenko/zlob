@@ -1,7 +1,7 @@
 #include "zlob.h"
 #include <assert.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -15,11 +15,11 @@ static int zlob_test_count_cb(const zlob_walk_entry_t *e, void *ctx) {
 }
 
 #define TEST(name) printf("  [TEST] %s\n", name)
-#define PASS() printf("    ✓ PASS\n")
-#define FAIL(msg)                                                              \
-  do {                                                                         \
-    printf("    ✗ FAIL: %s\n", msg);                                           \
-    return 1;                                                                  \
+#define PASS()     printf("    ✓ PASS\n")
+#define FAIL(msg)                                                                                  \
+  do {                                                                                             \
+    printf("    ✗ FAIL: %s\n", msg);                                                               \
+    return 1;                                                                                      \
   } while (0)
 
 int main(void) {
@@ -57,8 +57,7 @@ int main(void) {
       if (pzlob.zlo_pathv[pzlob.zlo_pathc] != NULL)
         FAIL("Array not NULL-terminated");
 
-      printf("    Example: %s (len=%zu)\n", pzlob.zlo_pathv[0],
-             pzlob.zlo_pathlen[0]);
+      printf("    Example: %s (len=%zu)\n", pzlob.zlo_pathv[0], pzlob.zlo_pathlen[0]);
       zlobfree(&pzlob);
       PASS();
     } else {
@@ -145,8 +144,7 @@ int main(void) {
   TEST("Filter paths with *.c pattern");
   {
     const char *paths[] = {
-        "src/main.c", "src/utils.c", "src/tests/test.h",
-        "readme.md",  "src/lib.c",
+        "src/main.c", "src/utils.c", "src/tests/test.h", "readme.md", "src/lib.c",
     };
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
@@ -219,8 +217,7 @@ int main(void) {
 
     printf("    Found %zu matches (expected 3)\n", pzlob.zlo_pathc);
     for (size_t i = 0; i < pzlob.zlo_pathc; i++) {
-      printf("      - %s (len=%zu)\n", pzlob.zlo_pathv[i],
-             pzlob.zlo_pathlen[i]);
+      printf("      - %s (len=%zu)\n", pzlob.zlo_pathv[i], pzlob.zlo_pathlen[i]);
     }
 
     zlobfree(&pzlob);
@@ -243,8 +240,7 @@ int main(void) {
     for (size_t i = 0; i < pzlob.zlo_pathc; i++) {
       size_t actual_len = strlen(pzlob.zlo_pathv[i]);
       if (pzlob.zlo_pathlen[i] != actual_len) {
-        printf("    Path %zu: pathlen=%zu, strlen=%zu\n", i,
-               pzlob.zlo_pathlen[i], actual_len);
+        printf("    Path %zu: pathlen=%zu, strlen=%zu\n", i, pzlob.zlo_pathlen[i], actual_len);
         FAIL("pathlen doesn't match strlen");
       }
     }
@@ -261,8 +257,7 @@ int main(void) {
 
     zlob_t pzlob;
     // Note: no space after comma in brace pattern
-    int result = zlob_match_paths("{short,long}.c", paths, path_count,
-                                  ZLOB_BRACE, &pzlob);
+    int result = zlob_match_paths("{short,long}.c", paths, path_count, ZLOB_BRACE, &pzlob);
 
     if (result != 0)
       FAIL("zlob_match_paths() failed");
@@ -288,8 +283,7 @@ int main(void) {
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
     zlob_t pzlob;
-    int result = zlob_match_paths_at("/home/user/project", "**/*.c", paths,
-                                     path_count, 0, &pzlob);
+    int result = zlob_match_paths_at("/home/user/project", "**/*.c", paths, path_count, 0, &pzlob);
 
     if (result != 0)
       FAIL("zlob_match_paths_at() failed");
@@ -334,8 +328,8 @@ int main(void) {
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
     zlob_t pzlob;
-    int result = zlob_match_paths_at("/home/user/project", "./**/*.c", paths,
-                                     path_count, 0, &pzlob);
+    int result =
+        zlob_match_paths_at("/home/user/project", "./**/*.c", paths, path_count, 0, &pzlob);
 
     if (result != 0)
       FAIL("zlob_match_paths_at() with ./ prefix failed");
@@ -356,8 +350,8 @@ int main(void) {
     const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 
     zlob_t pzlob;
-    int result = zlob_match_paths_at("/home/user/project", "**/*.zig", paths,
-                                     path_count, ZLOB_RECOMMENDED, &pzlob);
+    int result = zlob_match_paths_at("/home/user/project", "**/*.zig", paths, path_count,
+                                     ZLOB_RECOMMENDED, &pzlob);
 
     if (result != ZLOB_NOMATCH)
       FAIL("Expected ZLOB_NOMATCH");

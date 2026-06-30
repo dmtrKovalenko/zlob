@@ -792,7 +792,6 @@ const ZLOB_WALK_NO_REPORT_DIRS: u32 = 1 << 3;
 const ZLOB_WALK_SORT: u32 = 1 << 4;
 const ZLOB_WALK_ABORT_ON_ERROR: u32 = 1 << 5;
 const ZLOB_WALK_KEEP_GIT_DIR: u32 = 1 << 6;
-const ZLOB_WALK_RETAIN_IGNORE_RULES: u32 = 1 << 7;
 
 fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
     const v: zlob_walk_options_t = if (options) |p| p.* else .{};
@@ -804,7 +803,6 @@ fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
         .include_hidden = f & ZLOB_WALK_SKIP_HIDDEN == 0,
         .respect_git = f & ZLOB_WALK_GITIGNORE != 0,
         .skip_git_dir = f & ZLOB_WALK_KEEP_GIT_DIR == 0,
-        .retain_ignore_rules = f & ZLOB_WALK_RETAIN_IGNORE_RULES != 0,
         .report_dirs = f & ZLOB_WALK_NO_REPORT_DIRS == 0,
         .pattern = if (v.pattern) |p| mem.sliceTo(p, 0) else null,
         .pattern_flags = if (v.pattern_flags != 0)
@@ -869,7 +867,9 @@ pub export fn zlob_walk(
 ) c_int {
     const root_slice = mem.sliceTo(root, 0);
     var cctx = CWalkCtx{ .cb = cb, .user = ctx };
-    walk.run(allocator, root_slice, walkOptionsFromC(options), .{
+    // `walk.run` always returns reusable ignore rules; the streaming C API does
+    // not expose them, so free them immediately.
+    const rules = walk.run(allocator, root_slice, walkOptionsFromC(options), .{
         .context = @ptrCast(&cctx),
         .visit = cWalkVisit,
     }) catch |err| return switch (err) {
@@ -879,6 +879,8 @@ pub export fn zlob_walk(
         error.PermissionDenied => zlob_flags.ZLOB_PERMISSION_DENIED,
         error.NameTooLong => zlob_flags.ZLOB_NAME_TOO_LONG,
     };
+    rules.deinit();
+    allocator.destroy(rules);
     return 0;
 }
 
@@ -904,12 +906,8 @@ pub export fn zlob_walk_collect(
         };
 
     if (results.entries.len == 0) {
-        // Keep a holder when reusable ignore rules were retained, even with no
-        // entries — the caller still wants to query them.
-        if (results.ignore_rules == null) {
-            results.deinit();
-            return 0;
-        }
+        // Keep a holder even with no entries so the caller can still query the
+        // (always-retained) reusable ignore rules.
         const holder = allocator.create(WalkResultHolder) catch {
             results.deinit();
             return zlob_flags.ZLOB_NOSPACE;
@@ -955,14 +953,15 @@ pub export fn zlob_walk_result_free(result: ?*zlob_walk_result_t) void {
     r.* = .{ .entries = null, .count = 0, ._storage = null };
 }
 
-/// Borrowed handle to the reusable ignore rules retained during the walk
-/// (requires ZLOB_WALK_RETAIN_IGNORE_RULES). Owned by `result`; valid until
-/// zlob_walk_result_free(). NULL when no rules were retained.
+/// Borrowed handle to the reusable ignore rules gathered during the walk
+/// (`.gitignore` + `.ignore`, nested). Always available after a successful
+/// zlob_walk_collect(). Owned by `result`; valid until zlob_walk_result_free().
+/// NULL only when `result`/`_storage` is NULL (e.g. a failed walk).
 pub export fn zlob_walk_result_ignore_rules(result: ?*const zlob_walk_result_t) ?*anyopaque {
     const r = result orelse return null;
     const storage = r._storage orelse return null;
     const holder: *WalkResultHolder = @ptrCast(@alignCast(storage));
-    return @ptrCast(holder.results.ignore_rules orelse return null);
+    return @ptrCast(holder.results.ignore_rules);
 }
 
 /// Returns nonzero when `path` (walk-root-relative) is ignored by the retained

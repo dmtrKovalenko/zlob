@@ -223,62 +223,38 @@ zlobfree(&pzlob);
 This allows a very fast SIMD processing of the paths and supports **NOT ALL** the features of the standard FS globbing except `ALTDIRFUNC` which is not applicable because this mode is done to avoid using ALTDIRFUNC all along. Make sure that if you will use `ZLOB_TILDE` flag the paths input have to be absolute. Other flags like nomagic might not work as expected because they generally make very little sense.
 
 
-## File walker (walkdir / ignore replacement)
+## File walker 
 
 zlob also exposes its traversal engine directly: a parallel recursive file
-walker designed to replace the Rust `walkdir` and `ignore` crates (and plain
-`readdir` loops in C), available from Zig, Rust and C.
+walker designed to replace the Rust `walkdir` and `ignore` crates, available from Zig, Rust and C.
 
-- **Parallel**: one directory = one task on a worker pool (one thread per CPU,
-  capped at 16). Directories open via `openat()` relative to refcounted parent
-  fds — no path re-resolution.
+- **Parallel**: one directory = one task on a work stealing pool
 - **Bulk metadata**: pass a mask of the attributes you need (size, mtime,
-  inode, mode, ...) and only those are fetched. On macOS this maps to
-  `getattrlistbulk` — one syscall per directory batch returns names *and*
-  metadata. On Linux it's `getdents64` + `statx` (inode comes free from the
-  dirent). Windows currently uses the portable fallback; an
-  `NtQueryDirectoryFile`-based backend is planned.
-- **Nested .gitignore**: gitignore files are detected from the directory
-  listing itself (no speculative opens), parsed once into immutable matchers
-  shared down the tree via refcounted chains, and matched lock-free in
-  parallel with deepest-file-wins git semantics. Ignored directories are
-  pruned before they are ever opened.
+  inode, mode, ...) and only those are matched in a platform-specific optimized way
+- **.gitignore first**: Specifically optimized to handle file ignoring first
+  P.S. Also let's use reuse assembled (incl nested) gitignore rules after the walk finished
 
-Two consumption modes, matching how parallel walks are actually used:
+1. **Collect** — `build()` / `collect()` / `zlob_walk_collect()` - efficinet way to collect the results in to the memory if you need to store them
+2. **Do work per entry** — `run()` / `zlob_walk()` - call the callback per the matched entries (for grep style print on search and other workflows when you don't need to store the files list)
 
-1. **Collect** — `build()` / `collect()` / `zlob_walk_collect()`: workers
-   accumulate into lock-free private buffers and the whole result (paths +
-   metadata) crosses the FFI boundary **once**. Use when you want the file
-   list.
-2. **Do work per entry** — `run()` / `zlob_walk()`: your callback executes
-   *on the worker pool itself* (the ripgrep model). Slow per-file work
-   (reading contents, hashing, parsing) automatically parallelizes across
-   the same threads that traverse; free workers keep pulling directories
-   while busy ones run your code. For I/O-bound work, raise `.threads(n)`
-   beyond the CPU count.
-
-Traversal can also be narrowed with a zlob glob pattern: matching entries
-only are reported, and directories outside the pattern's literal prefix
-(everything but `src/` for `src/**/*.c`) are pruned without ever being
-opened.
-
-Rust (`zlob::walk`), defaults mirror the `ignore` crate:
+Traversal can also be narrowed with a one or many (z)glob patterns.
 
 ```rust
 use zlob::walk::{WalkBuilder, WalkState, WalkMetadata};
 
 // Materialize everything in one FFI call (fastest):
-let results = WalkBuilder::new(".")
+let results = WalkBuilder::new("/path/tofolder")
+    // request metadata
     .metadata(WalkMetadata { size: true, modified: true, ..Default::default() })
     .build()?;
+
 for entry in results.iter() {
     println!("{} {:?}", entry.path().display(), entry.size());
 }
 
-// Or stream in parallel, ignore-crate style — the closure runs on the
-// worker threads, so heavy per-file work scales automatically:
 WalkBuilder::new(".").run(|entry| {
     println!("{}", entry.path().display());
+
     WalkState::Continue
 })?;
 
@@ -313,7 +289,7 @@ for (results.entries) |*e| std.debug.print("{s}\n", .{e.path});
 ```
 
 Measured on a real 185k-entry repository (warm cache, i7-14700K, best of 5,
-`cargo run --release --example walk_bench`):
+`cargo bench --bench walk_comparison -- "medium/"`):
 
 | workload | zlob | competitor |
 |---|---|---|

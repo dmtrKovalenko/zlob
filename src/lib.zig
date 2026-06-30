@@ -19,6 +19,10 @@ pub const pattern_context = zlob.pattern_context;
 pub const suffix_match = zlob.suffix_match;
 pub const PatternContext = zlob.PatternContext;
 
+/// Parallel recursive directory walker (walkdir/ignore replacement). See
+/// `walk.collect` / `walk.run` and `walk.WalkMetadata`.
+pub const walk = zlob.walk;
+
 pub const ZlobResults = zlob.ZlobResults;
 pub const ZlobError = zlob.ZlobError;
 pub const zlob_t = zlob.zlob_t;
@@ -27,10 +31,6 @@ pub const simdFindChar = zlob.simdFindChar;
 pub const hasWildcardsWithFlags = zlob.hasWildcards;
 pub const hasWildcardsBasic = zlob.hasWildcardsBasic;
 pub const ZlobFlags = zlob.ZlobFlags;
-
-// Parallel recursive file walker (walkdir/ignore replacement).
-// Usage: zlob.walk.collect(alloc, ".", .{}) or zlob.walk.run(...).
-pub const walk = zlob.walk;
 
 // Compiled pattern + indices APIs (in-memory matching, no filesystem).
 pub const CompiledPattern = zlob.compiled_pattern.CompiledPattern;
@@ -188,7 +188,6 @@ pub fn matchPathsAtCompiled(allocator: std.mem.Allocator, base_path: []const u8,
     const zflags = flagsToZlobFlags(flags_param);
     return zlob.compiled_pattern.matchPathsAtCompiled(allocator, base_path, compiled, paths, zflags);
 }
-
 /// Pre-compiled variant of `matchPathIndices`.
 pub fn matchPathIndicesCompiled(allocator: std.mem.Allocator, compiled: *const CompiledPattern, paths: []const []const u8, flags_param: anytype) ![]usize {
     const zflags = flagsToZlobFlags(flags_param);

@@ -8,6 +8,7 @@ const zlob_flags = @import("zlob_flags");
 const walker = @import("walker");
 const fnmatch_impl = @import("fnmatch.zig");
 const utils = @import("utils.zig");
+
 // std.c is only available on POSIX systems with libc
 const has_libc = builtin.os.tag != .windows and builtin.link_libc;
 const c = if (has_libc) std.c else struct {

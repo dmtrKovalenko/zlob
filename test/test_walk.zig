@@ -1,7 +1,4 @@
-//! End-to-end tests for the parallel file walker (zlob.walk).
-//! Trees are created under the cwd-relative .zig-cache so the tests run on
-//! every platform, exercising the native backend (getdents64 on Linux,
-//! getattrlistbulk on macOS, NtQueryDirectoryFile on Windows).
+//! End-to-end tests for the walker public api
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -223,10 +220,14 @@ test "walk visitor: skip_dir prunes, stop halts" {
     };
 
     var ctx = Ctx{};
-    try walk.run(testing.allocator, t.root, .{ .threads = 1 }, .{
-        .context = @ptrCast(&ctx),
-        .visit = Ctx.visit,
-    });
+    {
+        const rules = try walk.run(testing.allocator, t.root, .{ .threads = 1 }, .{
+            .context = @ptrCast(&ctx),
+            .visit = Ctx.visit,
+        });
+        rules.deinit();
+        testing.allocator.destroy(rules);
+    }
     try testing.expectEqual(@as(usize, 3), ctx.count); // a.txt, b.txt, skipme
     try testing.expect(!ctx.saw_inner);
 
@@ -240,10 +241,14 @@ test "walk visitor: skip_dir prunes, stop halts" {
         }
     };
     var stop_ctx = StopCtx{};
-    try walk.run(testing.allocator, t.root, .{ .threads = 1 }, .{
-        .context = @ptrCast(&stop_ctx),
-        .visit = StopCtx.visit,
-    });
+    {
+        const rules = try walk.run(testing.allocator, t.root, .{ .threads = 1 }, .{
+            .context = @ptrCast(&stop_ctx),
+            .visit = StopCtx.visit,
+        });
+        rules.deinit();
+        testing.allocator.destroy(rules);
+    }
     try testing.expectEqual(@as(usize, 1), stop_ctx.count);
 }
 
@@ -548,11 +553,10 @@ test "walk retains reusable IgnoreRules: nesting, negation, .ignore precedence" 
 
     var results = try walk.collect(testing.allocator, t.root, .{
         .threads = 1,
-        .retain_ignore_rules = true,
     });
     defer results.deinit();
 
-    const rules = results.ignore_rules orelse return error.MissingIgnoreRules;
+    const rules = results.ignore_rules;
 
     // Root rules.
     try testing.expect(rules.isIgnored("app.log", false));

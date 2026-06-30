@@ -441,17 +441,6 @@ pub fn lastIndexOfCharSIMD(s: []const u8, needle: u8) ?usize {
     return mem.lastIndexOfScalar(u8, s, needle);
 }
 
-/// Position in `pattern` where glob wildcards first begin — i.e. the length of
-/// the leading literal run. `pattern[0..pos]` is a fixed string with no glob
-/// syntax; returns `pattern.len` for a fully literal pattern. Honors the same
-/// rules as `analyzePattern`: a backslash escape (when escapes are enabled), a
-/// `[` bracket, an extglob `X(` sequence, a `{` (when brace expansion is on),
-/// or a `*`/`?` terminates the run.
-///
-/// Shared by the glob engine and the walker's traversal pruning so both agree
-/// on where a pattern stops being literal. (`analyzePattern` runs after brace
-/// expansion, so its input never contains `{`; the brace check is a no-op
-/// there and matters only for callers that compile braces directly.)
 pub fn firstWildcardPos(pattern: []const u8, flags: ZlobFlags) usize {
     // On Windows backslash is a path separator, not an escape character.
     const enable_escape = !flags.noescape and !path_sep_is_windows;

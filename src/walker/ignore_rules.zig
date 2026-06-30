@@ -1,30 +1,11 @@
 const std = @import("std");
 const mem = std.mem;
-const Allocator = std.mem.Allocator;
-
 const worker = @import("worker.zig");
 const IgnoreNode = worker.IgnoreNode;
 
 pub const IgnoreRules = struct {
-    gpa: Allocator,
-    /// Directory root-relative path ("" = root) -> the node defined there.
-    /// Keys are owned. Each node holds one ref on behalf of this map.
+    allocator: std.mem.Allocator,
     by_dir: std.StringHashMapUnmanaged(*IgnoreNode) = .empty,
-
-    /// Records the node parsed for `dir_rel` (an owned copy of the key is
-    /// made). Takes one ref on `node`. Called by the walker under its own
-    /// lock when retain mode is on.
-    pub fn put(self: *IgnoreRules, dir_rel: []const u8, node: *IgnoreNode) !void {
-        const gop = try self.by_dir.getOrPut(self.gpa, dir_rel);
-        if (gop.found_existing) {
-            // A directory yields at most one node; replacing would leak a ref.
-            return;
-        }
-        errdefer _ = self.by_dir.remove(dir_rel);
-        gop.key_ptr.* = try self.gpa.dupe(u8, dir_rel);
-        node.retain();
-        gop.value_ptr.* = node;
-    }
 
     /// Retruns `true` if the path has to be ignored, no syscalls
     pub fn isIgnored(self: *const IgnoreRules, path: []const u8, is_dir: bool) bool {
@@ -44,6 +25,13 @@ pub const IgnoreRules = struct {
         }
     }
 
+    /// Like `isIgnored` but determines directory-ness by stat'ing `path` on
+    /// disk (lstat: symlinks are not followed)
+    pub fn isIgnoredUntrusted(self: *const IgnoreRules, path: []const u8) bool {
+        const clean = if (path.len > 0 and path[path.len - 1] == '/') path[0 .. path.len - 1] else path;
+        return self.isIgnored(clean, statIsDir(clean));
+    }
+
     /// Checks a verified existing path wether it needs to be gitignored
     pub fn isIgnoredPath(self: *const IgnoreRules, path: []const u8) bool {
         if (path.len > 0 and path[path.len - 1] == '/') {
@@ -52,20 +40,25 @@ pub const IgnoreRules = struct {
         return self.isIgnored(path, false);
     }
 
-    /// Like `isIgnored` but determines directory-ness by stat'ing `path` on
-    /// disk (lstat: symlinks are not followed)
-    pub fn isIgnoredUntrusted(self: *const IgnoreRules, path: []const u8) bool {
-        const clean = if (path.len > 0 and path[path.len - 1] == '/') path[0 .. path.len - 1] else path;
-        return self.isIgnored(clean, statIsDir(clean));
+    pub fn put(self: *IgnoreRules, dir_rel: []const u8, node: *IgnoreNode) !void {
+        const gop = try self.by_dir.getOrPut(self.allocator, dir_rel);
+        if (gop.found_existing) {
+            // A directory yields at most one node; replacing would leak a ref.
+            return;
+        }
+        errdefer _ = self.by_dir.remove(dir_rel);
+        gop.key_ptr.* = try self.allocator.dupe(u8, dir_rel);
+        node.retain();
+        gop.value_ptr.* = node;
     }
 
     pub fn deinit(self: *IgnoreRules) void {
         var it = self.by_dir.iterator();
         while (it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            e.value_ptr.*.release(self.gpa);
+            self.allocator.free(e.key_ptr.*);
+            e.value_ptr.*.release(self.allocator);
         }
-        self.by_dir.deinit(self.gpa);
+        self.by_dir.deinit(self.allocator);
     }
 };
 

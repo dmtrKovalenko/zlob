@@ -27,13 +27,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Format checks
-      - name: Check Zig format
-        run: zig fmt --check src/ test/ bench/
-
-      - name: Check Rust format
-        working-directory: rust
-        run: cargo fmt --check
+      - name: Check format
+        run: make format-check
 
       - name: Rust clippy
         working-directory: rust

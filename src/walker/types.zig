@@ -188,8 +188,8 @@ pub const VisitAction = enum(c_int) {
     stop = 2,
 };
 
-/// Visitor for `run`. With `threads != 1` it is invoked concurrently from
-/// multiple worker threads and must be thread-safe.
+/// Visitor for `run`
+/// When `threads != 1` it is invoked concurrently from multiple worker threads and has to be thread-safe
 pub const Visitor = struct {
     context: ?*anyopaque = null,
     visit: *const fn (context: ?*anyopaque, entry: *const Entry) VisitAction,
@@ -211,10 +211,6 @@ pub const Options = struct {
     respect_git: bool = true,
     /// Skip ".git" directories (only when respect_git is set).
     skip_git_dir: bool = true,
-    /// Retain the parsed ignore rules so they can be reused after the walk via
-    /// the returned `IgnoreRules` (see `collect`). No effect when respect_git
-    /// is false; only `collect` (not `run`) returns them.
-    retain_ignore_rules: bool = false,
     /// Report directory entries (directories are traversed either way).
     report_dirs: bool = true,
     /// Glob filter: only entries whose root-relative path matches are reported

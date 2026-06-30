@@ -32,15 +32,12 @@ pub const WalkerResult = struct {
     entries: []Entry,
     chunks: [][]u8,
     allocator: Allocator,
-    /// Reusable ignore rules, present only when `Options.retain_ignore_rules`
-    /// was set. Owned by these results; valid until `deinit`.
-    ignore_rules: ?*IgnoreRules = null,
+    /// Inferred set of ignore rules, valid until the .gitignore/.ignore file is changed
+    ignore_rules: *IgnoreRules,
 
     pub fn deinit(self: *WalkerResult) void {
-        if (self.ignore_rules) |r| {
-            r.deinit();
-            self.allocator.destroy(r);
-        }
+        self.ignore_rules.deinit();
+        self.allocator.destroy(self.ignore_rules);
         for (self.chunks) |c| self.allocator.free(c);
         self.allocator.free(self.chunks);
         self.allocator.free(self.entries);
@@ -55,13 +52,17 @@ fn runSink(ctx: *anyopaque, walk_id: u32, entry: *const Entry) VisitAction {
     return v.visit(v.context, entry);
 }
 
-/// Streaming parallel walk: the visitor is called for every entry, from
-///jmultiple threads when `options.threads != 1`.
-///
-/// Entry slices are valid only during the callback.
-pub fn run(gpa: Allocator, root: []const u8, options: Options, visitor: Visitor) WalkError!void {
-    var v = visitor;
-    return walkImpl(gpa, root, options, runSink, &v, effectiveThreads(&options), null);
+/// Streaming parallel walk. The visitor is called for every entry (has to be thread safe if threads != 1)
+pub fn run(allocator: Allocator, root: []const u8, options: Options, visitor: Visitor) WalkError!*IgnoreRules {
+    const rules = try allocator.create(IgnoreRules);
+    rules.* = .{ .allocator = allocator };
+    errdefer {
+        rules.deinit();
+        allocator.destroy(rules);
+    }
+
+    try walkImpl(allocator, root, options, runSink, @constCast(&visitor), effectiveThreads(&options), rules);
+    return rules;
 }
 
 /// Walks and returns all entries. Optimized for allocation, so use this only if you need in-memory result
@@ -75,16 +76,12 @@ pub fn collect(gpa: Allocator, root: []const u8, options: Options) WalkError!Wal
         gpa.free(col.sinks);
     }
 
-    const want_rules = options.respect_git and options.retain_ignore_rules;
-    var rules: ?*IgnoreRules = null;
-    if (want_rules) {
-        rules = try gpa.create(IgnoreRules);
-        rules.?.* = .{ .gpa = gpa };
+    const rules = try gpa.create(IgnoreRules);
+    rules.* = .{ .allocator = gpa };
+    errdefer {
+        rules.deinit();
+        gpa.destroy(rules);
     }
-    errdefer if (rules) |r| {
-        r.deinit();
-        gpa.destroy(r);
-    };
 
     try walkImpl(gpa, root, options, collectSink, @ptrCast(&col), n_workers, rules);
 
@@ -117,13 +114,16 @@ pub fn collect(gpa: Allocator, root: []const u8, options: Options) WalkError!Wal
     return .{ .entries = entries, .chunks = chunks, .allocator = gpa, .ignore_rules = rules };
 }
 
+fn entryLessThan(_: void, a: Entry, b: Entry) bool {
+    return mem.order(u8, a.path, b.path) == .lt;
+}
+
 fn effectiveThreads(opts: *const Options) u32 {
     if (opts.threads != 0) return @min(opts.threads, 1024);
     const n: u32 = @intCast(@max(std.Thread.getCpuCount() catch 1, 1));
     // Directory enumeration is syscall-bound and contends on per-process and
-    // per-mount kernel locks (the fd table, vnode/namecache locks). Beyond a
-    // low count more workers only fight over those locks rather than doing
-    // useful I/O.
+    // per-mount kernel locks (the fd table, vnode/namecache locks).
+    // Beyond a low count more workers only fight over those locks rather than doing useful I/O.
     //
     // macOS (APFS): throughput climbs to a low single-digit worker count and
     // then regresses as the shared VFS name-cache / vnode locks dominate
@@ -150,7 +150,7 @@ fn walkImpl(
     sink: worker.SinkFn,
     sink_ctx: *anyopaque,
     n_workers: u32,
-    retain: ?*IgnoreRules,
+    ignore_rules: *IgnoreRules,
 ) WalkError!void {
     const MAX_PATH = types.MAX_PATH;
 
@@ -202,8 +202,9 @@ fn walkImpl(
         else
             &.{},
         .statx_mask = scan.linuxStatxMask(options.meta),
-        .retain = retain,
+        .ignore_rules = ignore_rules,
     };
+
     try sh.queue.init(allocator, n_workers);
     defer {
         sh.queue.deinit(allocator);
@@ -303,8 +304,4 @@ fn collectSink(ctx: *anyopaque, worker_id: u32, entry: *const Entry) VisitAction
         return .stop;
     };
     return .cont;
-}
-
-fn entryLessThan(_: void, a: Entry, b: Entry) bool {
-    return mem.order(u8, a.path, b.path) == .lt;
 }

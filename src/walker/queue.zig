@@ -1,15 +1,3 @@
-//! Per-worker LIFO task queues with work-stealing. One task is one directory;
-//! LIFO ordering keeps traversal depth-first, which bounds open fds and keeps
-//! the dcache hot.
-//!
-//! The deques are mutex-guarded rather than lock-free (e.g. Chase-Lev) on
-//! purpose: profiling shows the walk is ~98% syscall-bound (getdirentries64 +
-//! openat serializing on kernel VFS locks), with the queue futex under ~2% and
-//! most of that being idle workers correctly sleeping, not contention. A
-//! lock-free deque would add real complexity (safe buffer reclamation under
-//! concurrent steals, unbounded growth) for no measurable gain, and the idle/
-//! termination path needs a condvar regardless.
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -32,7 +20,6 @@ pub const DirTask = struct {
 const LocalQueue = struct {
     mutex: std.Io.Mutex = .init,
     items: std.ArrayList(*DirTask) = .empty,
-    /// Approximate item count for lock-free empty checks during stealing.
     approx_len: std.atomic.Value(usize) = .init(0),
 
     fn deinit(lq: *LocalQueue, gpa: Allocator) void {
@@ -40,12 +27,13 @@ const LocalQueue = struct {
     }
 };
 
+/// Work stealing queue for per worker walking, optimized for as least contention as possible
 pub const Queue = struct {
     locals: []LocalQueue = &.{},
     wait_mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
     queued: std.atomic.Value(usize) = .init(0),
-    /// Tasks pushed but not finished, including queued and in-flight.
+    /// Tasks pushed but not finished, including queued and in-flight
     outstanding: std.atomic.Value(usize) = .init(0),
     closed: std.atomic.Value(bool) = .init(false),
 

@@ -61,8 +61,12 @@ inline fn noteIgnoreFile(w: *Worker, name: []const u8) void {
 
 inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: RawEntry) WalkError!void {
     const name = raw.name;
-    if (name.len == 0) return;
+    if (name.len == 0) {
+        @branchHint(.unlikely);
+        return;
+    }
     if (name[0] == '.') {
+        @branchHint(.unlikely);
         if (name.len == 1 or (name.len == 2 and name[1] == '.')) return;
         noteIgnoreFile(w, name);
     }
@@ -77,8 +81,12 @@ inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: RawEntry) WalkE
 }
 
 inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []const u8, kind: EntryKind) WalkError!void {
-    if (name.len == 0) return;
+    if (name.len == 0) {
+        @branchHint(.unlikely);
+        return;
+    }
     if (name[0] == '.') {
+        @branchHint(.unlikely);
         if (name.len == 1 or (name.len == 2 and name[1] == '.')) return;
         noteIgnoreFile(w, name);
     }
