@@ -42,6 +42,10 @@ jobs:
       - name: Run tests
         run: make test
 
+      - name: Walker e2e parity (real repos)
+        working-directory: rust
+        run: cargo test --release --test walk_e2e_repos -- --nocapture
+
   docs-rs:
     name: docs.rs build
     runs-on: ubuntu-latest
@@ -241,6 +245,10 @@ jobs:
       - name: Run tests
         run: make test
 
+      - name: Walker e2e parity (real repos)
+        working-directory: rust
+        run: cargo test --release --test walk_e2e_repos -- --nocapture
+
       - name: Test Zig CLI
         run: |
           ./zig-out/bin/zlob --version
@@ -267,6 +275,11 @@ jobs:
 
       - name: Run tests
         run: make test
+        shell: bash
+
+      - name: Walker e2e parity (real repos)
+        working-directory: rust
+        run: cargo test --release --test walk_e2e_repos -- --nocapture
         shell: bash
 
       - name: List zig-out contents

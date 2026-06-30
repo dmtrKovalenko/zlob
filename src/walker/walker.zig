@@ -119,14 +119,28 @@ pub fn collect(gpa: Allocator, root: []const u8, options: Options) WalkError!Wal
 
 fn effectiveThreads(opts: *const Options) u32 {
     if (opts.threads != 0) return @min(opts.threads, 1024);
-    const n = std.Thread.getCpuCount() catch 1;
+    const n: u32 = @intCast(@max(std.Thread.getCpuCount() catch 1, 1));
     // Directory enumeration is syscall-bound and contends on per-process and
     // per-mount kernel locks (the fd table, vnode/namecache locks). Beyond a
-    // low count more workers only fight over those locks: on macOS throughput
-    // peaks around 4 threads and regresses below single-threaded past ~8 on
-    // large trees. Linux scales further before the dcache lock bites.
-    const cap: u32 = if (backend == .darwin_bulk) 4 else 16;
-    return @intCast(@min(@max(n, 1), cap));
+    // low count more workers only fight over those locks rather than doing
+    // useful I/O.
+    //
+    // macOS (APFS): throughput climbs to a low single-digit worker count and
+    // then regresses as the shared VFS name-cache / vnode locks dominate
+    // (below single-threaded past ~12). The peak depends on how long each
+    // syscall holds those locks:
+    //   - name-only walks (getdirentries64) hold them briefly -> peak ~6.
+    //   - metadata walks (getattrlistbulk) assemble attribute records under
+    //     the same locks, so contention bites one worker earlier -> peak ~5.
+    // Measured on Apple-silicon (M-series); we never oversubscribe past the
+    // logical core count on smaller machines.
+    //
+    // Linux: the dcache lock scales further, so allow more workers there.
+    if (backend == .darwin_bulk) {
+        const cap: u32 = if (opts.meta.any()) 5 else 6;
+        return @min(n, cap);
+    }
+    return @min(n, 16);
 }
 
 fn walkImpl(

@@ -95,10 +95,7 @@ fn main() {
     });
 
     timeit("zlob gitignore parallel (.build)", iters, || {
-        zlob::walk::WalkBuilder::new(&root)
-            .build()
-            .unwrap()
-            .len()
+        zlob::walk::WalkBuilder::new(&root).build().unwrap().len()
     });
 
     timeit("ignore serial", iters, || {

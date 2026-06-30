@@ -1,18 +1,3 @@
-//! Windows bulk directory scanner built directly on ntdll.
-//!
-//! NtQueryDirectoryFile returns a whole batch of entries per syscall and —
-//! unlike FindFirstFile/readdir-style APIs — each record already carries the
-//! interesting metadata (sizes, all four timestamps, attributes, and the
-//! 64-bit file id when requested). That makes metadata effectively FREE on
-//! Windows: no per-entry stat ever happens.
-//!
-//! Two information classes are used depending on the requested mask:
-//! - FileBothDirectoryInformation when the file id (inode) is not needed
-//! - FileIdBothDirectoryInformation when it is
-//!
-//! Directory handles are opened with NtCreateFile relative to the parent
-//! handle (OBJECT_ATTRIBUTES.RootDirectory) — the NT-native openat().
-
 const std = @import("std");
 const builtin = @import("builtin");
 const walk = @import("types.zig");

@@ -283,8 +283,7 @@ impl WalkBuilder {
         self
     }
 
-    /// Number of worker threads. `0` (default) = one per CPU; `1` = run on
-    /// the calling thread.
+    /// Number of worker threads. `0` (default) = one per CPU; `1` = run on the calling thread.
     pub fn threads(&mut self, n: usize) -> &mut Self {
         self.threads = n.min(u16::MAX as usize) as u16;
         self
@@ -340,13 +339,69 @@ impl WalkBuilder {
 
     /// Stream entries through `visitor`, in parallel.
     ///
-    /// With more than one thread the visitor is called concurrently from
-    /// worker threads, hence `Sync`. Entry borrows are only valid for the
-    /// duration of the call.
+    /// The visitor is called concurrently from worker threads (one per CPU by
+    /// default), hence the `Sync` bound — mirroring `ignore`'s
+    /// `build_parallel`. If you only need a single-threaded walk and want to
+    /// pass a non-`Sync` `FnMut` (e.g. one that mutates captured state without
+    /// a lock), use [`Self::run_serial`] instead.
+    ///
+    /// Entry borrows are only valid for the duration of the call.
     ///
     /// A panicking visitor stops the walk; the panic resumes on the calling
     /// thread once the walk has wound down.
     pub fn run<F>(&self, visitor: F) -> Result<(), ZlobError>
+    where
+        F: Fn(WalkEntry<'_>) -> WalkState + Sync,
+    {
+        // The parallel contract: honor the builder's thread setting (0 = one
+        // per CPU). The visitor is shared by reference across workers.
+        self.run_inner(self.threads, &move |e| visitor(e))
+    }
+
+    /// Stream entries through `visitor` on the calling thread only.
+    ///
+    /// This is the single-threaded counterpart to [`Self::run`]: because the
+    /// visitor is only ever invoked from the caller's thread, it takes an
+    /// `FnMut` with **no `Sync`/`Send` bound**, so it may freely mutate
+    /// captured state (e.g. push into a `Vec`, accumulate into a local) without
+    /// any synchronization. This mirrors how `walkdir`/`ignore` expose a plain
+    /// serial iterator separate from their parallel API.
+    ///
+    /// The builder's [`Self::threads`] setting is ignored here (the walk always
+    /// runs on the calling thread).
+    ///
+    /// Entry borrows are only valid for the duration of the call. A panicking
+    /// visitor stops the walk; the panic resumes on the caller once the walk
+    /// has wound down.
+    pub fn run_serial<F>(&self, mut visitor: F) -> Result<(), ZlobError>
+    where
+        F: FnMut(WalkEntry<'_>) -> WalkState,
+    {
+        // `run_inner` requires a `Fn + Sync` closure (the parallel contract).
+        // A serial `FnMut` satisfies neither on its own, so we bridge it:
+        //   - interior mutability (`RefCell`) turns the `FnMut` into something
+        //     callable through `&self`, i.e. a `Fn`;
+        //   - `AssertSync` supplies the `Sync` bound.
+        // Both are sound ONLY because `run_inner(1, ...)` forces a
+        // single-threaded walk: the closure runs exclusively on the calling
+        // thread, so there is never concurrent access to the `RefCell`.
+        struct AssertSync<T>(T);
+        // SAFETY: only constructed here and only ever driven with `threads = 1`,
+        // so the wrapped `RefCell` is touched by a single thread.
+        unsafe impl<T> Sync for AssertSync<T> {}
+
+        let cell = AssertSync(std::cell::RefCell::new(&mut visitor));
+        // Capture the whole `AssertSync` wrapper (not its inner field) so the
+        // closure inherits `AssertSync`'s asserted `Sync`. Disjoint closure
+        // captures would otherwise grab `cell.0` directly and lose it.
+        let adapter = &cell;
+        self.run_inner(1, &move |e| (adapter.0.borrow_mut())(e))
+    }
+
+    /// Shared FFI driver for [`Self::run`]/[`Self::run_serial`]. `threads`
+    /// overrides the worker count for this walk; `visitor` is invoked per
+    /// entry and must outlive the call.
+    fn run_inner<F>(&self, threads: u16, visitor: &F) -> Result<(), ZlobError>
     where
         F: Fn(WalkEntry<'_>) -> WalkState + Sync,
     {
@@ -383,9 +438,10 @@ impl WalkBuilder {
             }
         }
 
-        let (root, opts) = self.checked_options()?;
+        let (root, mut opts) = self.checked_options()?;
+        opts.threads = threads;
         let ctx = VisitCtx {
-            visitor: &visitor,
+            visitor,
             panic: Mutex::new(None),
         };
         let rc = unsafe {
@@ -785,6 +841,51 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
+    fn run_serial_accepts_non_sync_fnmut() {
+        // The whole point of `run_serial`: no `Sync`/`Send` bound, so a plain
+        // `FnMut` that mutates captured state without any synchronization
+        // compiles and works. (`Vec`/`Rc` are `!Sync`; capturing them mutably
+        // would be rejected by `run`.)
+        use std::rc::Rc;
+        let dir = make_tree();
+        let mut names: Vec<String> = Vec::new();
+        let not_sync: Rc<u8> = Rc::new(0); // a !Sync witness held across calls
+        WalkBuilder::new(dir.path())
+            .git_ignore(false)
+            .hidden(false)
+            // Even with many threads configured, run_serial ignores it and
+            // runs single-threaded, so this borrow is sound.
+            .threads(8)
+            .run_serial(|entry| {
+                let _ = &not_sync;
+                names.push(entry.file_name().to_string_lossy().into_owned());
+                WalkState::Continue
+            })
+            .unwrap();
+        assert_eq!(names.len(), 7);
+    }
+
+    #[test]
+    fn run_serial_skip_dir_and_quit() {
+        let dir = make_tree();
+        let mut count = 0usize;
+        WalkBuilder::new(dir.path())
+            .git_ignore(false)
+            .hidden(false)
+            .run_serial(|entry| {
+                count += 1;
+                if entry.is_dir() {
+                    WalkState::SkipDir
+                } else {
+                    WalkState::Continue
+                }
+            })
+            .unwrap();
+        // top level only: .gitignore, Cargo.toml, debug.log, src, target
+        assert_eq!(count, 5);
     }
 
     #[test]
