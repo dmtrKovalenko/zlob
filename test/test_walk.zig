@@ -579,4 +579,3 @@ test "walk retains reusable IgnoreRules: nesting, negation, .ignore precedence" 
     try testing.expect(!rules.isIgnoredUntrusted("build"));
     try testing.expect(rules.isIgnoredUntrusted("scratch.tmp"));
 }
-
