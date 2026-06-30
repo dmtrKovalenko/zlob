@@ -330,23 +330,23 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
 
 /** Metadata attribute bits for zlob_walk_options_t.meta_mask and
  *  zlob_walk_entry_t.meta_valid. */
-#define ZLOB_META_SIZE        (1u << 0)
-#define ZLOB_META_MTIME       (1u << 1)
-#define ZLOB_META_ATIME       (1u << 2)
-#define ZLOB_META_CTIME       (1u << 3)
-#define ZLOB_META_BTIME       (1u << 4) /* creation time (not on all filesystems) */
-#define ZLOB_META_INODE       (1u << 5)
-#define ZLOB_META_NLINK       (1u << 6)
-#define ZLOB_META_MODE        (1u << 7) /* permission bits (mode & 07777) */
-#define ZLOB_META_UID         (1u << 8)
-#define ZLOB_META_GID         (1u << 9)
-#define ZLOB_META_ALL         0x3FFu /* every attribute above (bits 0-9) */
+#define ZLOB_META_SIZE            (1u << 0)
+#define ZLOB_META_MTIME           (1u << 1)
+#define ZLOB_META_ATIME           (1u << 2)
+#define ZLOB_META_CTIME           (1u << 3)
+#define ZLOB_META_BTIME           (1u << 4) /* creation time (not on all filesystems) */
+#define ZLOB_META_INODE           (1u << 5)
+#define ZLOB_META_NLINK           (1u << 6)
+#define ZLOB_META_MODE            (1u << 7) /* permission bits (mode & 07777) */
+#define ZLOB_META_UID             (1u << 8)
+#define ZLOB_META_GID             (1u << 9)
+#define ZLOB_META_ALL             0x3FFu /* every attribute above (bits 0-9) */
 
 /* Walk behavior flags (zlob_walk_options_t.flags). All-zero options give a
  * plain walkdir-style traversal: hidden files included, .gitignore not
  * consulted, directories reported. */
-#define ZLOB_WALK_GITIGNORE   (1u << 0) /* honor (nested) .gitignore + .ignore; also skips .git */
-#define ZLOB_WALK_SKIP_HIDDEN (1u << 1) /* skip dotfiles and don't descend into dot-dirs */
+#define ZLOB_WALK_GITIGNORE       (1u << 0) /* honor (nested) .gitignore + .ignore; also skips .git */
+#define ZLOB_WALK_SKIP_HIDDEN     (1u << 1) /* skip dotfiles and don't descend into dot-dirs */
 #define ZLOB_WALK_FOLLOW_SYMLINKS (1u << 2)
 #define ZLOB_WALK_NO_REPORT_DIRS  (1u << 3) /* yield only non-directory entries */
 #define ZLOB_WALK_SORT            (1u << 4) /* sort zlob_walk_collect() results by path */
