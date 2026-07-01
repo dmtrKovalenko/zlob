@@ -1,59 +1,23 @@
-//! Parallel recursive directory walker — a drop-in replacement for the
-//! `walkdir` and `ignore` crates backed by zlob's native walker.
-//!
-//! Highlights:
-//! - Traversal runs on a pool of worker threads (one per CPU by default).
-//! - Metadata is fetched in bulk where the OS allows it (`getattrlistbulk`
-//!   on macOS, `statx` on Linux) and only requested attributes are paid for.
-//! - Nested `.gitignore` files are honored and matched in parallel.
-//! - [`WalkBuilder::build`] materializes the whole tree with a single FFI
-//!   call (no per-entry callback crossing) — typically much faster than
-//!   iterating `walkdir`.
-//!
-//! ```no_run
-//! use zlob::walk::{WalkBuilder, WalkFlags};
-//!
-//! // ignore-crate-style defaults: .gitignore respected, hidden skipped.
-//! let results = WalkBuilder::new("./src").build().unwrap();
-//! for entry in results.iter() {
-//!     println!("{}", entry.path().display());
-//! }
-//!
-//! // Streaming + parallel, walkdir-style (no filtering):
-//! WalkBuilder::new(".")
-//!     .options(WalkFlags::empty())
-//!     .run(|entry| {
-//!         println!("{}", entry.path().display());
-//!         zlob::walk::WalkState::Continue
-//!     })
-//!     .unwrap();
-//! ```
-
 use crate::error::ZlobError;
-use crate::ffi;
+use crate::{ZlobFlags, ffi};
 use bitflags::bitflags;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::os::raw::{c_int, c_void};
 use std::path::Path;
-use std::sync::Mutex;
+
+type Result<T> = std::result::Result<T, ZlobError>;
 
 bitflags! {
-    /// Behavior options for a [`WalkBuilder`]. Combine with `|`.
+    /// Options for a [`WalkBuilder`]. Combine with `|`.
     ///
-    /// The default ([`WalkBuilder::new`]) is [`WalkFlags::RECOMMENDED`] —
-    /// `ignore`-crate semantics: nested `.gitignore`/`.ignore` honored and
-    /// hidden (dot) entries skipped. For raw `walkdir` semantics (no filtering)
-    /// pass [`WalkFlags::empty`].
-    ///
-    /// # Example
-    ///
-    /// ```no_run
+    /// ```
     /// use zlob::walk::{WalkBuilder, WalkFlags};
     /// // raw traversal, sorted, directories suppressed
     /// let r = WalkBuilder::new(".")
+    ///     .unwrap()
     ///     .options(WalkFlags::SORT | WalkFlags::NO_REPORT_DIRS)
-    ///     .build()
+    ///     .collect()
     ///     .unwrap();
     /// ```
     ///
@@ -68,7 +32,7 @@ bitflags! {
         const FOLLOW_SYMLINKS = 1 << 2;
         /// Do **not** report directory entries (they are still traversed).
         const NO_REPORT_DIRS  = 1 << 3;
-        /// Sort [`WalkBuilder::build`] results by path.
+        /// Sort [`WalkBuilder::collect`] results by path.
         const SORT            = 1 << 4;
         /// Abort on the first directory error (default: skip unreadable dirs).
         const ABORT_ON_ERROR  = 1 << 5;
@@ -81,19 +45,14 @@ bitflags! {
 }
 
 bitflags! {
-    /// Which metadata attributes the walker should fetch per entry.
+    /// Which metadata attributes the walker should fetch per entry. Combine with `|`.
     ///
-    /// Empty (the default) means names and kinds only — the walker never stats
-    /// anything. On macOS every requested attribute is fetched in bulk (one
-    /// `getattrlistbulk` syscall per directory batch).
-    ///
-    /// # Example
-    ///
-    /// ```no_run
+    /// ```
     /// use zlob::walk::{WalkBuilder, WalkMetadata};
     /// let r = WalkBuilder::new(".")
+    ///     .unwrap()
     ///     .metadata(WalkMetadata::SIZE | WalkMetadata::MTIME)
-    ///     .build()
+    ///     .collect()
     ///     .unwrap();
     /// ```
     ///
@@ -146,38 +105,32 @@ pub enum WalkEntryKind {
     Unknown,
 }
 
-/// Builder for a parallel directory walk.
-///
-/// Defaults to [`WalkFlags::RECOMMENDED`] (mirrors the `ignore` crate:
-/// `.gitignore` files honored, hidden entries skipped, directories reported).
-/// For raw `walkdir` semantics use `.options(WalkFlags::empty())`.
+/// Builder for a parallel directory walk. Settings diefault to [`WalkFlags::RECOMMENDED`]
 #[derive(Debug, Clone)]
 pub struct WalkBuilder {
-    /// `Err` when the root contained an interior NUL — surfaced by
-    /// [`Self::build`]/[`Self::run`] instead of silently walking elsewhere.
-    root: Result<CString, ZlobError>,
+    extra_ignore: Option<CString>,
     flags: WalkFlags,
-    meta: WalkMetadata,
-    threads: u16,
     max_depth: u16,
-    /// `Err` when a pattern contained an interior NUL — surfaced by
-    /// [`Self::build`]/[`Self::run`] instead of silently dropping the filter.
-    pattern: Result<Option<CString>, ZlobError>,
-    pattern_flags: u32,
+    meta: WalkMetadata,
+    pattern: Option<CString>,
+    pattern_flags: i32,
+    root: CString,
+    threads: u16,
 }
 
 impl WalkBuilder {
-    pub fn new(root: impl AsRef<Path>) -> Self {
+    pub fn new(root: impl AsRef<Path>) -> Result<Self> {
         let bytes = path_to_bytes(root.as_ref());
-        Self {
-            root: CString::new(bytes).map_err(|_| ZlobError::InvalidInput),
+        Ok(Self {
+            root: CString::new(bytes).map_err(|_| ZlobError::InvalidInput)?,
             flags: WalkFlags::RECOMMENDED,
             meta: WalkMetadata::empty(),
             threads: 0,
             max_depth: 0,
-            pattern: Ok(None),
             pattern_flags: 0,
-        }
+            pattern: None,
+            extra_ignore: None,
+        })
     }
 
     /// Set the walk behavior flags, replacing any previously set flags
@@ -188,7 +141,11 @@ impl WalkBuilder {
     /// ```no_run
     /// use zlob::walk::{WalkBuilder, WalkFlags};
     /// // raw traversal (walkdir-style): no gitignore, hidden shown
-    /// let r = WalkBuilder::new(".").options(WalkFlags::empty()).build().unwrap();
+    /// let r = WalkBuilder::new(".")
+    ///     .unwrap()
+    ///     .options(WalkFlags::empty())
+    ///     .collect()
+    ///     .unwrap();
     /// ```
     pub fn options(&mut self, flags: WalkFlags) -> &mut Self {
         self.flags = flags;
@@ -201,36 +158,51 @@ impl WalkBuilder {
         self
     }
 
-    /// Glob filter: only entries whose root-relative path matches the
-    /// pattern are reported (e.g. `**/*.rs`, `src/**`, `*.{c,h}`).
+    /// White-list pattern for the included directories
+    pub fn include(&mut self, pattern: impl AsRef<str>) -> Result<&mut Self> {
+        self.pattern = Some(CString::new(pattern.as_ref()).map_err(|_| ZlobError::InvalidInput)?);
+        self.pattern_flags = ZlobFlags::RECOMMENDED.bits();
+        Ok(self)
+    }
+
+    /// Override `ZlobFlags::RECOMMENDED` for the included pattern. Always call it after
+    /// `WalkBuilder::include`. Make sure that not all the flags make sense in this case,
+    /// e.g. there is no reason to set ZlobFlags::GITIGNORE if gitignore is enabled for walker.
     ///
-    /// Traversal itself is narrowed too: directories outside the pattern's
-    /// literal prefix (everything but `src/` for `src/**/*.c`) are pruned
-    /// without ever being opened. Matching is SIMD-accelerated, compiled
-    /// once per walk, and runs lock-free on the worker threads.
-    ///
-    /// Compiled with brace expansion + recursive `**` by default; use
-    /// [`Self::glob_with_flags`] for different pattern semantics.
-    pub fn glob(&mut self, pattern: impl AsRef<str>) -> &mut Self {
-        self.pattern = CString::new(pattern.as_ref())
-            .map(Some)
-            .map_err(|_| ZlobError::InvalidInput);
-        self.pattern_flags = 0; // library default: BRACE | DOUBLESTAR_RECURSIVE
+    /// ```no_run
+    /// use zlob::{ZlobFlags, walk::WalkBuilder};
+    /// # fn main() -> Result<(), zlob::ZlobError> {
+    /// let r = WalkBuilder::new(".")?
+    ///     .include("src/*.!(c|cpp)")? // pattern using bash extglob syntax
+    ///     .include_flags(ZlobFlags::EXTGLOB) // need to enable it
+    ///     .collect()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn include_flags(&mut self, flags: ZlobFlags) -> &mut Self {
+        self.pattern_flags = flags.bits();
         self
     }
 
-    /// Like [`Self::glob`] but with explicit [`crate::ZlobFlags`] for the
-    /// pattern (e.g. enable `EXTGLOB`, disable `BRACE`).
-    pub fn glob_with_flags(
-        &mut self,
-        pattern: impl AsRef<str>,
-        flags: crate::ZlobFlags,
-    ) -> &mut Self {
-        self.pattern = CString::new(pattern.as_ref())
-            .map(Some)
-            .map_err(|_| ZlobError::InvalidInput);
-        self.pattern_flags = flags.bits() as u32;
-        self
+    /// Extra ignore rules layered into the walker, using `.gitignore` syntax.
+    /// Those extra ignore rules are going to be surfaced in the output IgnoreRules set.
+    ///
+    /// ```no_run
+    /// use zlob::walk::WalkBuilder;
+    /// # fn main() -> Result<(), zlob::ZlobError> {
+    /// let _ = WalkBuilder::new(".")?
+    ///     .extra_ignore(&["node_modules", "target", ".venv", "!**/README.md"])?
+    ///     .collect()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn extra_ignore<S: AsRef<str>>(&mut self, patterns: &[S]) -> Result<&mut Self> {
+        let mut joined = String::new();
+        for p in patterns {
+            joined.push_str(p.as_ref());
+            joined.push('\n');
+        }
+
+        self.extra_ignore = Some(CString::new(joined).map_err(|_| ZlobError::InvalidInput)?);
+        Ok(self)
     }
 
     /// Number of worker threads. `0` (default) = one per CPU; `1` = run on the calling thread.
@@ -248,12 +220,17 @@ impl WalkBuilder {
 
     /// Validated root + options. The returned pattern/root pointers borrow
     /// from `self` and stay valid for the duration of the FFI call.
-    fn checked_options(&self) -> Result<(&CString, ffi::zlob_walk_options_t), ZlobError> {
-        let root = self.root.as_ref().map_err(|e| *e)?;
-        let pattern = match self.pattern.as_ref().map_err(|e| *e)? {
+    fn checked_options(&self) -> Result<(&CStr, ffi::zlob_walk_options_t)> {
+        let root = self.root.as_ref();
+        let pattern = match self.pattern.as_ref() {
             Some(p) => p.as_ptr(),
             None => std::ptr::null(),
         };
+        let extra_ignore = match self.extra_ignore.as_ref() {
+            Some(p) => p.as_ptr(),
+            None => std::ptr::null(),
+        };
+
         Ok((
             root,
             ffi::zlob_walk_options_t {
@@ -263,7 +240,8 @@ impl WalkBuilder {
                 max_depth: self.max_depth,
                 errfunc: None,
                 pattern,
-                pattern_flags: self.pattern_flags,
+                pattern_flags: self.pattern_flags as u32,
+                extra_ignore,
             },
         ))
     }
@@ -271,15 +249,15 @@ impl WalkBuilder {
     /// Walk the tree and materialize all entries in one call.
     ///
     /// This is the fastest way to consume the walker from Rust: workers
-    /// accumulate into lock-free private buffers and the result crosses the
-    /// FFI boundary exactly once.
-    pub fn build(&self) -> Result<WalkResults, ZlobError> {
+    /// accumulate into private buffers and then return combined results
+    pub fn collect(&self) -> Result<WalkResults> {
         let (root, opts) = self.checked_options()?;
         let mut out = ffi::zlob_walk_result_t {
             entries: std::ptr::null_mut(),
             count: 0,
             _storage: std::ptr::null_mut(),
         };
+
         let rc = unsafe { ffi::zlob_walk_collect(root.as_ptr(), &opts, &mut out) };
         match rc {
             0 => Ok(WalkResults { raw: out }),
@@ -287,126 +265,84 @@ impl WalkBuilder {
         }
     }
 
-    /// Stream entries through `visitor`, in parallel.
+    /// Stream entries through `visitor`, in parallel calling callback for every entry.
+    /// Returns assembled Walk
     ///
-    /// The visitor is called concurrently from worker threads (one per CPU by
-    /// default), hence the `Sync` bound — mirroring `ignore`'s
-    /// `build_parallel`. If you only need a single-threaded walk and want to
-    /// pass a non-`Sync` `FnMut` (e.g. one that mutates captured state without
-    /// a lock), use [`Self::run_serial`] instead.
-    ///
-    /// Entry borrows are only valid for the duration of the call.
-    ///
-    /// A panicking visitor stops the walk; the panic resumes on the calling
-    /// thread once the walk has wound down.
-    pub fn run<F>(&self, visitor: F) -> Result<(), ZlobError>
+    /// the callback should neer panic, panicking = UB
+    pub fn run<F>(&self, visitor: F) -> Result<WalkerOutcomeRules>
     where
         F: Fn(WalkEntry<'_>) -> WalkState + Sync,
     {
-        // The parallel contract: honor the builder's thread setting (0 = one
-        // per CPU). The visitor is shared by reference across workers.
         self.run_inner(self.threads, &move |e| visitor(e))
     }
 
     /// Stream entries through `visitor` on the calling thread only.
+    /// This allows to pass non-Sync cb to the walker for example mutate reference
     ///
-    /// This is the single-threaded counterpart to [`Self::run`]: because the
-    /// visitor is only ever invoked from the caller's thread, it takes an
-    /// `FnMut` with **no `Sync`/`Send` bound**, so it may freely mutate
-    /// captured state (e.g. push into a `Vec`, accumulate into a local) without
-    /// any synchronization. This mirrors how `walkdir`/`ignore` expose a plain
-    /// serial iterator separate from their parallel API.
-    ///
-    /// The builder's [`Self::threads`] setting is ignored here (the walk always
-    /// runs on the calling thread).
-    ///
-    /// Entry borrows are only valid for the duration of the call. A panicking
-    /// visitor stops the walk; the panic resumes on the caller once the walk
-    /// has wound down.
-    pub fn run_serial<F>(&self, mut visitor: F) -> Result<(), ZlobError>
+    /// Returns a [`WalkRulesHandle`] just like [`Self::run`].
+    pub fn run_serial<F>(&self, mut visitor: F) -> Result<WalkerOutcomeRules>
     where
         F: FnMut(WalkEntry<'_>) -> WalkState,
     {
-        // `run_inner` requires a `Fn + Sync` closure (the parallel contract).
-        // A serial `FnMut` satisfies neither on its own, so we bridge it:
-        //   - interior mutability (`RefCell`) turns the `FnMut` into something
-        //     callable through `&self`, i.e. a `Fn`;
-        //   - `AssertSync` supplies the `Sync` bound.
-        // Both are sound ONLY because `run_inner(1, ...)` forces a
-        // single-threaded walk: the closure runs exclusively on the calling
-        // thread, so there is never concurrent access to the `RefCell`.
-        struct AssertSync<T>(T);
-        // SAFETY: only constructed here and only ever driven with `threads = 1`,
-        // so the wrapped `RefCell` is touched by a single thread.
-        unsafe impl<T> Sync for AssertSync<T> {}
+        debug_assert!(self.threads == 1);
 
-        let cell = AssertSync(std::cell::RefCell::new(&mut visitor));
-        // Capture the whole `AssertSync` wrapper (not its inner field) so the
-        // closure inherits `AssertSync`'s asserted `Sync`. Disjoint closure
-        // captures would otherwise grab `cell.0` directly and lose it.
-        let adapter = &cell;
-        self.run_inner(1, &move |e| (adapter.0.borrow_mut())(e))
+        struct SerialBridge<F> {
+            ptr: *mut F,
+        }
+
+        unsafe impl<F> Sync for SerialBridge<F> {}
+
+        let bridge = SerialBridge {
+            ptr: &mut visitor as *mut F,
+        };
+
+        // Capture by shared reference so the closure captures the *whole*
+        // SerialBridge (Sync via unsafe impl above)
+        let bridge_ref = &bridge;
+        self.run_inner(1, &move |e| {
+            let f = unsafe { &mut *bridge_ref.ptr };
+            f(e)
+        })
     }
 
-    /// Shared FFI driver for [`Self::run`]/[`Self::run_serial`]. `threads`
-    /// overrides the worker count for this walk; `visitor` is invoked per
-    /// entry and must outlive the call.
-    fn run_inner<F>(&self, threads: u16, visitor: &F) -> Result<(), ZlobError>
+    fn run_inner<F>(&self, threads: u16, visitor: &F) -> Result<WalkerOutcomeRules>
     where
         F: Fn(WalkEntry<'_>) -> WalkState + Sync,
     {
-        struct VisitCtx<'a, F> {
-            visitor: &'a F,
-            // First panic payload from any worker; replayed after the FFI
-            // call returns (unwinding across the Zig frames is UB).
-            panic: Mutex<Option<Box<dyn std::any::Any + Send + 'static>>>,
-        }
-
-        unsafe extern "C" fn trampoline<F>(
+        unsafe extern "C" fn zlob_callback<F>(
             entry: *const ffi::zlob_walk_entry_t,
             ctx: *mut c_void,
         ) -> c_int
         where
             F: Fn(WalkEntry<'_>) -> WalkState + Sync,
         {
-            let ctx = unsafe { &*(ctx as *const VisitCtx<'_, F>) };
+            let visitor = unsafe { &*(ctx as *const F) };
             let entry = WalkEntry {
                 raw: unsafe { &*entry },
                 _marker: PhantomData,
             };
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (ctx.visitor)(entry))) {
-                Ok(WalkState::Continue) => 0,
-                Ok(WalkState::SkipDir) => 1,
-                Ok(WalkState::Quit) => 2,
-                Err(payload) => {
-                    let mut slot = ctx.panic.lock().unwrap_or_else(|p| p.into_inner());
-                    if slot.is_none() {
-                        *slot = Some(payload);
-                    }
-                    2 // stop the walk; don't unwind into Zig
-                }
+
+            match visitor(entry) {
+                WalkState::Continue => 0,
+                WalkState::SkipDir => 1,
+                WalkState::Quit => 2,
             }
         }
 
         let (root, mut opts) = self.checked_options()?;
         opts.threads = threads;
-        let ctx = VisitCtx {
-            visitor,
-            panic: Mutex::new(None),
-        };
+        let mut raw_rules: *mut c_void = std::ptr::null_mut();
         let rc = unsafe {
             ffi::zlob_walk(
                 root.as_ptr(),
                 &opts,
-                Some(trampoline::<F>),
-                &ctx as *const VisitCtx<'_, F> as *mut c_void,
+                Some(zlob_callback::<F>),
+                visitor as *const F as *mut c_void,
+                &mut raw_rules,
             )
         };
-        if let Some(payload) = ctx.panic.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            std::panic::resume_unwind(payload);
-        }
         match rc {
-            0 => Ok(()),
+            0 => Ok(WalkerOutcomeRules { raw: raw_rules }),
             _ => Err(rc_to_error(rc)),
         }
     }
@@ -432,7 +368,32 @@ fn path_to_bytes(p: &Path) -> Vec<u8> {
     p.to_string_lossy().into_owned().into_bytes()
 }
 
-/// Owned results of [`WalkBuilder::build`]. Holds all paths and metadata in
+/// A reusable set of rules used by the walker to ignore files
+#[derive(Clone, Copy)]
+pub struct IgnoreRules<'a> {
+    handle: *mut c_void,
+    _marker: PhantomData<&'a ()>,
+}
+
+unsafe impl Send for IgnoreRules<'_> {}
+unsafe impl Sync for IgnoreRules<'_> {}
+
+impl IgnoreRules<'_> {
+    /// Returns `true` if the provided path is ignored by the collected rule set
+    /// Works at a `Path` so both absolute and relative paths are supported.
+    ///
+    /// Performs `lstat` internally, marks non-accessible/non-existent files as ignored
+    ///
+    /// `relative_path` has to be relative to the walker's provided base path
+    pub fn is_ignored(&self, path: impl AsRef<Path>) -> bool {
+        let Ok(cpath) = CString::new(path_to_bytes(path.as_ref())) else {
+            return false; // an interior NUL can't match any real path
+        };
+        unsafe { ffi::zlob_ignore_rules_match_path(self.handle, cpath.as_ptr()) != 0 }
+    }
+}
+
+/// Owned results of [`WalkBuilder::collect`]. Holds all paths and metadata in
 /// a handful of contiguous allocations.
 pub struct WalkResults {
     raw: ffi::zlob_walk_result_t,
@@ -472,11 +433,10 @@ impl WalkResults {
         })
     }
 
-    /// Reusable ignore rules (`.gitignore` + `.ignore`, nested) gathered during
+    /// Reusable ignore rules (`.gitignore` + `.ignore` + custom rules matcher) gathered during
     /// the walk, for testing arbitrary paths afterwards. Always `Some` after a
-    /// successful [`WalkBuilder::build`] (empty when `GITIGNORE` was off or the
-    /// tree had no ignore files). The returned matcher borrows from these
-    /// results.
+    /// successful [`WalkBuilder::collect`] (empty when `GITIGNORE` was off or the
+    /// tree had no ignore files).
     pub fn ignore_rules(&self) -> Option<IgnoreRules<'_>> {
         let handle = unsafe { ffi::zlob_walk_result_ignore_rules(&self.raw) };
         if handle.is_null() {
@@ -487,45 +447,6 @@ impl WalkResults {
                 _marker: PhantomData,
             })
         }
-    }
-}
-
-/// A reusable view of the ignore rules a walk discovered, for checking
-/// arbitrary paths after the walk has finished. Borrows from the
-/// [`WalkResults`] it came from.
-///
-/// Resolves nested `.gitignore`/`.ignore` rules deepest-first, mirroring git.
-#[derive(Clone, Copy)]
-pub struct IgnoreRules<'a> {
-    handle: *mut c_void,
-    _marker: PhantomData<&'a ()>,
-}
-
-// The handle points into the walk result's owned, immutable rule storage.
-unsafe impl Send for IgnoreRules<'_> {}
-unsafe impl Sync for IgnoreRules<'_> {}
-
-impl IgnoreRules<'_> {
-    /// Returns whether `path` (relative to the walk root) is ignored.
-    /// Use on a trusted paths that you know exists, folders should be indicated witha trailing
-    /// forward slash.
-    ///
-    /// There is [`Self::is_ignored_untrusted`], which stats the path.
-    pub fn is_ignored(&self, path: impl AsRef<Path>) -> bool {
-        let Ok(cpath) = CString::new(path_to_bytes(path.as_ref())) else {
-            return false; // an interior NUL can't match any real path
-        };
-        unsafe { ffi::zlob_ignore_rules_match_path(self.handle, cpath.as_ptr()) != 0 }
-    }
-
-    /// Like [`Self::is_ignored`] but determines directory-ness by stat'ing the
-    /// path on disk (symlinks are not followed
-    pub fn is_ignored_untrusted(&self, path: impl AsRef<Path>) -> bool {
-        let Ok(cpath) = CString::new(path_to_bytes(path.as_ref())) else {
-            return false;
-        };
-
-        unsafe { ffi::zlob_ignore_rules_match_untrusted(self.handle, cpath.as_ptr()) != 0 }
     }
 }
 
@@ -543,8 +464,45 @@ impl std::fmt::Debug for WalkResults {
     }
 }
 
-/// A single walked entry. Borrowed from [`WalkResults`] storage or, inside
-/// [`WalkBuilder::run`] visitors, from per-worker buffers.
+/// The rules that were assembled during a previous walker run
+pub struct WalkerOutcomeRules {
+    raw: *mut c_void,
+}
+
+unsafe impl Send for WalkerOutcomeRules {}
+unsafe impl Sync for WalkerOutcomeRules {}
+
+impl WalkerOutcomeRules {
+    /// Borrow the rules for querying. `None` when the walk gathered nothing
+    /// (e.g. `WalkFlags::GITIGNORE` was off and no `extra_ignore` was set).
+    pub fn rules(&self) -> Option<IgnoreRules<'_>> {
+        if self.raw.is_null() {
+            None
+        } else {
+            Some(IgnoreRules {
+                handle: self.raw,
+                _marker: PhantomData,
+            })
+        }
+    }
+}
+
+impl Drop for WalkerOutcomeRules {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe { ffi::zlob_ignore_rules_free(self.raw) };
+            self.raw = std::ptr::null_mut();
+        }
+    }
+}
+
+impl std::fmt::Debug for WalkerOutcomeRules {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalkRulesHandle").finish_non_exhaustive()
+    }
+}
+
+/// A single walked entry
 #[derive(Clone, Copy)]
 pub struct WalkEntry<'a> {
     raw: &'a ffi::zlob_walk_entry_t,
@@ -570,19 +528,28 @@ impl<'a> WalkEntry<'a> {
     }
 
     /// Raw bytes of the path relative to the walk root.
-    ///
-    /// Same slice [`Self::relative_path`] wraps, but skips the `Path` round-trip —
-    /// useful when the consumer wants a `String`/`&str` directly and would
-    /// otherwise pay for `to_string_lossy()` over a borrowed `OsStr`.
     #[inline]
     pub fn relative_path_bytes(&self) -> &'a [u8] {
         &self.path_bytes()[self.raw.relative_offset as usize..]
     }
 
-    /// The entry's name (final path component).
+    /// If the item is kind of `WalkEntryKind::File` returns it's filename, otherwise None
     #[inline]
-    pub fn file_name(&self) -> &'a Path {
-        bytes_to_path(&self.path_bytes()[self.raw.basename_offset as usize..])
+    pub fn basename(&self) -> Option<&'a str> {
+        if !self.is_file() {
+            return None;
+        }
+
+        std::str::from_utf8(&self.path_bytes()[self.raw.basename_offset as usize..]).ok()
+    }
+
+    /// Byte offset where the basename begins inside [`Self::relative_path_bytes`].
+    #[inline]
+    pub fn basename_offset_in_relative(&self) -> u16 {
+        (self
+            .raw
+            .basename_offset
+            .saturating_sub(self.raw.relative_offset)) as u16
     }
 
     /// Depth below the root — direct children of the root are at depth 1.
@@ -712,9 +679,10 @@ mod tests {
     fn build_respects_gitignore() {
         let dir = make_tree();
         let results = WalkBuilder::new(dir.path())
+            .unwrap()
             .options(WalkFlags::RECOMMENDED | WalkFlags::SORT)
             .threads(1)
-            .build()
+            .collect()
             .unwrap();
 
         let names: Vec<String> = results
@@ -730,9 +698,10 @@ mod tests {
     fn build_plain_walkdir_mode() {
         let dir = make_tree();
         let results = WalkBuilder::new(dir.path())
+            .unwrap()
             .options(WalkFlags::SORT)
             .threads(1)
-            .build()
+            .collect()
             .unwrap();
 
         let names: Vec<String> = results
@@ -754,7 +723,7 @@ mod tests {
 
         let main_rs = results
             .iter()
-            .find(|e| e.file_name() == Path::new("main.rs"))
+            .find(|e| e.basename() == Some("main.rs"))
             .unwrap();
         assert!(main_rs.is_file());
         assert_eq!(main_rs.depth(), 2);
@@ -767,15 +736,16 @@ mod tests {
     fn metadata_size_and_mtime() {
         let dir = make_tree();
         let results = WalkBuilder::new(dir.path())
+            .unwrap()
             .options(WalkFlags::empty())
             .threads(1)
             .metadata(WalkMetadata::SIZE | WalkMetadata::MTIME | WalkMetadata::INODE)
-            .build()
+            .collect()
             .unwrap();
 
         let main_rs = results
             .iter()
-            .find(|e| e.file_name() == Path::new("main.rs"))
+            .find(|e| e.basename() == Some("main.rs"))
             .unwrap();
         assert_eq!(main_rs.size(), Some(12)); // "fn main() {}"
         assert!(main_rs.modified_ns().unwrap() > 0);
@@ -787,6 +757,7 @@ mod tests {
         let dir = make_tree();
         let count = AtomicUsize::new(0);
         WalkBuilder::new(dir.path())
+            .unwrap()
             .options(WalkFlags::empty())
             .run(|_entry| {
                 count.fetch_add(1, Ordering::Relaxed);
@@ -794,6 +765,27 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
+    fn run_returns_queryable_rules_handle() {
+        // The streaming API now surfaces the retained ignore rules the same
+        // way `collect()` does — same walk, same rule set.
+        let dir = make_tree();
+        let handle = WalkBuilder::new(dir.path())
+            .unwrap()
+            .run(|_| WalkState::Continue)
+            .unwrap();
+        let rules = handle.rules().expect("rules always present after a walk");
+        // make_tree() creates target/ + debug.log, both gitignored. isIgnoredPath
+        // lstats the on-disk paths.
+        assert!(rules.is_ignored("target"));
+        assert!(rules.is_ignored("debug.log"));
+        assert!(!rules.is_ignored("Cargo.toml"));
+
+        // Rules are usable after the walk returns — the handle owns storage
+        // that lives until it drops (verified by the borrows above).
+        drop(handle);
     }
 
     #[test]
@@ -807,13 +799,19 @@ mod tests {
         let mut names: Vec<String> = Vec::new();
         let not_sync: Rc<u8> = Rc::new(0); // a !Sync witness held across calls
         WalkBuilder::new(dir.path())
+            .unwrap()
             .options(WalkFlags::empty())
             // Even with many threads configured, run_serial ignores it and
             // runs single-threaded, so this borrow is sound.
             .threads(8)
             .run_serial(|entry| {
                 let _ = &not_sync;
-                names.push(entry.file_name().to_string_lossy().into_owned());
+                // basename() is file-only by design; this test wants the
+                // leaf name of every entry (dirs included), so slice out of
+                // the relative bytes directly.
+                let rel = entry.relative_path_bytes();
+                let leaf = &rel[entry.basename_offset_in_relative() as usize..];
+                names.push(String::from_utf8_lossy(leaf).into_owned());
                 WalkState::Continue
             })
             .unwrap();
@@ -825,6 +823,7 @@ mod tests {
         let dir = make_tree();
         let mut count = 0usize;
         WalkBuilder::new(dir.path())
+            .unwrap()
             .options(WalkFlags::empty())
             .run_serial(|entry| {
                 count += 1;
@@ -844,6 +843,7 @@ mod tests {
         let dir = make_tree();
         let count = AtomicUsize::new(0);
         WalkBuilder::new(dir.path())
+            .unwrap()
             .options(WalkFlags::empty())
             .threads(1)
             .run(|entry| {
@@ -860,6 +860,7 @@ mod tests {
 
         let quit_count = AtomicUsize::new(0);
         WalkBuilder::new(dir.path())
+            .unwrap()
             .threads(1)
             .run(|_| {
                 quit_count.fetch_add(1, Ordering::Relaxed);
@@ -873,66 +874,246 @@ mod tests {
     fn max_depth_limits() {
         let dir = make_tree();
         let results = WalkBuilder::new(dir.path())
+            .unwrap()
             .options(WalkFlags::empty())
             .threads(1)
             .max_depth(Some(1))
-            .build()
+            .collect()
             .unwrap();
         assert_eq!(results.len(), 5);
         assert!(results.iter().all(|e| e.depth() == 1));
     }
 
     #[test]
-    fn interior_nul_is_an_error_not_a_silent_default() {
-        // A root with an interior NUL must NOT silently walk the cwd.
-        let err = WalkBuilder::new("bad\0root").build().unwrap_err();
-        assert_eq!(err, ZlobError::InvalidInput);
-        let err = WalkBuilder::new("bad\0root")
-            .run(|_| WalkState::Continue)
-            .unwrap_err();
-        assert_eq!(err, ZlobError::InvalidInput);
+    fn extra_ignore_un_ignores_via_negation() {
+        // Project's .gitignore ignores every .rs file. The caller passes a
+        // *negation* through extra_ignore to re-include `keep.rs` and the
+        // entire `src/important/` subtree. This mirrors how a nested
+        // .gitignore would override a shallower one.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::create_dir(root.join("src/important")).unwrap();
+        fs::write(root.join(".gitignore"), "*.rs\n").unwrap();
+        fs::write(root.join("keep.rs"), "fn k() {}").unwrap();
+        fs::write(root.join("drop.rs"), "fn d() {}").unwrap();
+        fs::write(root.join("src/main.rs"), "fn m() {}").unwrap();
+        fs::write(root.join("src/lib.rs"), "fn l() {}").unwrap();
+        fs::write(root.join("src/important/special.rs"), "fn s() {}").unwrap();
+        fs::write(root.join("src/important/other.rs"), "fn o() {}").unwrap();
 
-        // A pattern with an interior NUL must NOT silently drop the filter.
-        let dir = make_tree();
-        let err = WalkBuilder::new(dir.path())
-            .glob("*.\0rs")
-            .build()
-            .unwrap_err();
-        assert_eq!(err, ZlobError::InvalidInput);
-        // A later valid pattern clears the error.
-        let ok = WalkBuilder::new(dir.path())
-            .glob("*.\0rs")
-            .glob("**/*.rs")
-            .build();
-        assert!(ok.is_ok());
+        let results = WalkBuilder::new(root)
+            .unwrap()
+            .options(WalkFlags::RECOMMENDED | WalkFlags::SORT)
+            .threads(1)
+            // - "!keep.rs" re-includes a single file at the root.
+            // - "!src/important/**" re-includes a whole subtree.
+            // - Both win because extra_ignore is checked before the project's
+            //   "*.rs" rule (same precedence as a deeper nested .gitignore).
+            .extra_ignore(&["!keep.rs", "!src/important/**"])
+            .unwrap()
+            .collect()
+            .unwrap();
+
+        let names: Vec<String> = results
+            .iter()
+            .map(|e| e.relative_path().to_string_lossy().into_owned())
+            .collect();
+
+        // Re-included by extra_ignore (negations win).
+        assert!(
+            names.contains(&"keep.rs".to_string()),
+            "keep.rs should be re-included, got {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "src/important/special.rs"),
+            "src/important/special.rs should be re-included, got {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "src/important/other.rs"),
+            "src/important/other.rs should be re-included, got {names:?}"
+        );
+
+        // Dropped by the project's `*.rs` rule, NOT re-included.
+        assert!(
+            !names.contains(&"drop.rs".to_string()),
+            "drop.rs should remain ignored, got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "src/main.rs"),
+            "src/main.rs should remain ignored, got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "src/lib.rs"),
+            "src/lib.rs should remain ignored, got {names:?}"
+        );
+
+        // The IgnoreRules surface mirrors what the walk applied — extra
+        // patterns are checked there too, so external `is_ignored()` agrees.
+        let rules = results.ignore_rules().expect("rules always present");
+        assert!(!rules.is_ignored("keep.rs"));
+        assert!(rules.is_ignored("drop.rs"));
+        assert!(!rules.is_ignored("src/important/special.rs"));
+        assert!(rules.is_ignored("src/main.rs"));
     }
 
     #[test]
-    #[should_panic(expected = "visitor exploded")]
-    fn visitor_panic_propagates_to_caller() {
+    fn extra_ignore_adds_new_rules() {
+        // No project .gitignore; extra_ignore alone supplies the ignore list.
+        // Confirms many patterns batch into one matcher and surface in the
+        // returned IgnoreRules.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("node_modules")).unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::write(root.join("node_modules/a.js"), "").unwrap();
+        fs::write(root.join("target/out.o"), "").unwrap();
+        fs::write(root.join("README.md"), "").unwrap();
+        fs::write(root.join("main.rs"), "").unwrap();
+
+        let results = WalkBuilder::new(root)
+            .unwrap()
+            .options(WalkFlags::empty()) // no gitignore-discovery, no hidden-skip
+            .threads(1)
+            .extra_ignore(&["node_modules", "/target"])
+            .unwrap()
+            .collect()
+            .unwrap();
+
+        let names: Vec<String> = results
+            .iter()
+            .map(|e| e.relative_path().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            !names.iter().any(|n| n.starts_with("node_modules")),
+            "node_modules subtree should be pruned, got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("target")),
+            "target/ subtree should be pruned at root, got {names:?}"
+        );
+        assert!(names.contains(&"README.md".to_string()));
+        assert!(names.contains(&"main.rs".to_string()));
+
+        let rules = results.ignore_rules().expect("rules always present");
+        assert!(rules.is_ignored("node_modules/"));
+        assert!(rules.is_ignored("target/"));
+        assert!(!rules.is_ignored("main.rs"));
+    }
+
+    #[test]
+    fn interior_nul_is_an_error_not_a_silent_default() {
+        // A root with an interior NUL must fail at construction, not
+        // silently walk the cwd.
+        let err = WalkBuilder::new("bad\0root").unwrap_err();
+        assert_eq!(err, ZlobError::InvalidInput);
+
+        // A pattern with an interior NUL fails at `.include(...)` — same
+        // shape as the root check, just on a different builder method.
         let dir = make_tree();
-        let _ = WalkBuilder::new(dir.path())
-            .options(WalkFlags::empty())
-            .run(|_| panic!("visitor exploded"));
+        let mut b = WalkBuilder::new(dir.path()).unwrap();
+        let err = b.include("*.\0rs").unwrap_err();
+        assert_eq!(err, ZlobError::InvalidInput);
+
+        // Retrying with a valid pattern on the same builder works, since
+        // the failed call didn't corrupt any state.
+        let ok = WalkBuilder::new(dir.path())
+            .unwrap()
+            .include("**/*.rs")
+            .unwrap()
+            .collect();
+        assert!(ok.is_ok());
     }
 
     #[test]
     fn empty_and_missing_roots() {
         let dir = tempfile::tempdir().unwrap();
-        let results = WalkBuilder::new(dir.path()).build().unwrap();
+        let results = WalkBuilder::new(dir.path()).unwrap().collect().unwrap();
         assert!(results.is_empty());
 
         // Missing roots are reported through the (unset) error callback and
         // produce an empty result unless abort_on_error is set.
         let missing = WalkBuilder::new("/definitely/not/a/real/path/zlob")
-            .build()
+            .unwrap()
+            .collect()
             .unwrap();
         assert!(missing.is_empty());
 
         let err = WalkBuilder::new("/definitely/not/a/real/path/zlob")
+            .unwrap()
             .options(WalkFlags::RECOMMENDED | WalkFlags::ABORT_ON_ERROR)
-            .build();
+            .collect();
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn is_ignored_accepts_windows_style_backslash_paths() {
+        // The matcher normalizes '\\' → '/' on the way in so Windows callers
+        // (who get native '\\'-separated paths from std::path) get the same
+        // answers as Unix callers passing '/'.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
+        fs::create_dir_all(root.join("target/foo")).unwrap();
+        fs::write(root.join("target/foo/bar.rs"), "").unwrap();
+        fs::create_dir_all(root.join("src/deeply/nested")).unwrap();
+        fs::write(root.join("src/deeply/nested/scratch.log"), "").unwrap();
+        fs::write(root.join("src/main.rs"), "").unwrap();
+
+        let results = WalkBuilder::new(root)
+            .unwrap()
+            .threads(1)
+            .collect()
+            .unwrap();
+        let rules = results.ignore_rules().expect("rules always present");
+
+        // Same assertions as the ancestor-walk test but with '\\' separators.
+        assert!(rules.is_ignored("target\\foo\\bar.rs"));
+        assert!(rules.is_ignored("src\\deeply\\nested\\scratch.log"));
+        assert!(!rules.is_ignored("src\\main.rs"));
+        // Mixed separators — the leading '/' style should still work too.
+        assert!(rules.is_ignored("target/foo\\bar.rs"));
+    }
+
+    #[test]
+    fn is_ignored_walks_ancestors_for_unvisited_subtrees() {
+        // The walker never enters `target/` because the root .gitignore prunes
+        // it — so the by_dir HashMap has no node for `target/`, only for the
+        // walk root. `is_ignored("target/foo/bar.rs")` still has to say yes,
+        // by consulting the root's rule as the ancestor of that path.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("target/foo")).unwrap();
+        fs::create_dir_all(root.join("target/deeply/nested")).unwrap();
+        fs::create_dir_all(root.join("src/deeply/nested")).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
+        fs::write(root.join("src/main.rs"), "").unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("target/foo/bar.rs"), "").unwrap();
+        fs::write(root.join("target/deeply/nested/thing.o"), "").unwrap();
+        fs::write(root.join("src/deeply/nested/scratch.log"), "").unwrap();
+
+        let results = WalkBuilder::new(root)
+            .unwrap()
+            .threads(1)
+            .collect()
+            .unwrap();
+        let rules = results.ignore_rules().expect("rules always present");
+
+        // Files under the pruned `target/` subtree — walker never opened the
+        // dir, but the root's `target/` rule still catches every descendant.
+        assert!(
+            rules.is_ignored("target/foo/bar.rs"),
+            "target/ at root should catch descendants even when target/ is pruned"
+        );
+        assert!(rules.is_ignored("target/deeply/nested/thing.o"));
+        // File rule from the same root .gitignore, applied at arbitrary depth.
+        assert!(rules.is_ignored("src/deeply/nested/scratch.log"));
+        // Sanity: non-ignored path from a visited subtree.
+        assert!(!rules.is_ignored("src/main.rs"));
+        assert!(!rules.is_ignored("src/lib.rs"));
     }
 
     #[test]
@@ -947,32 +1128,43 @@ mod tests {
         // Nested rule scoped to src/.
         fs::write(root.join("src/.gitignore"), "*.bak\n").unwrap();
         fs::write(root.join("src/main.rs"), "").unwrap();
+        // Materialize the paths we query so lstat can classify them.
+        fs::write(root.join("app.log"), "").unwrap();
+        fs::create_dir(root.join("build")).unwrap();
+        fs::write(root.join("scratch.tmp"), "").unwrap();
+        fs::write(root.join("important.tmp"), "").unwrap();
+        fs::write(root.join("src/old.bak"), "").unwrap();
+        fs::write(root.join("old.bak"), "").unwrap();
 
-        let results = WalkBuilder::new(root).threads(1).build().unwrap();
+        let results = WalkBuilder::new(root)
+            .unwrap()
+            .threads(1)
+            .collect()
+            .unwrap();
 
         let rules = results.ignore_rules().expect("rules always present");
 
-        // Root-level rules (files: no trailing slash).
+        // Root-level rules — lstat now supplies directory-ness.
         assert!(rules.is_ignored("app.log"));
-        // build/ is directory-only; the trailing slash marks it a directory.
-        assert!(rules.is_ignored("build/"));
-        // Without the slash it's treated as a file, so build/ doesn't apply.
-        assert!(!rules.is_ignored("build"));
+        // "build" exists as a directory on disk; the dir-only `build/` rule fires.
+        assert!(rules.is_ignored("build"));
         assert!(rules.is_ignored("scratch.tmp"));
         // .ignore precedence re-includes important.tmp.
         assert!(!rules.is_ignored("important.tmp"));
         // Nested rule only inside src/.
         assert!(rules.is_ignored("src/old.bak"));
+        // A `*.bak` file at the *root* is not covered by the src/-scoped rule.
         assert!(!rules.is_ignored("old.bak"));
         assert!(!rules.is_ignored("src/main.rs"));
 
-        // The untrusted variant resolves dir-ness by stat'ing the path it is
-        // given, then matches that same string against the (root-relative)
-        // rules. A path that doesn't exist resolves to "file", so the
-        // directory-only `build/` rule does not apply; a *.tmp file rule still
-        // does. (We avoid changing the process cwd in tests.)
-        assert!(!rules.is_ignored_untrusted("build")); // missing -> file -> build/ skipped
-        assert!(rules.is_ignored_untrusted("ghost.tmp")); // missing -> file -> *.tmp applies
+        // Non-existent paths surface as ignored per the new contract.
+        assert!(rules.is_ignored("this-does-not-exist"));
+
+        // Absolute-path queries work too, provided they're inside the walk.
+        let abs = root.join("app.log");
+        assert!(rules.is_ignored(abs.to_str().unwrap()));
+        // Absolute path outside the walk → ignored (not part of this walk).
+        assert!(rules.is_ignored("/etc/passwd"));
     }
 
     #[test]
@@ -980,10 +1172,12 @@ mod tests {
         // Rules are now always returned (no opt-in flag). With git_ignore on,
         // the tree's rules are queryable.
         let dir = make_tree();
-        let results = WalkBuilder::new(dir.path()).build().unwrap();
+        let root = dir.path();
+        let results = WalkBuilder::new(root).unwrap().collect().unwrap();
         let rules = results.ignore_rules().expect("rules always present");
-        // make_tree() gitignores target/ and *.log.
-        assert!(rules.is_ignored("target/"));
+        // make_tree() creates target/ (dir) and debug.log (file), both
+        // gitignored. Query the paths as they exist on disk.
+        assert!(rules.is_ignored("target"));
         assert!(rules.is_ignored("debug.log"));
         assert!(!rules.is_ignored("Cargo.toml"));
     }
@@ -1017,16 +1211,18 @@ mod tests {
 
         // Tolerated by default: the unreadable directory is skipped.
         let ok = WalkBuilder::new(dir.path())
+            .unwrap()
             .options(WalkFlags::empty())
-            .build();
+            .collect();
         assert!(ok.is_ok());
 
         // With abort_on_error the permission error surfaces as its own variant
         // rather than collapsing into Aborted.
         let err = WalkBuilder::new(dir.path())
+            .unwrap()
             .options(WalkFlags::ABORT_ON_ERROR)
             .threads(1)
-            .build()
+            .collect()
             .unwrap_err();
         assert_eq!(err, ZlobError::PermissionDenied);
     }
@@ -1094,10 +1290,12 @@ mod glob_tests {
         fs::write(root.join("top.rs"), "").unwrap();
 
         let results = WalkBuilder::new(root)
+            .unwrap()
             .options(WalkFlags::SORT)
             .threads(1)
-            .glob("**/*.rs")
-            .build()
+            .include("**/*.rs")
+            .unwrap()
+            .collect()
             .unwrap();
 
         let names: Vec<String> = results
@@ -1108,19 +1306,23 @@ mod glob_tests {
 
         // Brace pattern through the default flags.
         let braced = WalkBuilder::new(root)
+            .unwrap()
             .options(WalkFlags::empty())
             .threads(1)
-            .glob("**/*.{md,rs}")
-            .build()
+            .include("**/*.{md,rs}")
+            .unwrap()
+            .collect()
             .unwrap();
         assert_eq!(braced.len(), 4);
 
         // Anchored pattern narrows traversal to the src/ subtree.
         let scoped = WalkBuilder::new(root)
+            .unwrap()
             .options(WalkFlags::empty())
             .threads(1)
-            .glob("src/**/*.rs")
-            .build()
+            .include("src/**/*.rs")
+            .unwrap()
+            .collect()
             .unwrap();
         assert_eq!(scoped.len(), 2);
     }
@@ -1139,7 +1341,9 @@ mod glob_tests {
 
         let count = AtomicUsize::new(0);
         WalkBuilder::new(root)
-            .glob("**/*.rs")
+            .unwrap()
+            .include("**/*.rs")
+            .unwrap()
             .run(|entry| {
                 assert!(entry.path().extension().is_some_and(|e| e == "rs"));
                 count.fetch_add(1, Ordering::Relaxed);

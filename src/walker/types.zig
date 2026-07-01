@@ -6,34 +6,22 @@ const builtin = @import("builtin");
 const darwin = @import("scan_darwin.zig");
 const win = @import("scan_windows.zig");
 
-const winos = std.os.windows;
+const winos = std.os.wwin;
 const posix = std.posix;
 const linux = std.os.linux;
 
-/// Size of the worker's full-path assembly buffer. This is deliberately
-/// generous rather than the kernel `PATH_MAX`: the walker opens each directory
-/// with `openat`/NT-relative on the *basename* against the parent handle, so a
-/// reported path may legitimately be longer than the OS `PATH_MAX` even though
-/// every individual open succeeded. Entries whose assembled path would exceed
-/// this are skipped (the buffer can't hold them for reporting).
-pub const MAX_PATH = 4096;
+pub const MAX_PATH = switch (builtin.os.tag) {
+    .macos => 1024,
+    else => 4096, // keep 4096 for windows cause it's unclear if we should use 260 or 32768
+};
 
-/// Longest single path component the OS will accept (`NAME_MAX`), used to size
-/// the per-component NUL-terminated buffers passed to `openat`/`fstatat`.
-/// Components beyond this are rejected with `error.NameTooLong`.
-///
-/// Note Windows' 255 is the per-component limit (NTFS/ReFS/exFAT, in UTF-16
-/// code units) and is unchanged in Windows 11 — the long-path support added in
-/// recent Windows only raised the *total path* limit, which here is bounded by
-/// `MAX_PATH` (the reporting buffer), not by a single component.
 pub const NAME_MAX: usize = switch (builtin.os.tag) {
     .linux => linux.NAME_MAX,
-    .windows => 255,
+    .windows, .macos => 255,
     else => if (@hasDecl(std.c, "NAME_MAX")) std.c.NAME_MAX else 255,
 };
 
-/// Per-component scratch buffer length: `NAME_MAX` plus the trailing NUL.
-pub const NAME_BUF = NAME_MAX + 1;
+pub const NAME_BUF_Z_LENGTH = NAME_MAX + 1;
 
 /// zlob's single error set, shared with the glob API (see `flags.zig`). The
 /// glob side only yields `OutOfMemory`/`Aborted`; the directory scanners add
@@ -219,6 +207,14 @@ pub const Options = struct {
     pattern: ?[]const u8 = null,
     /// Flags for compiling/matching `pattern`. Default: brace + recursive `**`.
     pattern_flags: ZlobFlags = .{ .brace = true, .doublestar_recursive = true },
+    /// Extra ignore document layered into the walker, `.gitignore` syntax,
+    /// one rule per line. Callers building from Rust use
+    /// `WalkBuilder::extra_ignore(&["a", "b"])` which joins for them; direct
+    /// Zig callers should pass a buffer like "a\nb\n". Compiled once into a
+    /// single GitIgnore matcher and checked *deepest* in the chain so
+    /// `!negation` rules override the project's `.gitignore`. Matches
+    /// surface via the returned [`crate::walk::IgnoreRules`].
+    extra_ignore: ?[]const u8 = null,
     meta: MetaMask = .{},
     /// Sort collected results by path (`collect` only).
     sort: bool = false,

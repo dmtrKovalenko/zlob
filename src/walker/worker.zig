@@ -26,7 +26,7 @@ const Options = types.Options;
 const VisitAction = types.VisitAction;
 const MAX_PATH = types.MAX_PATH;
 const NAME_MAX = types.NAME_MAX;
-const NAME_BUF = types.NAME_BUF;
+const NAME_BUF = types.NAME_BUF_Z_LENGTH;
 const closeFd = types.closeFd;
 const closeHandle = types.closeHandle;
 
@@ -108,6 +108,11 @@ pub const SharedWorkerState = struct {
     /// Literal directory prefix of the pattern, used to prune traversal
     /// outside the pattern's scope ("src/lib" for "src/lib/**/*.c").
     pattern_prefix: []const u8 = &.{},
+    /// Synthetic gitignore from `Options.extra_ignore`. Sits at the deepest
+    /// position in every chain so its `!negation` rules win over the
+    /// project's discovered `.gitignore` files (the same precedence a nested
+    /// `.gitignore` would give a deeper directory).
+    extra_ignore_root: ?*IgnoreNode = null,
     /// Linux only: the per-entry `statx()` mask, precomputed once from
     /// `options.meta` so the hot scan loop doesn't rebuild it per entry. Other
     /// backends also fetch only the requested attributes, but build that
@@ -335,9 +340,11 @@ fn processEntry(
     const basename = full[prefix_len..];
     const relative_path = full[sh.root_prefix_len..];
 
-    if (cur_ignore) |ig| {
-        if (chainIgnored(ig, relative_path, basename, is_dir)) return;
-    }
+    // extra_ignore + project .gitignore chain in one pass. `extra_ignore` is
+    // checked first (deepest) so its `!negation` rules win against the
+    // project's discovered .gitignore files — same precedence a nested
+    // .gitignore would give a deeper directory.
+    if (chainIgnored(cur_ignore, sh.extra_ignore_root, relative_path, basename, is_dir)) return;
 
     if (!is_dir and opts.follow_symlinks and entry_kind == .sym_link) {
         is_dir = isSymlinkedDir(sh, handle, name);
@@ -501,7 +508,20 @@ fn openRoot(sh: *SharedWorkerState, root: []const u8) anyerror!Handle {
 /// Deepest-first resolution across nested .gitignore files: the first decisive
 /// answer wins, mirroring git. Pruning is exact: once a directory is ignored
 /// nothing inside it can be re-included, so it is never descended.
-fn chainIgnored(start: *IgnoreNode, rel: []const u8, basename: []const u8, is_dir: bool) bool {
+///
+/// `extra` is the caller-supplied synthetic .gitignore, layered as the
+/// *innermost* layer (checked even before `start`'s deepest node) so its
+/// `!negation` rules can un-ignore paths the real chain would otherwise drop.
+/// Anchoring is at the walk root: rules see the entry's full root-relative
+/// path. Pass `null` to skip.
+fn chainIgnored(start: ?*IgnoreNode, extra: ?*IgnoreNode, rel: []const u8, basename: []const u8, is_dir: bool) bool {
+    if (extra) |x| {
+        // extra_ignore is rooted at the walk root (relative_offset = 0), so
+        // we pass the entry's full root-relative path verbatim.
+        if (x.gi.checkWithBasename(rel, basename, is_dir)) |verdict| {
+            return verdict;
+        }
+    }
     var node: ?*IgnoreNode = start;
     while (node) |n| : (node = n.parent) {
         if (n.gi.checkWithBasename(rel[n.relative_offset..], basename, is_dir)) |verdict| {

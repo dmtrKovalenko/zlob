@@ -260,7 +260,7 @@ WalkBuilder::new(".").options(WalkFlags::empty()).run(|entry| {
 })?;
 
 // Glob-scoped traversal: only src/ is ever descended into.
-let rs_files = WalkBuilder::new(".").glob("src/**/*.rs").build()?;
+let rs_files = WalkBuilder::new(".").include("src/**/*.rs").build()?;
 ```
 
 C (`zlob_walk` / `zlob_walk_collect`, see `zlob.h`):

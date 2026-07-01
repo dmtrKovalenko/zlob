@@ -377,26 +377,33 @@ typedef struct zlob_walk_options {
   /* ZLOB_* flags used to compile/match `pattern`.
    * 0 = default (ZLOB_BRACE | ZLOB_DOUBLESTAR_RECURSIVE). */
   uint32_t pattern_flags;
+  /* Caller-supplied .gitignore document layered into the walker, one rule
+   * per line, NUL-terminated. NULL = disabled. Surfaces as the *deepest*
+   * node in the gitignore chain, so its `!negation` rules win over project
+   * `.gitignore` (e.g. "node_modules\n!**\/README.md" prunes node_modules
+   * everywhere except README.md files). Reported via the returned
+   * IgnoreRules. */
+  const char *extra_ignore;
 } zlob_walk_options_t;
 
 typedef struct zlob_walk_entry {
-  const char *path;      /* full path (root joined with relative), NUL-terminated */
-  size_t path_len;       /* strlen(path) */
+  const char *path;         /* full path (root joined with relative), NUL-terminated */
+  size_t path_len;          /* strlen(path) */
   uint32_t relative_offset; /* path + relative_offset = path relative to the walk root */
   uint32_t basename_offset; /* path + basename_offset = entry name */
-  uint8_t kind;          /* ZLOB_WALK_KIND_* */
-  uint16_t depth;        /* root children have depth 1 */
-  uint32_t meta_valid;   /* which ZLOB_META_* fields below are filled */
-  uint64_t size;         /* file size in bytes */
-  int64_t mtime_ns;      /* modification time, nanoseconds since the epoch */
-  int64_t atime_ns;      /* access time, nanoseconds since the epoch */
-  int64_t ctime_ns;      /* status-change time, nanoseconds since the epoch */
-  int64_t btime_ns;      /* creation (birth) time, nanoseconds since the epoch */
-  uint64_t inode;        /* inode number */
-  uint32_t nlink;        /* hard-link count */
-  uint32_t mode;         /* permission bits only; file type is in `kind` */
-  uint32_t uid;          /* owner user id */
-  uint32_t gid;          /* owner group id */
+  uint8_t kind;             /* ZLOB_WALK_KIND_* */
+  uint16_t depth;           /* root children have depth 1 */
+  uint32_t meta_valid;      /* which ZLOB_META_* fields below are filled */
+  uint64_t size;            /* file size in bytes */
+  int64_t mtime_ns;         /* modification time, nanoseconds since the epoch */
+  int64_t atime_ns;         /* access time, nanoseconds since the epoch */
+  int64_t ctime_ns;         /* status-change time, nanoseconds since the epoch */
+  int64_t btime_ns;         /* creation (birth) time, nanoseconds since the epoch */
+  uint64_t inode;           /* inode number */
+  uint32_t nlink;           /* hard-link count */
+  uint32_t mode;            /* permission bits only; file type is in `kind` */
+  uint32_t uid;             /* owner user id */
+  uint32_t gid;             /* owner group id */
 } zlob_walk_entry_t;
 
 /** Visitor: return 0 to continue, 1 to skip this directory (not descend),
@@ -404,16 +411,21 @@ typedef struct zlob_walk_entry {
  *
  *  With threads != 1 the callback is invoked CONCURRENTLY from multiple
  *  worker threads and must be thread-safe. The entry and its strings are
- *  only valid for the duration of the call. */
+ *  only valid for the duration of the call.
+ */
 typedef int (*zlob_walk_cb)(const zlob_walk_entry_t *entry, void *ctx);
 
-/** Streaming parallel walk of `root`.
- *  `options` may be NULL for defaults.
- *  Returns 0 on success (including when the callback returned 2 to stop
- *  early), ZLOB_ABORTED when aborted via errfunc, ZLOB_NOSPACE on OOM. With
- *  ZLOB_WALK_ABORT_ON_ERROR set, a failing directory yields ZLOB_READ_FAILED,
- *  ZLOB_PERMISSION_DENIED or ZLOB_NAME_TOO_LONG. */
-int zlob_walk(const char *root, const zlob_walk_options_t *options, zlob_walk_cb cb, void *ctx);
+/**
+ * Walking the file tree and calling the callback per every entry
+ * respecting the options and metadata settings. Starts from the root path.
+ *
+ * When finished walking writes the inferred ignore rules ot the out_rules ptr
+ */
+int zlob_walk(const char *root, const zlob_walk_options_t *options, zlob_walk_cb cb, void *ctx,
+              void **out_rules);
+
+/** Free the allocated ignore rules set, NUL is noop */
+void zlob_ignore_rules_free(void *rules);
 
 typedef struct zlob_walk_result {
   zlob_walk_entry_t *entries;
@@ -421,11 +433,8 @@ typedef struct zlob_walk_result {
   void *_storage; /* internal — do not touch */
 } zlob_walk_result_t;
 
-/** Walks `root` and materializes all entries in one call — the fastest path
- *  for FFI consumers (no per-entry callback crossing). Free the result with
- *  zlob_walk_result_free(). Returns 0, ZLOB_ABORTED, ZLOB_NOSPACE, or (with
- *  ZLOB_WALK_ABORT_ON_ERROR) ZLOB_READ_FAILED / ZLOB_PERMISSION_DENIED /
- *  ZLOB_NAME_TOO_LONG. */
+/** Walks `root` and writes all entries to the memory, this is not streaming
+ * -- this endpoint writes all the walk results one time in the very end. */
 int zlob_walk_collect(const char *root, const zlob_walk_options_t *options,
                       zlob_walk_result_t *out);
 
@@ -433,24 +442,17 @@ void zlob_walk_result_free(zlob_walk_result_t *result);
 
 /** Borrowed handle to the reusable ignore rules (.gitignore + .ignore, nested)
  *  gathered during the walk. Always available after a successful
- *  zlob_walk_collect(). Owned by `result`; valid until zlob_walk_result_free().
- *  Returns NULL only for a NULL/failed result. */
+ *  zlob_walk_collect() */
 void *zlob_walk_result_ignore_rules(const zlob_walk_result_t *result);
 
-/** Returns nonzero when `path` (relative to the walk root, '/'-separated) is
- *  ignored by the retained rules. `is_dir` should be nonzero for directories.
- *  `rules` comes from zlob_walk_result_ignore_rules(); a NULL handle reports
- *  "not ignored". */
-int zlob_ignore_rules_match(void *rules, const char *path, int is_dir);
-
-/** Like zlob_ignore_rules_match but infers directory-ness from the path with
- *  zero syscalls: a trailing '/' marks a directory, otherwise a file. */
+/** Returns nonzero when `path` (root-relative) is ignored by the ignore rules
+ *  the walker assembled, this includes every discovered `.gitignore`/`.ignore` plus
+ *  any patterns passed via `extra_ignore`.
+ *
+ *  Zero on "not ignored", a NULL `rules` handle, or not-accessible `path`.
+ *  Performs `lstat` internally.
+ */
 int zlob_ignore_rules_match_path(void *rules, const char *path);
-
-/** Like zlob_ignore_rules_match but lstat()s `path` to determine
- *  directory-ness (symlinks not followed); a missing/unstattable path is
- *  treated as a non-directory. Performs one syscall. */
-int zlob_ignore_rules_match_untrusted(void *rules, const char *path);
 
 #ifdef __cplusplus
 }

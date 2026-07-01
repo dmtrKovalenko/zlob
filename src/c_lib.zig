@@ -747,6 +747,10 @@ pub const zlob_walk_options_t = extern struct {
     errfunc: zlob_walk_errfunc_t = null,
     pattern: ?[*:0]const u8 = null,
     pattern_flags: u32 = 0,
+    /// Caller-supplied .gitignore document layered as the deepest node in the
+    /// chain so its `!negation` rules win over project `.gitignore`. One rule
+    /// per line, NUL-terminated. NULL = disabled.
+    extra_ignore: ?[*:0]const u8 = null,
 };
 
 pub const zlob_walk_entry_t = extern struct {
@@ -809,6 +813,7 @@ fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
             ZlobFlags.fromU32(v.pattern_flags)
         else
             .{ .brace = true, .doublestar_recursive = true },
+        .extra_ignore = if (v.extra_ignore) |p| mem.sliceTo(p, 0) else null,
         .meta = walk.MetaMask.fromInt(v.meta_mask),
         .sort = f & ZLOB_WALK_SORT != 0,
         .err_callback = v.errfunc,
@@ -859,16 +864,23 @@ fn cWalkVisit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
     };
 }
 
+/// Stream every entry through `cb`. On success (rc==0), if `out_rules` is
+/// non-NULL, the retained `IgnoreRules` handle is written there; the caller
+/// then owns it and must release with `zlob_ignore_rules_free`. Pass NULL
+/// for `out_rules` to discard the rules automatically.
+///
+/// On any non-zero return, `*out_rules` is set to NULL (nothing to free).
 pub export fn zlob_walk(
     root: [*:0]const u8,
     options: ?*const zlob_walk_options_t,
     cb: zlob_walk_cb,
     ctx: ?*anyopaque,
+    out_rules: ?*?*anyopaque,
 ) c_int {
+    if (out_rules) |slot| slot.* = null;
+
     const root_slice = mem.sliceTo(root, 0);
     var cctx = CWalkCtx{ .cb = cb, .user = ctx };
-    // `walk.run` always returns reusable ignore rules; the streaming C API does
-    // not expose them, so free them immediately.
     const rules = walk.run(allocator, root_slice, walkOptionsFromC(options), .{
         .context = @ptrCast(&cctx),
         .visit = cWalkVisit,
@@ -879,9 +891,25 @@ pub export fn zlob_walk(
         error.PermissionDenied => zlob_flags.ZLOB_PERMISSION_DENIED,
         error.NameTooLong => zlob_flags.ZLOB_NAME_TOO_LONG,
     };
-    rules.deinit();
-    allocator.destroy(rules);
+    if (out_rules) |slot| {
+        slot.* = @ptrCast(rules);
+    } else {
+        rules.deinit();
+        allocator.destroy(rules);
+    }
     return 0;
+}
+
+/// Release rules obtained from `zlob_walk` (out_rules) or from
+/// `zlob_walk_result_ignore_rules` if you want independent lifetime. Actually,
+/// rules from `zlob_walk_collect` are owned by the result — do NOT free them
+/// here; use `zlob_walk_result_free` on the whole result. Only free handles
+/// you got standalone from `zlob_walk`'s out_rules. NULL is a no-op.
+pub export fn zlob_ignore_rules_free(rules: ?*anyopaque) void {
+    const r = rules orelse return;
+    const typed: *walk.IgnoreRules = @ptrCast(@alignCast(r));
+    typed.deinit();
+    allocator.destroy(typed);
 }
 
 const WalkResultHolder = struct {
@@ -953,10 +981,6 @@ pub export fn zlob_walk_result_free(result: ?*zlob_walk_result_t) void {
     r.* = .{ .entries = null, .count = 0, ._storage = null };
 }
 
-/// Borrowed handle to the reusable ignore rules gathered during the walk
-/// (`.gitignore` + `.ignore`, nested). Always available after a successful
-/// zlob_walk_collect(). Owned by `result`; valid until zlob_walk_result_free().
-/// NULL only when `result`/`_storage` is NULL (e.g. a failed walk).
 pub export fn zlob_walk_result_ignore_rules(result: ?*const zlob_walk_result_t) ?*anyopaque {
     const r = result orelse return null;
     const storage = r._storage orelse return null;
@@ -964,35 +988,10 @@ pub export fn zlob_walk_result_ignore_rules(result: ?*const zlob_walk_result_t) 
     return @ptrCast(holder.results.ignore_rules);
 }
 
-/// Returns nonzero when `path` (walk-root-relative) is ignored by the retained
-/// rules. `is_dir` should be nonzero for directories. `rules` is a handle from
-/// zlob_walk_result_ignore_rules().
-pub export fn zlob_ignore_rules_match(
-    rules: ?*anyopaque,
-    path: [*:0]const u8,
-    is_dir: c_int,
-) c_int {
-    const r: *const walk.IgnoreRules = @ptrCast(@alignCast(rules orelse return 0));
-    return @intFromBool(r.isIgnored(mem.sliceTo(path, 0), is_dir != 0));
-}
-
-/// Like zlob_ignore_rules_match but infers directory-ness from the path with
-/// zero syscalls: a trailing '/' marks a directory, otherwise a file.
 pub export fn zlob_ignore_rules_match_path(
     rules: ?*anyopaque,
     path: [*:0]const u8,
 ) c_int {
     const r: *const walk.IgnoreRules = @ptrCast(@alignCast(rules orelse return 0));
     return @intFromBool(r.isIgnoredPath(mem.sliceTo(path, 0)));
-}
-
-/// Like zlob_ignore_rules_match but lstat()s `path` to determine
-/// directory-ness (symlinks not followed). A missing/unstattable path is
-/// treated as a non-directory. One syscall.
-pub export fn zlob_ignore_rules_match_untrusted(
-    rules: ?*anyopaque,
-    path: [*:0]const u8,
-) c_int {
-    const r: *const walk.IgnoreRules = @ptrCast(@alignCast(rules orelse return 0));
-    return @intFromBool(r.isIgnoredUntrusted(mem.sliceTo(path, 0)));
 }

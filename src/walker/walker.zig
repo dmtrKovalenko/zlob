@@ -1,8 +1,8 @@
 const std = @import("std");
+const types = @import("types.zig");
 const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
-const types = @import("types.zig");
 const worker = @import("worker.zig");
 const scan = @import("scan.zig");
 const compiled_pattern = @import("../compiled_pattern.zig");
@@ -60,6 +60,7 @@ pub fn run(allocator: Allocator, root: []const u8, options: Options, visitor: Vi
         rules.deinit();
         allocator.destroy(rules);
     }
+    try rules.setWalkRoot(root);
 
     try walkImpl(allocator, root, options, runSink, @constCast(&visitor), effectiveThreads(&options), rules);
     return rules;
@@ -82,6 +83,7 @@ pub fn collect(gpa: Allocator, root: []const u8, options: Options) WalkError!Wal
         rules.deinit();
         gpa.destroy(rules);
     }
+    try rules.setWalkRoot(root);
 
     try walkImpl(gpa, root, options, collectSink, @ptrCast(&col), n_workers, rules);
 
@@ -137,7 +139,7 @@ fn effectiveThreads(opts: *const Options) u32 {
     //
     // Linux: the dcache lock scales further, so allow more workers there.
     if (backend == .darwin_bulk) {
-        const cap: u32 = if (opts.meta.any()) 5 else 6;
+        const cap: u32 = if (opts.meta.any()) 8 else 6;
         return @min(n, cap);
     }
     return @min(n, 16);
@@ -156,7 +158,7 @@ fn walkImpl(
 
     // Root prefix: root/ (or "" for an empty root meaning cwd-relative
     // output, or "root" when it already ends with /).
-    var prefix_buf: [MAX_PATH]u8 = undefined;
+    var prefix_buf: [types.MAX_PATH]u8 = undefined;
     var prefix_len: usize = 0;
     if (root.len > 0) {
         if (root.len >= MAX_PATH - 1) {
@@ -187,6 +189,16 @@ fn walkImpl(
     }
     defer if (compiled) |*c| c.deinit();
 
+    // Extra-ignore root: caller-supplied patterns turned into a synthetic
+    // .gitignore. `chainIgnored` checks it FIRST (deepest), so `!negation`
+    // rules override the project's discovered .gitignore — same precedence a
+    // deeper nested .gitignore would have. The walker holds one ref; the
+    // IgnoreRules surface holds another so post-walk `isIgnored` matches the
+    // same source set the walk used.
+    const extra_root = try buildExtraIgnoreRoot(allocator, options.extra_ignore);
+    defer if (extra_root) |root_node| root_node.release(allocator);
+    if (extra_root) |x| ignore_rules.setExtra(x);
+
     var sh = SharedWorkerState{
         .allocator = allocator,
         .io = options.io orelse std.Io.Threaded.global_single_threaded.io(),
@@ -201,6 +213,7 @@ fn walkImpl(
             worker.literalPatternPrefixDirs(p, options.pattern_flags)
         else
             &.{},
+        .extra_ignore_root = extra_root,
         .statx_mask = scan.linuxStatxMask(options.meta),
         .ignore_rules = ignore_rules,
     };
@@ -246,6 +259,26 @@ fn walkImpl(
     for (sh.threads[0..sh.spawned]) |t| t.join();
 
     return sh.failureResult();
+}
+
+/// Build the synthetic .gitignore IgnoreNode the walker layers on top of any
+/// project-discovered rules. `doc` is a `.gitignore`-style document (one rule
+/// per line). Returns null on null/empty input. Refcount = 1; caller owns
+/// that ref and must `.release()` when done.
+fn buildExtraIgnoreRoot(allocator: Allocator, doc: ?[]const u8) WalkError!?*worker.IgnoreNode {
+    const content = doc orelse return null;
+    if (content.len == 0) return null;
+    var gi = try GitIgnore.parse(allocator, content);
+    errdefer gi.deinit();
+    const node = try allocator.create(worker.IgnoreNode);
+    errdefer allocator.destroy(node);
+    node.* = .{
+        .parent = null,
+        .gi = gi,
+        .relative_offset = 0,
+        .refs = .init(1),
+    };
+    return node;
 }
 
 const CHUNK_SIZE = 256 * 1024;

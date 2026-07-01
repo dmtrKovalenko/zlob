@@ -383,6 +383,7 @@ pub const GitIgnore = struct {
                     return true;
                 }
             }
+
             if (self.literal_files.get(basename)) |match| {
                 if (!match.dir_only or is_dir) {
                     return true;

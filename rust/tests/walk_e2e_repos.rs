@@ -161,8 +161,9 @@ fn rel_to_string(p: &Path) -> String {
 /// zlob plain walk -> set of relative paths.
 fn zlob_plain_paths(root: &Path) -> std::collections::BTreeSet<String> {
     zlob::walk::WalkBuilder::new(root)
+        .unwrap()
         .options(zlob::walk::WalkFlags::empty())
-        .build()
+        .collect()
         .unwrap()
         .iter()
         .map(|e| rel_to_string(e.relative_path()))
@@ -209,7 +210,10 @@ fn walker_parity_on_popular_repos() {
         let plain_ok = zlob_plain == walkdir_set;
 
         // --- 2. GITIGNORE: zlob must match the ignore crate, no leak. ---
-        let zlob_git = zlob::walk::WalkBuilder::new(&root).build().unwrap();
+        let zlob_git = zlob::walk::WalkBuilder::new(&root)
+            .unwrap()
+            .collect()
+            .unwrap();
         let zlob_git_set: std::collections::BTreeSet<String> = zlob_git
             .iter()
             .map(|e| rel_to_string(e.relative_path()))
@@ -229,9 +233,10 @@ fn walker_parity_on_popular_repos() {
         // Compare against the walkdir reference's lstat metadata for every
         // entry zlob reports in the plain walk.
         let zlob_meta = zlob::walk::WalkBuilder::new(&root)
+            .unwrap()
             .options(zlob::walk::WalkFlags::empty())
             .metadata(zlob::walk::WalkMetadata::SIZE)
-            .build()
+            .collect()
             .unwrap();
 
         let mut meta_mismatches: Vec<String> = Vec::new();

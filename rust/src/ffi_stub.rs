@@ -232,6 +232,10 @@ pub struct zlob_walk_options_t {
     pub errfunc: Option<unsafe extern "C" fn(epath: *const c_char, eerrno: c_int) -> c_int>,
     pub pattern: *const c_char,
     pub pattern_flags: u32,
+    /// Caller-supplied .gitignore document, one rule per line, NUL-terminated.
+    /// Null = none. Layered as the *deepest* node in the ignore chain so its
+    /// `!negation` rules override the project's `.gitignore`.
+    pub extra_ignore: *const c_char,
 }
 
 #[repr(C)]
@@ -274,7 +278,10 @@ unsafe extern "C" {
         options: *const zlob_walk_options_t,
         cb: zlob_walk_cb,
         ctx: *mut core::ffi::c_void,
+        out_rules: *mut *mut core::ffi::c_void,
     ) -> c_int;
+
+    pub fn zlob_ignore_rules_free(rules: *mut core::ffi::c_void);
 
     pub fn zlob_walk_collect(
         root: *const c_char,
@@ -288,18 +295,7 @@ unsafe extern "C" {
         result: *const zlob_walk_result_t,
     ) -> *mut core::ffi::c_void;
 
-    pub fn zlob_ignore_rules_match(
-        rules: *mut core::ffi::c_void,
-        path: *const c_char,
-        is_dir: c_int,
-    ) -> c_int;
-
     pub fn zlob_ignore_rules_match_path(
-        rules: *mut core::ffi::c_void,
-        path: *const c_char,
-    ) -> c_int;
-
-    pub fn zlob_ignore_rules_match_untrusted(
         rules: *mut core::ffi::c_void,
         path: *const c_char,
     ) -> c_int;

@@ -131,7 +131,7 @@ fn zlob_run_serial(root: &Path, gitignore: bool) -> u64 {
     // walkdir's serial iterator), so the accumulator is just a local — no
     // atomics, no synchronization taxing the single-threaded numbers.
     let mut acc: u64 = 0;
-    let mut b = WalkBuilder::new(root);
+    let mut b = WalkBuilder::new(root).unwrap();
     b.options(if gitignore {
         WalkFlags::RECOMMENDED
     } else {
@@ -150,7 +150,7 @@ fn zlob_run_parallel(root: &Path, gitignore: bool) -> u64 {
     // the shared accumulator is atomic (the same shape ignore_parallel uses).
     use std::sync::atomic::AtomicU64;
     let acc = AtomicU64::new(0);
-    let mut b = WalkBuilder::new(root);
+    let mut b = WalkBuilder::new(root).unwrap();
     b.options(if gitignore {
         WalkFlags::RECOMMENDED
     } else {
@@ -165,13 +165,13 @@ fn zlob_run_parallel(root: &Path, gitignore: bool) -> u64 {
 }
 
 fn zlob_collect_parallel(root: &Path, gitignore: bool) -> u64 {
-    let mut b = WalkBuilder::new(root);
+    let mut b = WalkBuilder::new(root).unwrap();
     b.options(if gitignore {
         WalkFlags::RECOMMENDED
     } else {
         WalkFlags::empty()
     });
-    let results = b.build().unwrap();
+    let results = b.collect().unwrap();
     results.iter().map(|e| consume_path(e.path_bytes())).sum()
 }
 
@@ -222,13 +222,13 @@ fn ignore_parallel(b: &ignore::WalkBuilder) -> u64 {
 }
 
 fn zlob_count(root: &Path, gitignore: bool) -> usize {
-    let mut b = zlob::walk::WalkBuilder::new(root);
+    let mut b = zlob::walk::WalkBuilder::new(root).unwrap();
     b.options(if gitignore {
         WalkFlags::RECOMMENDED
     } else {
         WalkFlags::empty()
     });
-    b.build().unwrap().len()
+    b.collect().unwrap().len()
 }
 
 fn ignore_count(b: &ignore::WalkBuilder) -> usize {
@@ -295,7 +295,7 @@ fn bench_walk(c: &mut Criterion) {
         // per-entry callback: each entry's size is summed as it is visited,
         // nothing is materialized. Serial uses `run_serial` (plain local,
         // no atomics); parallel uses `run` (atomic shared accumulator).
-        let mut b = WalkBuilder::new(root);
+        let mut b = WalkBuilder::new(root).unwrap();
         b.options(if gitignore {
             WalkFlags::RECOMMENDED
         } else {

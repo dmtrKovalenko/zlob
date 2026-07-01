@@ -33,7 +33,7 @@ const Worker = worker.Worker;
 const closeFd = types.closeFd;
 const WalkError = types.WalkError;
 const NAME_MAX = types.NAME_MAX;
-const NAME_BUF = types.NAME_BUF;
+const NAME_BUF = types.NAME_BUF_Z_LENGTH;
 
 pub fn scanDir(sh: *SharedWorkerState, w: *Worker, handle: Handle) WalkError!void {
     if (backend == .linux_getdents) {
