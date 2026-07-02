@@ -1,6 +1,6 @@
 [package]
 name = "zlob"
-version = "1.5.0-dev.2"
+version = "1.5.0-dev.3"
 edition = "2024"
 license = "MIT"
 description = "SIMD optimized glob pattern matching library faster than glob crate"
