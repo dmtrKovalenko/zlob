@@ -729,11 +729,6 @@ pub export fn zlob_pattern_match_paths_indices_at_slice(
     return writeIndicesResult(out, indices);
 }
 
-// ============================================================================
-// Parallel file walker C API (see include/zlob.h "Parallel recursive file
-// walker" section). Callbacks may run concurrently from worker threads.
-// ============================================================================
-
 const walk = zlob_impl.walk;
 
 pub const zlob_walk_errfunc_t = ?*const fn (epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int;
@@ -760,6 +755,7 @@ pub const zlob_walk_entry_t = extern struct {
     basename_offset: u32,
     kind: u8,
     depth: u16,
+    worker_id: u16,
     meta_valid: u32,
     size: u64,
     mtime_ns: i64,
@@ -785,6 +781,7 @@ comptime {
     std.debug.assert(@sizeOf(zlob_walk_entry_t) == @sizeOf(c_zlob.zlob_walk_entry_t));
     std.debug.assert(@sizeOf(zlob_walk_result_t) == @sizeOf(c_zlob.zlob_walk_result_t));
     std.debug.assert(@offsetOf(zlob_walk_entry_t, "kind") == @offsetOf(c_zlob.zlob_walk_entry_t, "kind"));
+    std.debug.assert(@offsetOf(zlob_walk_entry_t, "worker_id") == @offsetOf(c_zlob.zlob_walk_entry_t, "worker_id"));
     std.debug.assert(@offsetOf(zlob_walk_entry_t, "meta_valid") == @offsetOf(c_zlob.zlob_walk_entry_t, "meta_valid"));
     std.debug.assert(@offsetOf(zlob_walk_entry_t, "gid") == @offsetOf(c_zlob.zlob_walk_entry_t, "gid"));
 }
@@ -834,6 +831,7 @@ inline fn fillCWalkEntry(out: *zlob_walk_entry_t, e: *const walk.Entry) void {
             else => 0,
         },
         .depth = e.depth,
+        .worker_id = e.worker_id,
         .meta_valid = e.meta.valid.toInt(),
         .size = e.meta.size,
         .mtime_ns = e.meta.mtime_ns,
@@ -898,6 +896,14 @@ pub export fn zlob_walk(
         allocator.destroy(rules);
     }
     return 0;
+}
+
+/// Worker count a walk with `options` would use (always >= 1). Every entry's
+/// `worker_id` is strictly below this bound, so it is the exact size for
+/// caller-side per-worker shards. NULL options = defaults.
+pub export fn zlob_walk_max_workers(options: ?*const zlob_walk_options_t) usize {
+    const opts = walkOptionsFromC(options);
+    return walk.effectiveThreads(&opts);
 }
 
 /// Release rules obtained from `zlob_walk` (out_rules) or from

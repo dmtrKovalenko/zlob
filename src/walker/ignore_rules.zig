@@ -345,8 +345,7 @@ const GitIgnore = @import("../gitignore.zig").GitIgnore;
 /// from a `.gitignore`-style document. `relative_offset` is derived the same
 /// way the walker does it (worker.zig).
 fn testNode(alloc: std.mem.Allocator, dir_rel: []const u8, doc: []const u8) !*IgnoreNode {
-    // parseOwned takes ownership of (and frees) the content, so hand it a dupe.
-    const gi = try GitIgnore.parseOwned(alloc, try alloc.dupe(u8, doc));
+    const gi = try GitIgnore.parse(alloc, doc);
     const node = try alloc.create(IgnoreNode);
     node.* = .{
         .parent = null,

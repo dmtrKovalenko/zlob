@@ -247,6 +247,7 @@ pub struct zlob_walk_entry_t {
     pub basename_offset: u32,
     pub kind: u8,
     pub depth: u16,
+    pub worker_id: u16,
     pub meta_valid: u32,
     pub size: u64,
     pub mtime_ns: i64,
@@ -280,6 +281,8 @@ unsafe extern "C" {
         ctx: *mut core::ffi::c_void,
         out_rules: *mut *mut core::ffi::c_void,
     ) -> c_int;
+
+    pub fn zlob_walk_max_workers(options: *const zlob_walk_options_t) -> usize;
 
     pub fn zlob_ignore_rules_free(rules: *mut core::ffi::c_void);
 

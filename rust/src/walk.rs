@@ -14,11 +14,16 @@ bitflags! {
     /// ```
     /// use zlob::walk::{WalkBuilder, WalkFlags};
     /// // raw traversal, sorted, directories suppressed
-    /// let r = WalkBuilder::new(".")
-    ///     .unwrap()
-    ///     .options(WalkFlags::SORT | WalkFlags::NO_REPORT_DIRS)
-    ///     .collect()
-    ///     .unwrap();
+    /// // (run on a thread with a generous stack: rustdoc's default doctest
+    /// // main-thread stack is small on Windows)
+    /// std::thread::Builder::new().stack_size(8 << 20).spawn(|| {
+    ///     let r = WalkBuilder::new("src")
+    ///         .unwrap()
+    ///         .options(WalkFlags::SORT | WalkFlags::NO_REPORT_DIRS)
+    ///         .collect()
+    ///         .unwrap();
+    ///     let _ = r;
+    /// }).unwrap().join().unwrap();
     /// ```
     ///
     /// Bit values must match `ZLOB_WALK_*` in `include/zlob.h`.
@@ -49,11 +54,16 @@ bitflags! {
     ///
     /// ```
     /// use zlob::walk::{WalkBuilder, WalkMetadata};
-    /// let r = WalkBuilder::new(".")
-    ///     .unwrap()
-    ///     .metadata(WalkMetadata::SIZE | WalkMetadata::MTIME)
-    ///     .collect()
-    ///     .unwrap();
+    /// // (run on a thread with a generous stack: rustdoc's default doctest
+    /// // main-thread stack is small on Windows)
+    /// std::thread::Builder::new().stack_size(8 << 20).spawn(|| {
+    ///     let r = WalkBuilder::new("src")
+    ///         .unwrap()
+    ///         .metadata(WalkMetadata::SIZE | WalkMetadata::MTIME)
+    ///         .collect()
+    ///         .unwrap();
+    ///     let _ = r;
+    /// }).unwrap().join().unwrap();
     /// ```
     ///
     /// Bit values must match `ZLOB_META_*` in `include/zlob.h`.
@@ -216,6 +226,34 @@ impl WalkBuilder {
     pub fn max_depth(&mut self, depth: Option<usize>) -> &mut Self {
         self.max_depth = depth.unwrap_or(0).min(u16::MAX as usize) as u16;
         self
+    }
+
+    /// Number of worker threads a [`Self::run`] / [`Self::collect`] with the
+    /// current configuration will use (always >= 1). Every entry's
+    /// [`WalkEntry::worker_id`] is strictly below this bound, so it is the
+    /// exact size for caller-side per-worker shards:
+    ///
+    /// ```no_run
+    /// use zlob::walk::{WalkBuilder, WalkState};
+    /// # fn main() -> Result<(), zlob::ZlobError> {
+    /// let mut builder = WalkBuilder::new(".")?;
+    /// let shards: Vec<std::sync::Mutex<Vec<String>>> =
+    ///     (0..builder.max_workers()).map(|_| Default::default()).collect();
+    /// builder.run(|entry| {
+    ///     // one worker per shard -> the lock is never contended
+    ///     shards[entry.worker_id()]
+    ///         .lock()
+    ///         .unwrap()
+    ///         .push(entry.path().display().to_string());
+    ///     WalkState::Continue
+    /// })?;
+    /// # Ok(()) }
+    /// ```
+    pub fn max_workers(&self) -> usize {
+        let Ok((_root, opts)) = self.checked_options() else {
+            return 1;
+        };
+        (unsafe { ffi::zlob_walk_max_workers(&opts) }).max(1)
     }
 
     /// Validated root + options. The returned pattern/root pointers borrow
@@ -557,6 +595,11 @@ impl<'a> WalkEntry<'a> {
     }
 
     #[inline]
+    pub fn worker_id(&self) -> usize {
+        self.raw.worker_id as usize
+    }
+
+    #[inline]
     pub fn kind(&self) -> WalkEntryKind {
         match self.raw.kind {
             1 => WalkEntryKind::File,
@@ -866,6 +909,88 @@ mod tests {
             })
             .unwrap();
         assert_eq!(quit_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn worker_id_shards_without_locks() {
+        // worker_id must always be below max_workers(), for both the
+        // streaming and the collect paths, so per-worker shard arrays sized
+        // by max_workers() can be indexed without bounds checks failing.
+        let dir = make_tree();
+        let builder = {
+            let mut b = WalkBuilder::new(dir.path()).unwrap();
+            b.options(WalkFlags::empty());
+            b
+        };
+        let n = builder.max_workers();
+        assert!(n >= 1);
+
+        let seen = AtomicUsize::new(0);
+        let shards: Vec<std::sync::Mutex<Vec<String>>> =
+            (0..n).map(|_| Default::default()).collect();
+        builder
+            .run(|entry| {
+                // panics via index OOB if the bound contract is broken
+                shards[entry.worker_id()]
+                    .lock()
+                    .unwrap()
+                    .push(entry.relative_path().to_string_lossy().into_owned());
+                seen.fetch_add(1, Ordering::Relaxed);
+                WalkState::Continue
+            })
+            .unwrap();
+        assert_eq!(seen.load(Ordering::Relaxed), 7);
+
+        // The sharded union equals the collected set: nothing lost, nothing
+        // duplicated when accumulating per worker.
+        let mut merged: Vec<String> = shards
+            .into_iter()
+            .flat_map(|s| s.into_inner().unwrap())
+            .collect();
+        merged.sort();
+        let collected = builder.collect().unwrap();
+        let mut expected: Vec<String> = collected
+            .iter()
+            .map(|e| e.relative_path().to_string_lossy().into_owned())
+            .collect();
+        expected.sort();
+        assert_eq!(merged, expected);
+
+        // collect() carries worker ids too, under the same bound.
+        assert!(collected.iter().all(|e| e.worker_id() < n));
+    }
+
+    #[test]
+    fn worker_id_is_zero_on_single_thread() {
+        let dir = make_tree();
+        let mut b = WalkBuilder::new(dir.path()).unwrap();
+        b.options(WalkFlags::empty()).threads(1);
+        assert_eq!(b.max_workers(), 1);
+        b.run(|entry| {
+            assert_eq!(entry.worker_id(), 0);
+            WalkState::Continue
+        })
+        .unwrap();
+
+        // run_serial always executes on the calling thread only.
+        let mut b = WalkBuilder::new(dir.path()).unwrap();
+        b.options(WalkFlags::empty()).threads(8);
+        b.run_serial(|entry| {
+            assert_eq!(entry.worker_id(), 0);
+            WalkState::Continue
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn max_workers_respects_explicit_threads() {
+        let dir = make_tree();
+        let mut b = WalkBuilder::new(dir.path()).unwrap();
+        b.threads(3);
+        assert_eq!(b.max_workers(), 3);
+        b.threads(0);
+        let auto = b.max_workers();
+        assert!(auto >= 1);
     }
 
     #[test]

@@ -157,6 +157,8 @@ pub const Entry = struct {
     kind: EntryKind,
     /// Depth below the root: direct children of the root have depth 1.
     depth: u16,
+    /// Index of the current worker id
+    worker_id: u16 = 0,
     meta: Metadata,
 
     pub inline fn relativePath(self: *const Entry) []const u8 {

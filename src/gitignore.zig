@@ -8,10 +8,13 @@ const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const glob = @import("zlob.zig");
 const path_matcher = @import("path_matcher.zig");
+const compiled_pattern = @import("compiled_pattern.zig");
 
 /// A single gitignore pattern with pre-computed metadata
 pub const Pattern = struct {
-    /// The pattern text (slice into source)
+    /// The pattern text — slices into one of the buffers held by
+    /// `GitIgnore.sources`. Never freed directly by the pattern; freed with
+    /// the source buffer in `GitIgnore.deinit`.
     text: []const u8,
     /// Pattern is negated (starts with !)
     negated: bool,
@@ -37,6 +40,12 @@ pub const Pattern = struct {
     suffix_u32: u32,
     /// Index in original pattern list (for negation ordering)
     index: u16,
+    /// Pre-split path segments for patterns containing `**`. Empty for
+    /// patterns without `**` (those route through fnmatch, not segment
+    /// matching). Segments slice into `text` so no string duplication is
+    /// needed — only the pointer array is heap-allocated. Allocated in
+    /// `parseOwnedMulti`, freed in `deinit`.
+    segments: [][]const u8 = &.{},
 };
 
 /// String hash map for O(1) literal lookups
@@ -72,10 +81,22 @@ pub const GitIgnore = struct {
     has_negations: bool,
     /// Index of first negation pattern (for early termination)
     first_negation_index: u16,
+    /// True when no patterns were parsed (empty/comment-only .gitignore).
+    /// Lets `chainIgnored` skip the entire `checkWithBasename` call.
+    is_empty: bool,
+    /// True when any wildcard pattern has `**`. Determines whether
+    /// `checkWithBasename` needs to pre-split the entry's path for segment
+    /// matching — when false, the path split (and its 2 KB stack buffer) is
+    /// avoided entirely.
+    has_double_star_wildcards: bool,
     /// Allocator for cleanup
     allocator: Allocator,
-    /// Original file content - patterns slice into this
-    source: []const u8,
+    /// Owned source buffers — `Pattern.text` and everything derived from it
+    /// (suffix, segments) slices into these. `deinit` frees each buffer and
+    /// the outer slice. A list of buffers rather than a single blob lets
+    /// callers layer multiple files (e.g. `.gitignore` + `.ignore`) without
+    /// having to concatenate first.
+    sources: [][]const u8,
     /// Cache for directory decisions: path -> should_skip
     dir_cache: std.StringHashMap(bool),
 
@@ -90,8 +111,10 @@ pub const GitIgnore = struct {
             if (err == error.StreamTooLong) return null;
             return err;
         };
-
-        return try parseOwned(allocator, content);
+        errdefer allocator.free(content);
+        const sources = try allocator.alloc([]const u8, 1);
+        sources[0] = content;
+        return try parseOwnedMulti(allocator, sources);
     }
 
     /// Load and parse .gitignore from a specific directory
@@ -109,8 +132,10 @@ pub const GitIgnore = struct {
             if (err == error.StreamTooLong) return null;
             return err;
         };
-
-        return try parseOwned(allocator, content);
+        errdefer allocator.free(content);
+        const sources = try allocator.alloc([]const u8, 1);
+        sources[0] = content;
+        return try parseOwnedMulti(allocator, sources);
     }
 
     /// Check if a pattern text contains any glob wildcards (SIMD-accelerated)
@@ -130,31 +155,41 @@ pub const GitIgnore = struct {
         return rest;
     }
 
-    /// Parse gitignore content - takes ownership of the content slice on
-    /// ALL paths (content must be allocated with `allocator`; freed by
-    /// deinit() on success, immediately on error).
-    pub fn parseOwned(allocator: Allocator, content: []const u8) !Self {
-        errdefer allocator.free(content);
+    /// Parse gitignore content from a borrowed string. The bytes are duped
+    /// internally; the caller retains ownership of `content`.
+    pub fn parse(allocator: Allocator, content: []const u8) !Self {
+        const owned = try allocator.dupe(u8, content);
+        errdefer allocator.free(owned);
+        const sources = try allocator.alloc([]const u8, 1);
+        sources[0] = owned;
+        errdefer allocator.free(sources);
+        return try parseOwnedMulti(allocator, sources);
+    }
+
+    /// Parse multiple gitignore documents in one pass and take ownership of
+    /// every input buffer plus the outer slice. Sources are consumed in the
+    /// given order, so patterns from later files get higher indices and win
+    /// ties (`.ignore` after `.gitignore` — ripgrep precedence). On error
+    /// every input is freed.
+    pub fn parseOwnedMulti(allocator: Allocator, sources: [][]const u8) !Self {
+        errdefer {
+            for (sources) |src| allocator.free(src);
+            allocator.free(sources);
+        }
         const PatternList = std.array_list.AlignedManaged(Pattern, null);
 
         var patterns_list = PatternList.init(allocator);
         defer patterns_list.deinit();
-
         var wildcard_list = PatternList.init(allocator);
         defer wildcard_list.deinit();
-
         var literal_dirs = StringHashMap.init(allocator);
         errdefer literal_dirs.deinit();
-
         var literal_files = StringHashMap.init(allocator);
         errdefer literal_files.deinit();
-
         var anchored_literal_paths = StringHashMap.init(allocator);
         errdefer anchored_literal_paths.deinit();
-
         var anchored_literal_dir_list = PatternList.init(allocator);
         defer anchored_literal_dir_list.deinit();
-
         var suffix_list = PatternList.init(allocator);
         defer suffix_list.deinit();
 
@@ -162,24 +197,22 @@ pub const GitIgnore = struct {
         var first_negation_index: u16 = std.math.maxInt(u16);
         var index: u16 = 0;
 
-        var line_iter = mem.splitScalar(u8, content, '\n');
-        while (line_iter.next()) |raw_line| {
-            const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r')
-                raw_line[0 .. raw_line.len - 1]
-            else
-                raw_line;
+        for (sources) |content| {
+            var line_iter = mem.splitScalar(u8, content, '\n');
+            while (line_iter.next()) |raw_line| {
+                const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r')
+                    raw_line[0 .. raw_line.len - 1]
+                else
+                    raw_line;
+                const pattern = parseLine(line, index) orelse continue;
 
-            if (parseLine(line, index)) |pattern| {
                 try patterns_list.append(pattern);
 
                 if (pattern.negated) {
                     has_negations = true;
-                    if (index < first_negation_index) {
-                        first_negation_index = index;
-                    }
+                    if (index < first_negation_index) first_negation_index = index;
                 }
 
-                // Categorize pattern for optimized lookup
                 if (pattern.is_literal and pattern.anchored) {
                     const match = PatternMatch{
                         .negated = pattern.negated,
@@ -192,7 +225,6 @@ pub const GitIgnore = struct {
                         try anchored_literal_paths.put(pattern.text, match);
                     }
                 } else if (pattern.is_literal and !pattern.anchored) {
-                    // Simple literal pattern - add to hash map
                     const match = PatternMatch{
                         .negated = pattern.negated,
                         .dir_only = pattern.dir_only,
@@ -203,12 +235,9 @@ pub const GitIgnore = struct {
                     } else {
                         try literal_files.put(pattern.text, match);
                     }
-                } else if (pattern.suffix) |suffix| {
-                    _ = suffix;
-                    // Suffix pattern like *.rs
+                } else if (pattern.suffix != null) {
                     try suffix_list.append(pattern);
                 } else {
-                    // Wildcard pattern OR anchored literal pattern
                     try wildcard_list.append(pattern);
                 }
 
@@ -223,6 +252,8 @@ pub const GitIgnore = struct {
         const anchored_literal_dirs = try anchored_literal_dir_list.toOwnedSlice();
         errdefer allocator.free(anchored_literal_dirs);
         const suffix_patterns = try suffix_list.toOwnedSlice();
+        errdefer allocator.free(suffix_patterns);
+
         std.sort.block(Pattern, suffix_patterns, {}, struct {
             fn lessThan(_: void, a: Pattern, b: Pattern) bool {
                 const a_last = a.suffix.?[a.suffix.?.len - 1];
@@ -241,6 +272,28 @@ pub const GitIgnore = struct {
             suffix_bucket_end[last] = @intCast(i + 1);
         }
 
+        // Pre-split path segments for ** patterns so matchGlobSimplePresplit
+        // can skip re-splitting the pattern on every call. Segments slice
+        // into `text` (which slices into `sources`), so only the pointer
+        // array is heap-allocated.
+        for (wildcard_patterns) |*p| {
+            if (!p.has_double_star) continue;
+            var seg_buf: [32][]const u8 = undefined;
+            if (compiled_pattern.splitPathComponentsNormalized(p.text, &seg_buf)) |segs| {
+                const owned = allocator.alloc([]const u8, segs.len) catch return error.OutOfMemory;
+                @memcpy(owned, segs);
+                p.segments = owned;
+            }
+        }
+
+        var has_ds_wildcards = false;
+        for (wildcard_patterns) |p| {
+            if (p.has_double_star) {
+                has_ds_wildcards = true;
+                break;
+            }
+        }
+
         return Self{
             .patterns = patterns,
             .wildcard_patterns = wildcard_patterns,
@@ -253,16 +306,12 @@ pub const GitIgnore = struct {
             .suffix_bucket_end = suffix_bucket_end,
             .has_negations = has_negations,
             .first_negation_index = first_negation_index,
+            .is_empty = patterns.len == 0,
+            .has_double_star_wildcards = has_ds_wildcards,
             .allocator = allocator,
-            .source = content,
+            .sources = sources,
             .dir_cache = std.StringHashMap(bool).init(allocator),
         };
-    }
-
-    /// Parse gitignore content from a borrowed string (for testing)
-    pub fn parse(allocator: Allocator, content: []const u8) !Self {
-        const owned = try allocator.dupe(u8, content);
-        return try parseOwned(allocator, owned);
     }
 
     /// Extract the required last character from a pattern for early rejection.
@@ -376,6 +425,15 @@ pub const GitIgnore = struct {
     /// Same as `check` but with a pre-computed basename and a path already
     /// normalized (no `./` prefix). Hot path for walkers that know both.
     pub fn checkWithBasename(self: *const Self, normalized_path: []const u8, basename: []const u8, is_dir: bool) ?bool {
+        // Pre-split path segments once for ** wildcard patterns. Reused across
+        // all patterns in the loop below — avoids N redundant path splits per
+        // entry. The 2 KB stack buffer is only touched when ** patterns exist.
+        var path_seg_buf: [compiled_pattern.MAX_PATH_COMPONENTS][]const u8 = undefined;
+        const path_segs: ?[][]const u8 = if (self.has_double_star_wildcards)
+            compiled_pattern.splitPathComponentsNormalized(normalized_path, &path_seg_buf)
+        else
+            null;
+
         // Fast path: if no negations exist, we can use optimized lookups
         if (!self.has_negations) {
             if (is_dir) {
@@ -417,7 +475,7 @@ pub const GitIgnore = struct {
                         if (normalized_path.len == 0 or normalized_path[normalized_path.len - 1] != rc) continue;
                     }
                 }
-                if (matchPatternFast(&pattern, normalized_path, basename)) {
+                if (matchPatternFast(&pattern, normalized_path, basename, path_segs)) {
                     return true;
                 }
             }
@@ -464,7 +522,7 @@ pub const GitIgnore = struct {
                     if (normalized_path.len == 0 or normalized_path[normalized_path.len - 1] != rc) continue;
                 }
             }
-            if (matchPatternFast(&pattern, normalized_path, basename)) {
+            if (matchPatternFast(&pattern, normalized_path, basename, path_segs)) {
                 recordMatch(&best_index, &ignored, pattern.index, pattern.negated);
             }
         }
@@ -590,7 +648,7 @@ pub const GitIgnore = struct {
         };
     }
 
-    inline fn matchPatternFast(pattern: *const Pattern, path: []const u8, basename: []const u8) bool {
+    inline fn matchPatternFast(pattern: *const Pattern, path: []const u8, basename: []const u8, path_segments: ?[][]const u8) bool {
         const text = pattern.text;
 
         // Anchored patterns match against full path only
@@ -612,7 +670,15 @@ pub const GitIgnore = struct {
                 }
                 return false;
             }
-            return path_matcher.matchGlobSimple(text, path);
+            // Pre-split ** segments avoid re-splitting the pattern on every call
+            if (pattern.segments.len > 0) {
+                if (path_segments) |ps| {
+                    return path_matcher.matchGlobSimplePresplitWithPath(pattern.segments, ps);
+                }
+                return path_matcher.matchGlobSimplePresplit(pattern.segments, path);
+            }
+            // No ** → skip matchGlobSimple's ** scan, call fnmatch directly
+            return glob.fnmatch.fnmatch(text, path, .{});
         }
 
         // Non-anchored patterns without / match against basename only
@@ -636,15 +702,23 @@ pub const GitIgnore = struct {
             return mem.eql(u8, text, path);
         }
         if (pattern.dir_only) {
-            if (path_matcher.matchGlobSimple(text, path)) return true;
+            // Pre-split ** segments: use pre-split path segments when available,
+            // avoiding both pattern AND path splitting.
+            if (pattern.segments.len > 0) {
+                if (path_segments) |ps| {
+                    return path_matcher.matchGlobSimplePresplitAnyPrefixWithPath(pattern.segments, ps);
+                }
+                return path_matcher.matchGlobSimplePresplitAnyPrefix(pattern.segments, path);
+            }
+            // Non-** dir_only: skip matchGlobSimple's ** scan
+            if (glob.fnmatch.fnmatch(text, path, .{})) return true;
             // Check if any path component matches and this is a child path
             // e.g., pattern "target" with dir_only should match "foo/target/bar.rs"
             var start: usize = 0;
             while (start < path.len) {
                 const end = mem.indexOfPos(u8, path, start, "/") orelse path.len;
                 const component_path = path[0..end];
-                if (path_matcher.matchGlobSimple(text, component_path)) {
-                    // This path component matches, so any path starting with it is inside
+                if (glob.fnmatch.fnmatch(text, component_path, .{})) {
                     return true;
                 }
                 if (end >= path.len) break;
@@ -652,7 +726,15 @@ pub const GitIgnore = struct {
             }
             return false;
         }
-        return path_matcher.matchGlobSimple(text, path);
+        // Non-anchored, non-dir_only with /, has **
+        if (pattern.segments.len > 0) {
+            if (path_segments) |ps| {
+                return path_matcher.matchGlobSimplePresplitWithPath(pattern.segments, ps);
+            }
+            return path_matcher.matchGlobSimplePresplit(pattern.segments, path);
+        }
+        // Non-anchored, non-dir_only with /, no **
+        return glob.fnmatch.fnmatch(text, path, .{});
     }
 
     /// Check if a directory should be skipped entirely (not traversed)
@@ -780,10 +862,17 @@ pub const GitIgnore = struct {
         self.literal_dirs.deinit();
         self.literal_files.deinit();
         self.anchored_literal_paths.deinit();
+
+        // Free pre-split pattern segments (only wildcard_patterns has them).
+        for (self.wildcard_patterns) |p| {
+            if (p.segments.len > 0) self.allocator.free(p.segments);
+        }
+
         self.allocator.free(self.patterns);
         self.allocator.free(self.wildcard_patterns);
         self.allocator.free(self.anchored_literal_dirs);
-        self.allocator.free(self.source);
+        for (self.sources) |src| self.allocator.free(src);
+        self.allocator.free(self.sources);
     }
 };
 

@@ -120,7 +120,7 @@ fn entryLessThan(_: void, a: Entry, b: Entry) bool {
     return mem.order(u8, a.path, b.path) == .lt;
 }
 
-fn effectiveThreads(opts: *const Options) u32 {
+pub fn effectiveThreads(opts: *const Options) u32 {
     if (opts.threads != 0) return @min(opts.threads, 1024);
     const n: u32 = @intCast(@max(std.Thread.getCpuCount() catch 1, 1));
     // Directory enumeration is syscall-bound and contends on per-process and

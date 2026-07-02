@@ -210,6 +210,27 @@ fn main() {
         );
     }
 
+    // zig's archiver sometimes can use bsd style that is 4 bytes aligned, we need to force it to 8
+    // bytes alignment to match the macos/ios requirement for linking
+    if target.contains("apple") {
+        let lib = out_dir.join("lib").join("libzlob.a");
+        let aligned = out_dir.join("lib").join("libzlob_aligned.a");
+        // `q` appends: remove any stale output from a previous build first.
+        let _ = std::fs::remove_file(&aligned);
+        let status = Command::new(&zig)
+            .arg("ar")
+            .arg("--format=darwin")
+            .arg("qLcs")
+            .arg(&aligned)
+            .arg(&lib)
+            .status()
+            .expect("failed to run `zig ar` to realign libzlob.a");
+        if !status.success() {
+            panic!("`zig ar --format=darwin` repack of libzlob.a failed: {status}");
+        }
+        std::fs::rename(&aligned, &lib).expect("failed to replace libzlob.a with aligned archive");
+    }
+
     println!("cargo:rustc-link-search=native={}/lib", out_dir.display());
     println!("cargo:rustc-link-lib=static=zlob");
 }

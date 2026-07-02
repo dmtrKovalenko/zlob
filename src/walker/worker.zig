@@ -366,6 +366,7 @@ fn processEntry(
             .basename = basename,
             .kind = entry_kind,
             .depth = entry_depth,
+            .worker_id = @intCast(w.id),
             .meta = meta,
         };
         action = sh.sink(sh.sink_ctx, w.id, &entry);
@@ -514,18 +515,20 @@ fn openRoot(sh: *SharedWorkerState, root: []const u8) anyerror!Handle {
 /// `!negation` rules can un-ignore paths the real chain would otherwise drop.
 /// Anchoring is at the walk root: rules see the entry's full root-relative
 /// path. Pass `null` to skip.
-fn chainIgnored(start: ?*IgnoreNode, extra: ?*IgnoreNode, rel: []const u8, basename: []const u8, is_dir: bool) bool {
+inline fn chainIgnored(start: ?*IgnoreNode, extra: ?*IgnoreNode, rel: []const u8, basename: []const u8, is_dir: bool) bool {
     if (extra) |x| {
-        // extra_ignore is rooted at the walk root (relative_offset = 0), so
-        // we pass the entry's full root-relative path verbatim.
-        if (x.gi.checkWithBasename(rel, basename, is_dir)) |verdict| {
-            return verdict;
+        if (!x.gi.is_empty) {
+            if (x.gi.checkWithBasename(rel, basename, is_dir)) |verdict| {
+                return verdict;
+            }
         }
     }
     var node: ?*IgnoreNode = start;
     while (node) |n| : (node = n.parent) {
-        if (n.gi.checkWithBasename(rel[n.relative_offset..], basename, is_dir)) |verdict| {
-            return verdict;
+        if (!n.gi.is_empty) {
+            if (n.gi.checkWithBasename(rel[n.relative_offset..], basename, is_dir)) |verdict| {
+                return verdict;
+            }
         }
     }
     return false;
@@ -538,8 +541,30 @@ fn loadIgnoreNode(
     have_git: bool,
     have_ignore: bool,
 ) WalkError!?*IgnoreNode {
-    const content = (try readIgnore(sh, handle, have_git, have_ignore)) orelse return null;
-    var gi = GitIgnore.parseOwned(sh.allocator, content) catch |err| {
+    // Read both files (whichever exist) and hand them straight to the
+    // parser. `.ignore` is second so its patterns get higher indices and
+    // win ties — ripgrep precedence, no concat needed.
+    const git = if (have_git) readSmallFile(sh, handle, ".gitignore") else null;
+    const ign = if (have_ignore) readSmallFile(sh, handle, ".ignore") else null;
+    if (git == null and ign == null) return null;
+
+    const n: usize = @as(usize, @intFromBool(git != null)) + @intFromBool(ign != null);
+    const sources = sh.allocator.alloc([]const u8, n) catch {
+        if (git) |b| sh.allocator.free(b);
+        if (ign) |b| sh.allocator.free(b);
+        return error.OutOfMemory;
+    };
+    var i: usize = 0;
+    if (git) |b| {
+        sources[i] = b;
+        i += 1;
+    }
+    if (ign) |b| {
+        sources[i] = b;
+        i += 1;
+    }
+
+    var gi = GitIgnore.parseOwnedMulti(sh.allocator, sources) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return null;
     };
@@ -556,30 +581,6 @@ fn loadIgnoreNode(
         .refs = .init(1),
     };
     return node;
-}
-/// Reads `.gitignore` and/or `.ignore` and returns one owned buffer holding
-/// their concatenation (gitignore first, then ignore). The caller's parser
-/// takes ownership. `.ignore` is placed last so its patterns win ties
-/// (ripgrep convention). Returns null when neither file could be read.
-fn readIgnore(sh: *SharedWorkerState, handle: Handle, have_git: bool, have_ignore: bool) WalkError!?[]u8 {
-    const git = if (have_git) readSmallFile(sh, handle, ".gitignore") else null;
-    const ign = if (have_ignore) readSmallFile(sh, handle, ".ignore") else null;
-
-    // Only one source present: hand its buffer straight to the parser (no copy).
-    if (ign == null) return git;
-    if (git == null) return ign;
-
-    // Both present: concatenate with a separating newline so the last line of
-    // .gitignore and the first line of .ignore don't fuse.
-    const g = git.?;
-    const i = ign.?;
-    defer sh.allocator.free(g);
-    defer sh.allocator.free(i);
-    const merged = sh.allocator.alloc(u8, g.len + 1 + i.len) catch return error.OutOfMemory;
-    @memcpy(merged[0..g.len], g);
-    merged[g.len] = '\n';
-    @memcpy(merged[g.len + 1 ..], i);
-    return merged;
 }
 
 const max_gitignore_size = 1024 * 1024;
@@ -632,10 +633,6 @@ fn dirInPatternScope(prefix: []const u8, dir_rel: []const u8) bool {
     }
     return mem.startsWith(u8, dir_rel, prefix) and dir_rel[prefix.len] == '/';
 }
-
-// ---------------------------------------------------------------------------
-// Symlinking
-// ---------------------------------------------------------------------------
 
 const SymlinkStat = struct { is_dir: bool, key: InodeKey };
 

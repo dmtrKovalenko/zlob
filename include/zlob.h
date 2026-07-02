@@ -393,6 +393,11 @@ typedef struct zlob_walk_entry {
   uint32_t basename_offset; /* path + basename_offset = entry name */
   uint8_t kind;             /* ZLOB_WALK_KIND_* */
   uint16_t depth;           /* root children have depth 1 */
+  uint16_t worker_id;       /* index of the worker that produced this entry,
+                             * 0 <= worker_id < zlob_walk_max_workers(). At any
+                             * moment a given worker_id is used by exactly one
+                             * thread, so callers can shard per-entry state by
+                             * it without locks. */
   uint32_t meta_valid;      /* which ZLOB_META_* fields below are filled */
   uint64_t size;            /* file size in bytes */
   int64_t mtime_ns;         /* modification time, nanoseconds since the epoch */
@@ -423,6 +428,11 @@ typedef int (*zlob_walk_cb)(const zlob_walk_entry_t *entry, void *ctx);
  */
 int zlob_walk(const char *root, const zlob_walk_options_t *options, zlob_walk_cb cb, void *ctx,
               void **out_rules);
+
+/** Number of worker threads a walk with `options` would use (always >= 1).
+ *  Every entry's `worker_id` is strictly below this bound, so it is the exact
+ *  size for caller-side per-worker shards. NULL options = defaults. */
+size_t zlob_walk_max_workers(const zlob_walk_options_t *options);
 
 /** Free the allocated ignore rules set, NUL is noop */
 void zlob_ignore_rules_free(void *rules);
