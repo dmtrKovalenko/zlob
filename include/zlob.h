@@ -1,5 +1,5 @@
 /**
- * zlob.h - High-performance glob pattern matching library
+ * zlob.h - High-performance glob pattern matching & file system walking library library
  *
  * A C-compatible interface to the zlob (Z Glob) library: SIMD-accelerated
  * file pattern matching plus a parallel directory walker.

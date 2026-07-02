@@ -56,12 +56,25 @@ fn main() {
         zlob_root.join("build.zig").display()
     );
 
-    let bindings = bindgen::Builder::default()
+    let target = env::var("TARGET").unwrap();
+    let host = env::var("HOST").unwrap();
+
+    // When cross-compiling, tell libclang the target triple so it resolves the
+    // correct system headers instead of the host's (e.g. host glibc's
+    // bits/libc-header-start.h is missing on Android/musl cross builds).
+    // Sysroot/extra flags are supplied via BINDGEN_EXTRA_CLANG_ARGS_<target>.
+    let mut builder = bindgen::Builder::default()
         .header(header_path.to_str().unwrap())
         .use_core()
         .generate_comments(false)
         .default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
+
+    if target != host {
+        builder = builder.clang_arg(format!("--target={}", target));
+    }
+
+    let bindings = builder
         .generate()
         .unwrap_or_else(|e| {
             panic!(
@@ -84,9 +97,6 @@ fn main() {
     if !zig_version.status.success() {
         panic!("Failed to run zig. Please ensure zig is installed and accessible.");
     }
-
-    let target = env::var("TARGET").unwrap();
-    let host = env::var("HOST").unwrap();
 
     // In CI, always map through rust_target_to_zig() so the produced artifact
     // uses the generic baseline CPU for that ISA. Otherwise Zig's "native"
