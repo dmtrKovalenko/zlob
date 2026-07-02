@@ -41,7 +41,7 @@ const TestTree = struct {
 
 fn findEntry(results: *const walk.WalkerResult, rel: []const u8) ?*const walk.Entry {
     for (results.entries) |*e| {
-        if (std.mem.eql(u8, e.relPath(), rel)) return e;
+        if (std.mem.eql(u8, e.relativePath(), rel)) return e;
     }
     return null;
 }
@@ -124,7 +124,7 @@ test "walk nested gitignore: deeper file overrides parent" {
     try testing.expect(all.entries.len > results.entries.len);
     var found_git = false;
     for (all.entries) |*e| {
-        if (std.mem.eql(u8, e.relPath(), ".git/config")) found_git = true;
+        if (std.mem.eql(u8, e.relativePath(), ".git/config")) found_git = true;
     }
     try testing.expect(found_git);
 }
@@ -339,10 +339,10 @@ test "walk glob pattern: filters entries and prunes out-of-scope dirs" {
         });
         defer results.deinit();
         try testing.expectEqual(@as(usize, 4), results.entries.len);
-        try testing.expectEqualStrings("lib/c.rs", results.entries[0].relPath());
-        try testing.expectEqualStrings("src/a.rs", results.entries[1].relPath());
-        try testing.expectEqualStrings("src/deep/e.rs", results.entries[2].relPath());
-        try testing.expectEqualStrings("top.rs", results.entries[3].relPath());
+        try testing.expectEqualStrings("lib/c.rs", results.entries[0].relativePath());
+        try testing.expectEqualStrings("src/a.rs", results.entries[1].relativePath());
+        try testing.expectEqualStrings("src/deep/e.rs", results.entries[2].relativePath());
+        try testing.expectEqualStrings("top.rs", results.entries[3].relativePath());
     }
 
     // Anchored pattern: only the src/ subtree is reported ("src/**" also
@@ -355,7 +355,7 @@ test "walk glob pattern: filters entries and prunes out-of-scope dirs" {
         });
         defer results.deinit();
         for (results.entries) |*e| {
-            try testing.expect(std.mem.startsWith(u8, e.relPath(), "src"));
+            try testing.expect(std.mem.startsWith(u8, e.relativePath(), "src"));
         }
         try testing.expectEqual(@as(usize, 5), results.entries.len); // src, a.rs, b.txt, deep, deep/e.rs
     }
@@ -425,8 +425,8 @@ test "walk follow_symlinks: descends links, breaks cycles, never re-walks root" 
         var a_count: usize = 0;
         for (results.entries) |*e| {
             // Nothing may be reported through the root-cycling link.
-            try testing.expect(!std.mem.startsWith(u8, e.relPath(), "back/"));
-            if (std.mem.eql(u8, e.relPath(), "a.txt")) a_count += 1;
+            try testing.expect(!std.mem.startsWith(u8, e.relativePath(), "back/"));
+            if (std.mem.eql(u8, e.relativePath(), "a.txt")) a_count += 1;
         }
         try testing.expectEqual(@as(usize, 1), a_count);
         // a.txt, back, link, link/o.txt, link/self
@@ -529,7 +529,7 @@ test "walk glob pattern prunes: out-of-scope unreadable dir is never opened" {
     });
     defer results.deinit();
     try testing.expectEqual(@as(usize, 1), results.entries.len);
-    try testing.expectEqualStrings("src/a.rs", results.entries[0].relPath());
+    try testing.expectEqualStrings("src/a.rs", results.entries[0].relativePath());
 }
 
 test "walk retains reusable IgnoreRules: nesting, negation, .ignore precedence" {
@@ -549,7 +549,11 @@ test "walk retains reusable IgnoreRules: nesting, negation, .ignore precedence" 
     try t.mkdir("build");
     try t.write("app.log", "");
     try t.write("keep.log", "");
+    try t.write("scratch.tmp", "");
+    try t.write("important.tmp", "");
+    try t.write("old.bak", "");
     try t.write("src/main.rs", "");
+    try t.write("src/old.bak", "");
 
     var results = try walk.collect(testing.allocator, t.root, .{
         .threads = 1,
@@ -558,28 +562,25 @@ test "walk retains reusable IgnoreRules: nesting, negation, .ignore precedence" 
 
     const rules = results.ignore_rules;
 
-    // Root rules.
-    try testing.expect(rules.isIgnored("app.log", false));
-    try testing.expect(!rules.isIgnored("keep.log", false)); // negation
-    try testing.expect(rules.isIgnored("build", true));
-    try testing.expect(rules.isIgnored("scratch.tmp", false)); // *.tmp from .gitignore
-    try testing.expect(!rules.isIgnored("important.tmp", false)); // .ignore re-includes
+    // Root rules — isIgnoredPath lstat()s the target for dir-ness.
+    try testing.expect(rules.isIgnoredPath("app.log"));
+    try testing.expect(!rules.isIgnoredPath("keep.log")); // negation
+    try testing.expect(rules.isIgnoredPath("build")); // dir-only build/ rule fires via lstat
+    try testing.expect(rules.isIgnoredPath("scratch.tmp")); // *.tmp from .gitignore
+    try testing.expect(!rules.isIgnoredPath("important.tmp")); // .ignore re-includes
 
     // Nested rules apply only within src/.
-    try testing.expect(rules.isIgnored("src/old.bak", false));
-    try testing.expect(!rules.isIgnored("old.bak", false)); // not ignored at root
-    try testing.expect(!rules.isIgnored("src/main.rs", false));
+    try testing.expect(rules.isIgnoredPath("src/old.bak"));
+    try testing.expect(!rules.isIgnoredPath("old.bak")); // not ignored at root
+    try testing.expect(!rules.isIgnoredPath("src/main.rs"));
 
-    // A path under no special rule is not ignored.
-    try testing.expect(!rules.isIgnored("src/util/helper.rs", false));
+    // Non-existent paths surface as ignored (unreachable → ignored).
+    try testing.expect(rules.isIgnoredPath("src/util/helper.rs"));
 
-    // isIgnoredPath infers dir-ness from a trailing slash (zero syscalls).
-    try testing.expect(rules.isIgnoredPath("build/")); // dir-only rule applies
-    try testing.expect(!rules.isIgnoredPath("build")); // no slash -> treated as file
-    try testing.expect(rules.isIgnoredPath("app.log"));
-
-    // isIgnoredUntrusted lstat()s to resolve dir-ness; a missing path is a
-    // file, so the dir-only build/ rule does not apply but *.tmp does.
-    try testing.expect(!rules.isIgnoredUntrusted("build"));
-    try testing.expect(rules.isIgnoredUntrusted("scratch.tmp"));
+    // Absolute-path queries work too, provided they're inside the walk.
+    var abs_buf: [512]u8 = undefined;
+    const abs_app_log = try std.fmt.bufPrint(&abs_buf, "{s}/app.log", .{t.root});
+    try testing.expect(rules.isIgnoredPath(abs_app_log));
+    // Absolute path outside the walk → ignored (not part of this walk).
+    try testing.expect(rules.isIgnoredPath("/etc/passwd"));
 }

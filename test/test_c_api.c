@@ -415,7 +415,7 @@ int main(void) {
       const zlob_walk_entry_t *e = &res.entries[i];
       if (e->path[e->path_len] != '\0')
         FAIL("Entry path not NUL-terminated");
-      const char *base = e->path + e->basename_off;
+      const char *base = e->path + e->basename_offset;
       if (strcmp(base, "hello.txt") == 0) {
         found_hello = 1;
         if (!(e->meta_valid & ZLOB_META_SIZE))
@@ -466,7 +466,8 @@ int main(void) {
     opts.threads = 1;
 
     size_t seen = 0;
-    int rc = zlob_walk(walk_root, &opts, zlob_test_count_cb, &seen);
+    void *rules = NULL;
+    int rc = zlob_walk(walk_root, &opts, zlob_test_count_cb, &seen, &rules);
     if (rc != 0)
       FAIL("zlob_walk failed");
     /* no gitignore flag: .gitignore, hello.txt, noise.log, sub, sub/inner.txt */
@@ -474,6 +475,7 @@ int main(void) {
       printf("    got %zu entries\n", seen);
       FAIL("Expected 5 entries");
     }
+    zlob_ignore_rules_free(rules);
     PASS();
   }
 
