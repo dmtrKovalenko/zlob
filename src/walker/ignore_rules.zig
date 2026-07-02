@@ -322,7 +322,13 @@ fn lstatIsDir(path: [:0]const u8) ?bool {
         if (linux.errno(rc) != .SUCCESS) return null;
         return (@as(u32, stx.mode) & 0o170000) == 0o040000;
     }
-    if (!@hasDecl(std.c, "fstatat")) return null;
+    // Windows (and any other no-libc target): use the portable std.Io API
+    // instead of std.c.fstatat, which would force a libc dependency.
+    if (builtin.os.tag == .windows or !@hasDecl(std.c, "fstatat")) {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const st = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch return null;
+        return st.kind == .directory;
+    }
     var st: std.c.Stat = undefined;
     if (std.c.fstatat(types.AT_FDCWD, path.ptr, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return null;
     return (@as(u32, @intCast(st.mode)) & 0o170000) == 0o040000;

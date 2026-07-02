@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 const darwin = @import("scan_darwin.zig");
 const win = @import("scan_windows.zig");
 
-const winos = std.os.wwin;
+const winos = std.os.windows;
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -56,13 +56,17 @@ else if (is_windows_backend)
 else
     std.Io.Dir;
 
-pub const AT_FDCWD: posix.fd_t = if (builtin.os.tag == .linux) linux.AT.FDCWD else std.c.AT.FDCWD;
+pub const AT_FDCWD: posix.fd_t = switch (builtin.os.tag) {
+    .linux => linux.AT.FDCWD,
+    .windows => undefined, // POSIX-only; the Windows backend uses NT handles
+    else => std.c.AT.FDCWD,
+};
 
 pub inline fn closeFd(fd: posix.fd_t) void {
-    if (builtin.os.tag == .linux) {
-        _ = linux.close(fd);
-    } else {
-        _ = std.c.close(fd);
+    switch (builtin.os.tag) {
+        .linux => _ = linux.close(fd),
+        .windows => {}, // POSIX-only; the Windows backend closes NT handles
+        else => _ = std.c.close(fd),
     }
 }
 
