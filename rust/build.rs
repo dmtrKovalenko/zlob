@@ -2,6 +2,22 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+// Minimal self-contained headers for bindgen. They rely only on clang's
+// builtin target macros (__SIZE_TYPE__, __INTxx_TYPE__), so the widths always
+// match the compilation target without needing any libc/sysroot.
+const STDDEF_STUB: &str = "#pragma once\ntypedef __SIZE_TYPE__ size_t;\n";
+const STDINT_STUB: &str = "#pragma once\n\
+typedef __INT8_TYPE__ int8_t;\n\
+typedef __INT16_TYPE__ int16_t;\n\
+typedef __INT32_TYPE__ int32_t;\n\
+typedef __INT64_TYPE__ int64_t;\n\
+typedef __UINT8_TYPE__ uint8_t;\n\
+typedef __UINT16_TYPE__ uint16_t;\n\
+typedef __UINT32_TYPE__ uint32_t;\n\
+typedef __UINT64_TYPE__ uint64_t;\n\
+typedef __INTPTR_TYPE__ intptr_t;\n\
+typedef __UINTPTR_TYPE__ uintptr_t;\n";
+
 fn main() {
     // docs.rs sets this env var; skip native build since Zig isn't available there
     if env::var("DOCS_RS").is_ok() {
@@ -59,20 +75,27 @@ fn main() {
     let target = env::var("TARGET").unwrap();
     let host = env::var("HOST").unwrap();
 
-    // -ffreestanding makes clang use its own self-contained stddef.h/stdint.h
-    // instead of chaining into a libc header. zlob.h only needs size_t and the
-    // fixed-width integer types, so this avoids needing a target sysroot when
-    // cross-compiling (host libc's bits/libc-header-start.h is missing for
-    // Android/musl targets).
+    // zlob.h only needs size_t and the fixed-width integer types. Instead of
+    // relying on the target's libc/toolchain headers (which are missing or
+    // inconsistent across cross-compile setups: host glibc lacks the target's
+    // bits/libc-header-start.h, and Zig's freestanding stdint.h references
+    // undefined macros), we point clang at a self-contained stub that defines
+    // exactly those types. `-nostdinc` guarantees only our stub is used.
+    let stub_dir = out_dir.join("bindgen-stubs");
+    std::fs::create_dir_all(&stub_dir).expect("create bindgen stub dir");
+    std::fs::write(stub_dir.join("stddef.h"), STDDEF_STUB).expect("write stddef stub");
+    std::fs::write(stub_dir.join("stdint.h"), STDINT_STUB).expect("write stdint stub");
+
     let mut builder = bindgen::Builder::default()
         .header(header_path.to_str().unwrap())
-        .clang_arg("-ffreestanding")
+        .clang_arg("-nostdinc")
+        .clang_arg(format!("-I{}", stub_dir.display()))
         .use_core()
         .generate_comments(false)
         .default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
-    // Give clang the target triple so it matches the pointer width / ABI.
+    // Give clang the target triple so integer/pointer widths match the target.
     if target != host {
         builder = builder.clang_arg(format!("--target={}", target));
     }
