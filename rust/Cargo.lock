@@ -822,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "zlob"
-version = "1.6.0-dev.4"
+version = "1.6.0-dev.5"
 dependencies = [
  "bindgen",
  "bitflags",

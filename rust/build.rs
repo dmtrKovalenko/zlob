@@ -59,30 +59,31 @@ fn main() {
     let target = env::var("TARGET").unwrap();
     let host = env::var("HOST").unwrap();
 
-    // When cross-compiling, tell libclang the target triple so it resolves the
-    // correct system headers instead of the host's (e.g. host glibc's
-    // bits/libc-header-start.h is missing on Android/musl cross builds).
-    // Sysroot/extra flags are supplied via BINDGEN_EXTRA_CLANG_ARGS_<target>.
+    // -ffreestanding makes clang use its own self-contained stddef.h/stdint.h
+    // instead of chaining into a libc header. zlob.h only needs size_t and the
+    // fixed-width integer types, so this avoids needing a target sysroot when
+    // cross-compiling (host libc's bits/libc-header-start.h is missing for
+    // Android/musl targets).
     let mut builder = bindgen::Builder::default()
         .header(header_path.to_str().unwrap())
+        .clang_arg("-ffreestanding")
         .use_core()
         .generate_comments(false)
         .default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
+    // Give clang the target triple so it matches the pointer width / ABI.
     if target != host {
         builder = builder.clang_arg(format!("--target={}", target));
     }
 
-    let bindings = builder
-        .generate()
-        .unwrap_or_else(|e| {
-            panic!(
-                "Unable to generate bindings from {}: {:?}",
-                header_path.display(),
-                e
-            )
-        });
+    let bindings = builder.generate().unwrap_or_else(|e| {
+        panic!(
+            "Unable to generate bindings from {}: {:?}",
+            header_path.display(),
+            e
+        )
+    });
 
     bindings
         .write_to_file(out_dir.join("zlob_bindings.rs"))
