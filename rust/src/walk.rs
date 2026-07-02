@@ -284,8 +284,6 @@ impl WalkBuilder {
     where
         F: FnMut(WalkEntry<'_>) -> WalkState,
     {
-        debug_assert!(self.threads == 1);
-
         struct SerialBridge<F> {
             ptr: *mut F,
         }
