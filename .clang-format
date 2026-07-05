@@ -1,0 +1,9 @@
+---
+# Formatting for the public C header(s). 100-col limit with aligned macro
+# tables and trailing comments.
+Language: Cpp
+BasedOnStyle: LLVM
+ColumnLimit: 100
+AlignConsecutiveMacros: AcrossEmptyLinesAndComments
+AlignTrailingComments: true
+IndentWidth: 2

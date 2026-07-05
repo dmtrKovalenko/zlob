@@ -980,8 +980,8 @@ pub fn matchPathsCompiledImpl(
                 if (comptime at) {
                     if (path.len < path_offset) continue;
                 }
-                const rel_path = if (comptime at) path[path_offset..] else path;
-                const norm_rel = utils.normalizePathSeparators(rel_path, &path_scratch);
+                const relative_path = if (comptime at) path[path_offset..] else path;
+                const norm_rel = utils.normalizePathSeparators(relative_path, &path_scratch);
 
                 if (mem.eql(u8, norm_rel, normalized)) {
                     try collectPush(collector, out, base_index + i, path);
@@ -998,8 +998,8 @@ pub fn matchPathsCompiledImpl(
                 if (comptime at) {
                     if (path.len < path_offset) continue;
                 }
-                const rel_path = if (comptime at) path[path_offset..] else path;
-                const norm_rel = utils.normalizePathSeparators(rel_path, &path_scratch);
+                const relative_path = if (comptime at) path[path_offset..] else path;
+                const norm_rel = utils.normalizePathSeparators(relative_path, &path_scratch);
                 for (bg.segments) |*ps| {
                     if (matchSinglePath(ps, norm_rel, inner_flags)) {
                         try collectPush(collector, out, base_index + i, path);
@@ -1037,8 +1037,8 @@ pub fn matchPathsCompiledImpl(
                 if (comptime at) {
                     if (path.len < path_offset) continue;
                 }
-                const rel_path = if (comptime at) path[path_offset..] else path;
-                const norm_rel = utils.normalizePathSeparators(rel_path, &path_scratch);
+                const relative_path = if (comptime at) path[path_offset..] else path;
+                const norm_rel = utils.normalizePathSeparators(relative_path, &path_scratch);
                 if (matchSinglePath(ps, norm_rel, flags)) {
                     try collectPush(collector, out, base_index + i, path);
                 }
@@ -1051,8 +1051,8 @@ pub fn matchPathsCompiledImpl(
                     if (path.len < path_offset) continue;
                 }
                 if (!g.prefilter.matchSuffix(path)) continue;
-                const rel_path = if (comptime at) path[path_offset..] else path;
-                const norm_rel = utils.normalizePathSeparators(rel_path, &path_scratch);
+                const relative_path = if (comptime at) path[path_offset..] else path;
+                const norm_rel = utils.normalizePathSeparators(relative_path, &path_scratch);
                 if (matchSinglePath(&g.segments, norm_rel, flags)) {
                     try collectPush(collector, out, base_index + i, path);
                 }
@@ -1065,8 +1065,8 @@ pub fn matchPathsCompiledImpl(
                     if (path.len < path_offset) continue;
                 }
                 if (!g.prefilter.match(path)) continue;
-                const rel_path = if (comptime at) path[path_offset..] else path;
-                const norm_rel = utils.normalizePathSeparators(rel_path, &path_scratch);
+                const relative_path = if (comptime at) path[path_offset..] else path;
+                const norm_rel = utils.normalizePathSeparators(relative_path, &path_scratch);
                 if (matchSinglePath(&g.segments, norm_rel, flags)) {
                     try collectPush(collector, out, base_index + i, path);
                 }

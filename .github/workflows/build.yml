@@ -27,13 +27,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Format checks
-      - name: Check Zig format
-        run: zig fmt --check src/ test/ bench/
-
-      - name: Check Rust format
-        working-directory: rust
-        run: cargo fmt --check
+      - name: Check format
+        run: make format-check
 
       - name: Rust clippy
         working-directory: rust
@@ -41,6 +36,10 @@ jobs:
 
       - name: Run tests
         run: make test
+
+      - name: Walker e2e parity (real repos)
+        working-directory: rust
+        run: cargo test --release --test walk_e2e_repos -- --nocapture
 
   docs-rs:
     name: docs.rs build
@@ -241,6 +240,10 @@ jobs:
       - name: Run tests
         run: make test
 
+      - name: Walker e2e parity (real repos)
+        working-directory: rust
+        run: cargo test --release --test walk_e2e_repos -- --nocapture
+
       - name: Test Zig CLI
         run: |
           ./zig-out/bin/zlob --version
@@ -267,6 +270,11 @@ jobs:
 
       - name: Run tests
         run: make test
+        shell: bash
+
+      - name: Walker e2e parity (real repos)
+        working-directory: rust
+        run: cargo test --release --test walk_e2e_repos -- --nocapture
         shell: bash
 
       - name: List zig-out contents

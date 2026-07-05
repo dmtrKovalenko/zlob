@@ -2,6 +2,22 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+// Minimal self-contained headers for bindgen. They rely only on clang's
+// builtin target macros (__SIZE_TYPE__, __INTxx_TYPE__), so the widths always
+// match the compilation target without needing any libc/sysroot.
+const STDDEF_STUB: &str = "#pragma once\ntypedef __SIZE_TYPE__ size_t;\n";
+const STDINT_STUB: &str = "#pragma once\n\
+typedef __INT8_TYPE__ int8_t;\n\
+typedef __INT16_TYPE__ int16_t;\n\
+typedef __INT32_TYPE__ int32_t;\n\
+typedef __INT64_TYPE__ int64_t;\n\
+typedef __UINT8_TYPE__ uint8_t;\n\
+typedef __UINT16_TYPE__ uint16_t;\n\
+typedef __UINT32_TYPE__ uint32_t;\n\
+typedef __UINT64_TYPE__ uint64_t;\n\
+typedef __INTPTR_TYPE__ intptr_t;\n\
+typedef __UINTPTR_TYPE__ uintptr_t;\n";
+
 fn main() {
     // docs.rs sets this env var; skip native build since Zig isn't available there
     if env::var("DOCS_RS").is_ok() {
@@ -56,20 +72,41 @@ fn main() {
         zlob_root.join("build.zig").display()
     );
 
-    let bindings = bindgen::Builder::default()
+    let target = env::var("TARGET").unwrap();
+    let host = env::var("HOST").unwrap();
+
+    // zlob.h only needs size_t and the fixed-width integer types. Instead of
+    // relying on the target's libc/toolchain headers (which are missing or
+    // inconsistent across cross-compile setups: host glibc lacks the target's
+    // bits/libc-header-start.h, and Zig's freestanding stdint.h references
+    // undefined macros), we point clang at a self-contained stub that defines
+    // exactly those types. `-nostdinc` guarantees only our stub is used.
+    let stub_dir = out_dir.join("bindgen-stubs");
+    std::fs::create_dir_all(&stub_dir).expect("create bindgen stub dir");
+    std::fs::write(stub_dir.join("stddef.h"), STDDEF_STUB).expect("write stddef stub");
+    std::fs::write(stub_dir.join("stdint.h"), STDINT_STUB).expect("write stdint stub");
+
+    let mut builder = bindgen::Builder::default()
         .header(header_path.to_str().unwrap())
+        .clang_arg("-nostdinc")
+        .clang_arg(format!("-I{}", stub_dir.display()))
         .use_core()
         .generate_comments(false)
         .default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        .generate()
-        .unwrap_or_else(|e| {
-            panic!(
-                "Unable to generate bindings from {}: {:?}",
-                header_path.display(),
-                e
-            )
-        });
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
+
+    // Give clang the target triple so integer/pointer widths match the target.
+    if target != host {
+        builder = builder.clang_arg(format!("--target={}", target));
+    }
+
+    let bindings = builder.generate().unwrap_or_else(|e| {
+        panic!(
+            "Unable to generate bindings from {}: {:?}",
+            header_path.display(),
+            e
+        )
+    });
 
     bindings
         .write_to_file(out_dir.join("zlob_bindings.rs"))
@@ -84,9 +121,6 @@ fn main() {
     if !zig_version.status.success() {
         panic!("Failed to run zig. Please ensure zig is installed and accessible.");
     }
-
-    let target = env::var("TARGET").unwrap();
-    let host = env::var("HOST").unwrap();
 
     // In CI, always map through rust_target_to_zig() so the produced artifact
     // uses the generic baseline CPU for that ISA. Otherwise Zig's "native"
@@ -174,6 +208,27 @@ fn main() {
             "zig build failed with status: {}\nstdout: {}\nstderr: {}",
             output.status, stdout, stderr
         );
+    }
+
+    // zig's archiver sometimes can use bsd style that is 4 bytes aligned, we need to force it to 8
+    // bytes alignment to match the macos/ios requirement for linking
+    if target.contains("apple") {
+        let lib = out_dir.join("lib").join("libzlob.a");
+        let aligned = out_dir.join("lib").join("libzlob_aligned.a");
+        // `q` appends: remove any stale output from a previous build first.
+        let _ = std::fs::remove_file(&aligned);
+        let status = Command::new(&zig)
+            .arg("ar")
+            .arg("--format=darwin")
+            .arg("qLcs")
+            .arg(&aligned)
+            .arg(&lib)
+            .status()
+            .expect("failed to run `zig ar` to realign libzlob.a");
+        if !status.success() {
+            panic!("`zig ar --format=darwin` repack of libzlob.a failed: {status}");
+        }
+        std::fs::rename(&aligned, &lib).expect("failed to replace libzlob.a with aligned archive");
     }
 
     println!("cargo:rustc-link-search=native={}/lib", out_dir.display());

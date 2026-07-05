@@ -441,6 +441,26 @@ pub fn lastIndexOfCharSIMD(s: []const u8, needle: u8) ?usize {
     return mem.lastIndexOfScalar(u8, s, needle);
 }
 
+pub fn firstWildcardPos(pattern: []const u8, flags: ZlobFlags) usize {
+    // On Windows backslash is a path separator, not an escape character.
+    const enable_escape = !flags.noescape and !path_sep_is_windows;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const ch = pattern[i];
+        if (enable_escape and ch == '\\' and i + 1 < pattern.len) break;
+        if (ch == '[') break;
+        if (ch == '{' and flags.brace) break;
+        if (flags.extglob and i + 1 < pattern.len and pattern[i + 1] == '(') {
+            switch (ch) {
+                '?', '*', '+', '@', '!' => break,
+                else => {},
+            }
+        }
+        if (ch == '*' or ch == '?') break;
+    }
+    return i;
+}
+
 /// Internal SIMD-accelerated check for basic glob wildcards (*, ?, [).
 /// Used internally where only basic wildcard detection is needed (pattern fragments,
 /// suffix checks, etc.) and brace/extglob detection is not applicable.

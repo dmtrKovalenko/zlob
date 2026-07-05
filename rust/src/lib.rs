@@ -1,16 +1,13 @@
 //! # zlob
 //!
-//! High-performance glob pattern matching with SIMD optimizations.
+//! High-performance glob pattern matching and file system walker with SIMD optimizations.
 //!
 //! zlob is a Rust binding to the zlob library, which provides:
 //! - POSIX-compatible glob pattern matching
-//! - SIMD-optimized pattern matching for high performance
-//! - Support for brace expansion (`{a,b,c}`)
-//! - Tilde expansion (`~`, `~user`)
-//! - `.gitignore` filtering
-//! - Zero-copy path matching API
-//!
-//! For most use cases, use [`ZlobFlags::RECOMMENDED`]:
+//! - All modern globbing features are supported: ** recursive, {braces}, and even extglob
+//! - SIMD-optimized pattern matching for high performance (faster than `globset` and `glob`)
+//! - gitignore suppor that is faster than `ignore` crate (cause gitignore is glob)
+//! - per platform optimized parallel file walker (much faster than `ignore` and `walkdir`)
 //!
 //! ```no_run
 //! use zlob::{zlob, ZlobFlags};
@@ -48,7 +45,7 @@
 //! # Ok::<(), zlob::ZlobError>(())
 //! ```
 //!
-//! ## Path Matching (No Filesystem Access)
+//! ## Path String Matching (No Filesystem Access)
 //!
 //! For filtering a list of paths without filesystem access, use `zlob_match_paths`:
 //!
@@ -67,6 +64,31 @@
 //!
 //! This is a zero-copy operation - the results reference the original input strings.
 //!
+//! ## Gitignore based file walking
+//! ```no_run
+//! use zlob::walk::WalkBuilder;
+//!
+//! // Defaults: gitignore respected, hidden entries skipped, one worker per CPU.
+//! let results = WalkBuilder::new("./src")?.collect()?;
+//! for entry in results.iter() {
+//!     println!("{}", entry.path().display());
+//! }
+//! # Ok::<(), zlob::ZlobError>(())
+//! ```
+//!
+//! Stream entries instead of materializing them, walkdir-style:
+//!
+//! ```no_run
+//! use zlob::walk::{WalkBuilder, WalkFlags, WalkState};
+//!
+//! WalkBuilder::new(".")?
+//!     .options(WalkFlags::empty()) // no gitignore, include hidden
+//!     .run(|entry| {
+//!         println!("{}", entry.path().display());
+//!         WalkState::Continue
+//!     })?;
+//! # Ok::<(), zlob::ZlobError>(())
+//! ```
 //! ## Flags
 //!
 //! For most use cases, use [`ZlobFlags::RECOMMENDED`]:
@@ -138,6 +160,7 @@
 //!     Ok(None) => println!("No files matched"),
 //!     Err(ZlobError::Aborted) => println!("Operation aborted"),
 //!     Err(ZlobError::NoSpace) => println!("Out of memory"),
+//!     Err(e) => println!("Error: {e}"),
 //! }
 //! ```
 
@@ -147,6 +170,7 @@ mod indicies;
 mod match_paths;
 mod pattern;
 mod slices;
+pub mod walk;
 mod zlob;
 
 // Raw FFI bindings - use stub for docs.rs, generated bindings otherwise

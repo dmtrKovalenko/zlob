@@ -34,8 +34,42 @@ pub fn matchGlobSimple(pattern: []const u8, path: []const u8) bool {
     return matchSegmentsSimple(pat_segments, path_segments, 0, 0);
 }
 
+pub fn matchGlobSimplePresplit(pat_segments: [][]const u8, path: []const u8) bool {
+    var path_segments_buf: [compiled_pattern.MAX_PATH_COMPONENTS][]const u8 = undefined;
+    const path_segments = splitPathComponentsNormalized(path, &path_segments_buf) orelse return false;
+    return matchSegmentsSimple(pat_segments, path_segments, 0, 0);
+}
+
+pub fn matchGlobSimplePresplitAnyPrefix(pat_segments: [][]const u8, path: []const u8) bool {
+    var path_seg_buf: [compiled_pattern.MAX_PATH_COMPONENTS][]const u8 = undefined;
+    const path_segs = splitPathComponentsNormalized(path, &path_seg_buf) orelse return false;
+    if (matchSegmentsSimple(pat_segments, path_segs, 0, 0)) return true;
+    for (1..path_segs.len) |prefix_len| {
+        if (matchSegmentsSimple(pat_segments, path_segs[0..prefix_len], 0, 0)) return true;
+    }
+    return false;
+}
+pub fn matchGlobSimplePresplitWithPath(
+    pat_segments: [][]const u8,
+    path_segments: [][]const u8,
+) bool {
+    return matchSegmentsSimple(pat_segments, path_segments, 0, 0);
+}
+
+/// Like [`matchGlobSimplePresplitAnyPrefix`] but accepts pre-split path segments
+pub fn matchGlobSimplePresplitAnyPrefixWithPath(
+    pat_segments: [][]const u8,
+    path_segments: [][]const u8,
+) bool {
+    if (matchSegmentsSimple(pat_segments, path_segments, 0, 0)) return true;
+    for (1..path_segments.len) |prefix_len| {
+        if (matchSegmentsSimple(pat_segments, path_segments[0..prefix_len], 0, 0)) return true;
+    }
+    return false;
+}
+
 /// Core recursive segment matching for `**` patterns (no allocation, no PERIOD).
-fn matchSegmentsSimple(
+pub fn matchSegmentsSimple(
     pattern_segments: []const []const u8,
     path_segments: []const []const u8,
     initial_pat_idx: usize,

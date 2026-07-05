@@ -8,6 +8,7 @@ const zlob_flags = @import("zlob_flags");
 const walker = @import("walker");
 const fnmatch_impl = @import("fnmatch.zig");
 const utils = @import("utils.zig");
+
 // std.c is only available on POSIX systems with libc
 const has_libc = builtin.os.tag != .windows and builtin.link_libc;
 const c = if (has_libc) std.c else struct {
@@ -64,6 +65,7 @@ pub const containsExtglob = fnmatch_impl.containsExtglob;
 pub const simdFindChar = fnmatch_impl.simdFindChar;
 pub const gitignore = @import("gitignore.zig");
 pub const GitIgnore = gitignore.GitIgnore;
+pub const walk = @import("walker/walker.zig");
 
 pub const zlob_dirent_t = extern struct {
     d_name: [*:0]const u8, // Null-terminated entry name
@@ -1854,9 +1856,9 @@ fn globRecursiveWalk(
     if (rec_pattern.gitignore_filter) |gi| {
         walker_config.dir_filter = .{
             .filterDirFn = struct {
-                fn filter(ctx: *anyopaque, rel_path: []const u8, _: []const u8) bool {
+                fn filter(ctx: *anyopaque, relative_path: []const u8, _: []const u8) bool {
                     const gi_ptr: *GitIgnore = @ptrCast(@alignCast(ctx));
-                    return !gi_ptr.shouldSkipDirectory(rel_path);
+                    return !gi_ptr.shouldSkipDirectory(relative_path);
                 }
             }.filter,
             .context = @ptrCast(gi),
@@ -2087,8 +2089,8 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
 
             if (gitignore_filter) |gi| {
                 const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
-                const rel_path = if (use_dirname) path_result.buf[0..base_len] else name;
-                if (gi.isIgnored(rel_path, is_dir)) {
+                const relative_path = if (use_dirname) path_result.buf[0..base_len] else name;
+                if (gi.isIgnored(relative_path, is_dir)) {
                     allocator.free(path_result.buf);
                     continue;
                 }

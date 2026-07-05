@@ -52,7 +52,12 @@ test "libzlob.a has no TLS symbols above the static-TLS budget" {
     var it = try ArchiveIterator.init(contents);
     while (try it.next()) |member| {
         if (!std.mem.startsWith(u8, member.data, "\x7fELF")) continue;
-        try scanElfTls(member.data, &over_budget, &worst_name, &worst_size);
+        // ar(5) members are only 2-byte aligned; copy to an 8-aligned buffer
+        // so the ELF header/section pointer casts below are valid.
+        const aligned = try testing.allocator.alignedAlloc(u8, .@"8", member.data.len);
+        defer testing.allocator.free(aligned);
+        @memcpy(aligned, member.data);
+        try scanElfTls(aligned, &over_budget, &worst_name, &worst_size);
     }
 
     if (over_budget > 0) {

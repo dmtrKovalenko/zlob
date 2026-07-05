@@ -30,6 +30,9 @@ pub const ZLOB_RECOMMENDED: c_int =
 pub const ZLOB_NOSPACE: c_int = 1;
 pub const ZLOB_ABORTED: c_int = 2;
 pub const ZLOB_NOMATCH: c_int = 3;
+pub const ZLOB_READ_FAILED: c_int = 4;
+pub const ZLOB_PERMISSION_DENIED: c_int = 5;
+pub const ZLOB_NAME_TOO_LONG: c_int = 6;
 
 pub const ZLOB_DT_UNKNOWN: c_uchar = 0;
 pub const ZLOB_DT_DIR: c_uchar = 4;
@@ -216,5 +219,87 @@ unsafe extern "C" {
         path_count: usize,
         flags: c_int,
         out: *mut zlob_indices_t,
+    ) -> c_int;
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zlob_walk_options_t {
+    pub flags: u32,
+    pub meta_mask: u32,
+    pub threads: u16,
+    pub max_depth: u16,
+    pub errfunc: Option<unsafe extern "C" fn(epath: *const c_char, eerrno: c_int) -> c_int>,
+    pub pattern: *const c_char,
+    pub pattern_flags: u32,
+    /// Caller-supplied .gitignore document, one rule per line, NUL-terminated.
+    /// Null = none. Layered as the *deepest* node in the ignore chain so its
+    /// `!negation` rules override the project's `.gitignore`.
+    pub extra_ignore: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zlob_walk_entry_t {
+    pub path: *const c_char,
+    pub path_len: usize,
+    pub relative_offset: u32,
+    pub basename_offset: u32,
+    pub kind: u8,
+    pub depth: u16,
+    pub worker_id: u16,
+    pub meta_valid: u32,
+    pub size: u64,
+    pub mtime_ns: i64,
+    pub atime_ns: i64,
+    pub ctime_ns: i64,
+    pub btime_ns: i64,
+    pub inode: u64,
+    pub nlink: u32,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zlob_walk_result_t {
+    pub entries: *mut zlob_walk_entry_t,
+    pub count: usize,
+    pub _storage: *mut core::ffi::c_void,
+}
+
+pub type zlob_walk_cb = Option<
+    unsafe extern "C" fn(entry: *const zlob_walk_entry_t, ctx: *mut core::ffi::c_void) -> c_int,
+>;
+
+unsafe extern "C" {
+    pub fn zlob_walk(
+        root: *const c_char,
+        options: *const zlob_walk_options_t,
+        cb: zlob_walk_cb,
+        ctx: *mut core::ffi::c_void,
+        out_rules: *mut *mut core::ffi::c_void,
+    ) -> c_int;
+
+    pub fn zlob_walk_max_workers(options: *const zlob_walk_options_t) -> usize;
+
+    pub fn zlob_ignore_rules_free(rules: *mut core::ffi::c_void);
+
+    pub fn zlob_walk_collect(
+        root: *const c_char,
+        options: *const zlob_walk_options_t,
+        out: *mut zlob_walk_result_t,
+    ) -> c_int;
+
+    pub fn zlob_walk_result_free(result: *mut zlob_walk_result_t);
+
+    pub fn zlob_walk_result_ignore_rules(
+        result: *const zlob_walk_result_t,
+    ) -> *mut core::ffi::c_void;
+
+    pub fn zlob_ignore_rules_match_path(
+        rules: *mut core::ffi::c_void,
+        path: *const c_char,
     ) -> c_int;
 }
