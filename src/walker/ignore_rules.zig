@@ -19,7 +19,7 @@ pub const IgnoreRules = struct {
     pub fn isIgnoredPath(self: *const IgnoreRules, path: []const u8) bool {
         var normlaized_buffer: [MAX_PATH]u8 = undefined;
         const path_slash: []const u8 = if (mem.indexOfScalar(u8, path, '\\')) |_| blk: {
-            if (path.len > normlaized_buffer.len) return true; // pathologically long → ignored
+            if (path.len > normlaized_buffer.len) return true; // pathologically long -> ignored
             @memcpy(normlaized_buffer[0..path.len], path);
             for (normlaized_buffer[0..path.len]) |*b| {
                 if (b.* == '\\') b.* = '/';
@@ -33,7 +33,7 @@ pub const IgnoreRules = struct {
         else
             path_slash;
 
-        // Split into (root-relative form, absolute form for lstat).
+        // Split into (root-relative form, absolute form for lstat)
         // Absolute inputs start with '/' on Unix; on Windows we detect both
         // `/foo/bar` (still absolute here since our slash-normalize ran) and
         // `C:/foo/bar` drive-prefixed forms.

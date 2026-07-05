@@ -1,24 +1,8 @@
-//! macOS bulk directory scanner built on getattrlistbulk(2).
-//!
-//! One syscall returns a whole batch of directory entries WITH the requested
-//! metadata (size, times, ids, mode, ...) — no per-entry stat. The attribute
-//! mask is built at runtime from walk.MetaMask so callers only pay for the
-//! attributes they ask for.
-//!
-//! Attributes are returned packed, 4-byte aligned, in the canonical order
-//! documented in getattrlist(2): ATTR_CMN_RETURNED_ATTRS first, then
-//! ATTR_CMN_ERROR, then the remaining common attributes in ascending bit
-//! order, then the dir group (for directories) or file group (for anything
-//! else). We do not pass FSOPT_PACK_INVAL_ATTRS: the per-entry returned set
-//! is the source of truth for which attributes are present, which also
-//! handles filesystems that don't support a given attribute.
-
 const std = @import("std");
 const builtin = @import("builtin");
 const walk = @import("types.zig");
 
 pub const supported = builtin.os.tag == .macos and builtin.link_libc;
-
 pub const AttrList = extern struct {
     bitmapcount: u16,
     reserved: u16 = 0,
@@ -76,15 +60,9 @@ extern "c" fn getattrlistbulk(
     options: u64,
 ) c_int;
 
-/// Raw 64-bit-inode directory read. This is the syscall wrapper `readdir`
-/// itself dispatches to under 64-bit inodes (the public `getdirentries`
-/// deliberately link-errors there). Calling it directly on the directory fd
-/// avoids the `dup`/`fstat`/`fstatfs`/`fcntl`/`closedir` overhead that
-/// `fdopendir` pays per directory — roughly four extra syscalls each.
 extern "c" fn __getdirentries64(fd: c_int, buf: [*]u8, bufsize: usize, basep: *u64) isize;
 
 /// macOS `struct dirent` (64-bit inode): ino(8) seekoff(8) reclen(2)
-/// namlen(2) type(1) name[]. The name begins at byte 21 of each record.
 pub const DIRENT_TYPE_OFF = 20;
 pub const DIRENT_NAME_OFF = 21;
 
@@ -95,8 +73,7 @@ pub const DType = struct {
     pub const LNK: u8 = 10;
 };
 
-/// One getdirentries64 batch. `name`s point into `buf` and are valid until
-/// the next `refill`.
+/// One getdirentries64 batch
 pub const DirEntries = if (!supported) struct {} else struct {
     fd: c_int,
     buf: []align(8) u8,
@@ -136,7 +113,7 @@ pub const DirEntries = if (!supported) struct {} else struct {
             const reclen = readUnaligned(u16, self.buf, rec + 16);
             const namlen = readUnaligned(u16, self.buf, rec + 18);
             const d_type = self.buf[rec + DIRENT_TYPE_OFF];
-            // A zero reclen would spin forever; only a malformed fs yields one.
+            // A zero reclen would spin forever. only a malformed fs yields one.
             if (reclen < DIRENT_NAME_OFF or rec + reclen > self.len) return error.ReadFailed;
             self.pos = rec + reclen;
 
@@ -168,17 +145,11 @@ inline fn tsToNs(ts: Timespec) i64 {
 }
 
 pub const ScanError = error{
-    /// Filesystem does not support getattrlistbulk — caller must fall back
-    /// to readdir+fstatat.
-    Unsupported,
+    Unsupported, // need to fallback to fstat
     PermissionDenied,
     ReadFailed,
 };
 
-/// Streaming scanner over one directory fd. Names returned by `next()` point
-/// into `buf` and are invalidated by the next kernel refill — callers must
-/// copy them out before draining the batch (the walker copies into its
-/// per-directory scratch arena).
 pub const BulkScanner = if (!supported) struct {} else struct {
     fd: std.c.fd_t,
     buf: []align(8) u8,
@@ -265,7 +236,7 @@ pub const BulkScanner = if (!supported) struct {} else struct {
             if (ret.commonattr & ATTR_CMN_ERROR != 0) {
                 const entry_err = readUnaligned(u32, self.buf, p);
                 p += 4;
-                // Entry-level error (e.g. dataless file fault): skip it.
+                // Entry-level error (eg dataless file fault): skip it.
                 if (entry_err != 0) continue :outer;
             }
 
