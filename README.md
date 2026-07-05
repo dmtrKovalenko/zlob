@@ -4,13 +4,11 @@
   <img src="./assets/zlob-logo.png" alt="zlob logo" />
 </p>
 
-100% POSIX and glibc compatible globbing library for C, Zig, and Rust that is **faster** and supports **all the modern globbing formats** and gitignore
+100% POSIX and glibc compatible globbing & file alking library for C, Zig, and Rust that is **SIMD-first**, and **per platform-optimized** and supports **all the modern globbing formats**
 
 ---
 
-zlob is a C library, zig library and a rust crate that makes globbing fast. Why? Because `glob()` implemented by glibc sucks. It is very outdated and slow. Remember when you last time read all the flags available exposed by glibc `glob(3)`? I am pretty sure you never read those because by default POSIX glob requires sorting of results list which is _VERY_ slow in glibc implementation, it doesn't implement very basic patterns like `./**/*.c` and requires to pass a flags to enable bracing support like `./{a,b}/*.c`.
-
-In short libc's glob is unusable, so I wanted to make a library that is 100% POSIX and glibc compatible, that supports all the features modern glob implementation needed and is faster than glibc. So here is zlob, a little bit about it:
+zlob is a C library, zig library and a rust crate that makes globbing and file walking fast. Why? Becuase the available implementations are just either slow or uncomplete. Zlob is a feature-full file walker that supports all the platform specific nuances, gitignore, multicore file walking, 120% of avialable wildcard syntax and many more:
 
 - 100% POSIX and glibc compatible with all the flags and features supported
 - Faster than glibc up to 10x in specific cases and generally 1.2-1.7x faster. See [benchmarks](#Benchmarks)
@@ -25,7 +23,7 @@ In short libc's glob is unusable, so I wanted to make a library that is 100% POS
     - uses ntdll directly on windows
     - windows paths & patterns are normalized at compile time (both "/" and "\" accepted and treated the same in patterns)
 
-Used and built for [fff](https://github.com/dmtrKovalenko/fff) loved by more projects!
+Built for [fff](https://github.com/dmtrKovalenko/fff) loved by many more amazing projects!
 
 ## Why it is faster?
 
@@ -182,47 +180,6 @@ Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves l
 
 In addition to this zlob exposes `zlob_at` function that will open specific directory instead of requiring to manipulate CWD
 
-## Symlinks and `**`
-
-By default `**` does **not** descend into symlinked directories. This matches
-bash `globstar`, zsh `**`, and `walkdir` — the dominant `**` implementations.
-Symlinks are still matched by name like any other entry; only the recursion
-stops at them. POSIX `glob(3)` has no `**` at all, so there is no "glibc
-default" to diverge from here.
-
-Set `ZLOB_FOLLOW_SYMLINKS` to descend into symlinked directories. zlob keeps a
-`(dev, ino)` visited-set so it **never loops** and **never emits the same
-physical file twice**: each real directory is traversed at most once for the
-whole walk.
-
-This is a deliberate difference from `glob` crate / `nu-glob`, which follow
-symlinks with no cycle tracking. On trees where one directory is reachable
-through several symlinks (e.g. a Bazel `bazel-bin` / `bazel-out` /
-`bazel-<workspace>` layout, all pointing into the same cache), those tools emit
-every aliased path — inflating their count several-fold and looping until
-`PATH_MAX` on a true cycle. zlob returns the de-duplicated set instead.
-
-## MatchPaths mode
-
-Match paths allowing you to submit a pointer of C strings or rust/zig-like slices and get the matches pointer back.
-
-```c
-const char *paths[] = {
-    "src/main.c", "src/utils.c", "src/tests/test.h", "readme.md", "src/lib.c",
-};
-const size_t path_count = sizeof(paths) / sizeof(paths[0]);
-
-zlob_t pzlob;
-int result = zlob_match_paths("**/*.c", paths, path_count, ZLOB_RECOMMENDED, &pzlob);
-
-// Make sure that this does NOT free the input paths, the pointer to the pats are owned by the caller
-// and have to be freed by the caller only after the zlob_t struct is freed to prevent dangling pointer
-zlobfree(&pzlob);
-```
-
-This allows a very fast SIMD processing of the paths and supports **NOT ALL** the features of the standard FS globbing except `ALTDIRFUNC` which is not applicable because this mode is done to avoid using ALTDIRFUNC all along. Make sure that if you will use `ZLOB_TILDE` flag the paths input have to be absolute. Other flags like nomagic might not work as expected because they generally make very little sense.
-
-
 ## File walker 
 
 zlob also exposes its traversal engine directly: a parallel recursive file
@@ -231,19 +188,22 @@ walker designed to replace the Rust `walkdir` and `ignore` crates, available fro
 - **Parallel**: one directory = one task on a work stealing pool
 - **Bulk metadata**: pass a mask of the attributes you need (size, mtime,
   inode, mode, ...) and only those are matched in a platform-specific optimized way
+- **Only required metadata**: you likely don't need all the available metadata, zlob optimizes fstat to get only what you need.
 - **.gitignore first**: Specifically optimized to handle file ignoring first
   P.S. Also let's use reuse assembled (incl nested) gitignore rules after the walk finished
 
-1. **Collect** — `build()` / `collect()` / `zlob_walk_collect()` - efficinet way to collect the results in to the memory if you need to store them
-2. **Do work per entry** — `run()` / `zlob_walk()` - call the callback per the matched entries (for grep style print on search and other workflows when you don't need to store the files list)
+1. **Collect** - efficinet way to collect the results in to the memory if you need to store them
+2. **Run** - call the callback per the matched entries (for grep style print on search and other workflows when you don't need to store the files list)
 
 Traversal can also be narrowed with a one or many (z)glob patterns.
+
+Here is how you can use it from different languages, starting with Rust:
 
 ```rust
 use zlob::walk::{WalkBuilder, WalkFlags, WalkState, WalkMetadata};
 
-// Materialize everything in one FFI call (fastest):
-let results = WalkBuilder::new("/path/tofolder")
+// fastest: get all the results allocated
+let results = WalkBuilder::new("/path/to/folder")
     // request metadata
     .metadata(WalkMetadata::SIZE | WalkMetadata::MTIME)
     .build()?;
@@ -252,8 +212,8 @@ for entry in results.iter() {
     println!("{} {:?}", entry.path().display(), entry.size());
 }
 
-// Raw walkdir-style traversal (no .gitignore, hidden shown):
-WalkBuilder::new(".").options(WalkFlags::empty()).run(|entry| {
+// Raw walkdir/ignore-style traversal (skip gitignore files):
+WalkBuilder::new(".").options(WalkFlags::GITIGNORE).run(|entry| {
     println!("{}", entry.path().display());
 
     WalkState::Continue
@@ -300,6 +260,46 @@ Measured on a real 185k-entry repository (warm cache, i7-14700K, best of 5,
 | walk + size/mtime metadata | **24.3 ms** | walkdir + `metadata()` 226 ms |
 
 Entry counts agree with `walkdir` and `ignore` exactly on the same trees.
+
+## Symlinks and `**`
+
+By default `**` does **not** descend into symlinked directories. This matches
+bash `globstar`, zsh `**`, and `walkdir` — the dominant `**` implementations.
+Symlinks are still matched by name like any other entry; only the recursion
+stops at them. POSIX `glob(3)` has no `**` at all, so there is no "glibc
+default" to diverge from here.
+
+Set `ZLOB_FOLLOW_SYMLINKS` to descend into symlinked directories. zlob keeps a
+`(dev, ino)` visited-set so it **never loops** and **never emits the same
+physical file twice**: each real directory is traversed at most once for the
+whole walk.
+
+This is a deliberate difference from `glob` crate / `nu-glob`, which follow
+symlinks with no cycle tracking. On trees where one directory is reachable
+through several symlinks (e.g. a Bazel `bazel-bin` / `bazel-out` /
+        `bazel-<workspace>` layout, all pointing into the same cache), those tools emit
+every aliased path — inflating their count several-fold and looping until
+`PATH_MAX` on a true cycle. zlob returns the de-duplicated set instead.
+
+## MatchPaths mode
+
+Match paths allowing you to submit a pointer of C strings or rust/zig-like slices and get the matches pointer back.
+
+```c
+const char *paths[] = {
+    "src/main.c", "src/utils.c", "src/tests/test.h", "readme.md", "src/lib.c",
+};
+const size_t path_count = sizeof(paths) / sizeof(paths[0]);
+
+zlob_t pzlob;
+int result = zlob_match_paths("**/*.c", paths, path_count, ZLOB_RECOMMENDED, &pzlob);
+
+// Make sure that this does NOT free the input paths, the pointer to the pats are owned by the caller
+// and have to be freed by the caller only after the zlob_t struct is freed to prevent dangling pointer
+zlobfree(&pzlob);
+```
+
+This allows a very fast SIMD processing of the paths and supports **NOT ALL** the features of the standard FS globbing except `ALTDIRFUNC` which is not applicable because this mode is done to avoid using ALTDIRFUNC all along. Make sure that if you will use `ZLOB_TILDE` flag the paths input have to be absolute. Other flags like nomagic might not work as expected because they generally make very little sense.
 
 ## Compilation
 

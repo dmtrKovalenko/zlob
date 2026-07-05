@@ -44,7 +44,7 @@ bitflags! {
         /// With [`Self::GITIGNORE`]: still descend into `.git` directories.
         const KEEP_GIT_DIR    = 1 << 6;
 
-        /// `ignore`-crate-style defaults: [`Self::GITIGNORE`] | [`Self::SKIP_HIDDEN`].
+        /// `ignore`-crate like defaults: [`Self::GITIGNORE`] | [`Self::SKIP_HIDDEN`]
         const RECOMMENDED     = Self::GITIGNORE.bits() | Self::SKIP_HIDDEN.bits();
     }
 }
