@@ -4,11 +4,11 @@
   <img src="./assets/zlob-logo.png" alt="zlob logo" />
 </p>
 
-100% POSIX and glibc compatible globbing & file alking library for C, Zig, and Rust that is **SIMD-first**, and **per platform-optimized** and supports **all the modern globbing formats**
+100% POSIX and glibc compatible globbing & file walking library for C, Zig, and Rust that is **SIMD-first** and **platform-optimized**, and supports **all modern globbing formats**.
 
 ---
 
-zlob is a C library, zig library and a rust crate that makes globbing and file walking fast. Why? Becuase the available implementations are just either slow or uncomplete. Zlob is a feature-full file walker that supports all the platform specific nuances, gitignore, multicore file walking, 120% of avialable wildcard syntax and many more:
+zlob is a C library, zig library and a rust crate that makes globbing and file walking fast. Why? Because the available implementations are just either slow or uncomplete. Zlob is a feature-full file walker that supports all the platform specific nuances, gitignore, multicore file walking, 120% of available wildcard syntax and many more:
 
 - 100% POSIX and glibc compatible with all the flags and features supported
 - Faster than glibc up to 10x in specific cases and generally 1.2-1.7x faster. See [benchmarks](#Benchmarks)
@@ -27,15 +27,15 @@ Built for [fff](https://github.com/dmtrKovalenko/fff) loved by many more amazing
 
 ## Why it is faster?
 
-zlob is using SIMD first implementation. It is a primary reason it is written in zig to have a native portable SIMD support at a languages level, it significantly reduces certain bottlenecks. But the primary reason of speed is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directories and making lef matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
+zlob is using SIMD first implementation. It is a primary reason it is written in zig to have a native portable SIMD support at a languages level, it significantly reduces certain bottlenecks. But the primary reason of speed is that zlob is firstly analyzes the pattern and then matches paths to this patterns making patterns like `./drivers/**/*.c` parsed to `[drivers]` and `*.c` which makes it not spend the time on opening useless directories and making leaf matches like suffix for small extensions and other hot and common patterns to be faster because optimized for a hot branch invariant.
 
 One of my favourite optimizations for this project is patterns like `./**/*.{c,rs,zig}` this is usually the main reason glob is used and this pattern is the most optimized in the zlob implementation:
 
 - recursive worker is using `getdents64` syscall directly which dramatically improves directory listing
-- gitignore implementation allows use to optionally skip large subdirectories out of the box
-- and the actual `*.{c,rs,zig}` pattern is precompiled down the the SIMD bitmask matching that allows to match 3 extension at once
+- gitignore implementation allows us to optionally skip large subdirectories out of the box
+- and the actual `*.{c,rs,zig}` pattern is precompiled down to the SIMD bitmask matching that allows to match 3 extension at once
 
-Checkout [benchmarks](##Benchmarks) yourself.
+Checkout [benchmarks](#Benchmarks) yourself.
 
 ## Compatibility
 
@@ -47,7 +47,7 @@ Any pattern you may think of should be already supported including gnu symbol cl
 
 Here are some examples:
 
-| Pattern                   | Requred flags  | Description                                       |
+| Pattern                   | Required flags | Description                                       |
 | ------------------------- | -------------- | ------------------------------------------------- |
 | `*.c`                     |                | Match all `.c` in one dir                         |
 | `./**/*.c`                |                | Match all `.c` in current and subdirs             |
@@ -77,8 +77,7 @@ glob_t globbuf;
 int ret = zlob("*.c", ZLOB_RECOMMENDED, NULL, &globbuf);
 
 if (ret == 0) {
-    for (size_t i = 0; i < globbuf.gl_pathc; i
-++) {
+    for (size_t i = 0; i < globbuf.gl_pathc; i++) {
         printf("%s\n", globbuf.gl_pathv[i]);
     }
     zlobfree(&globbuf);
@@ -153,7 +152,7 @@ fn main() -> Result<(), zlob::ZlobError> {
 
 ## Flags
 
-Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves like a modern glob implementation without sorting the output results, and enabling all the modern features that you might need. Additional flags that might be used are:
+Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behave like a modern glob implementation without sorting the output results, and enables all the modern features that you might need. Additional flags that can be used are:
 
 ### Included in ZLOB_RECOMMENDED
 
@@ -164,7 +163,7 @@ Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behaves l
 
 ### Not included in ZLOB_RECOMMENDED
 
-- `ZLOB_GITIGNORE` - reads the `.gitignore` fil in the scanning directory first and uses as a prefilter
+- `ZLOB_GITIGNORE` - reads the `.gitignore` file in the scanning directory first and uses as a prefilter
 - `ZLOB_PERIOD` - Allows to match hidden files using `*` and `?` patterns, by default these patterns do not match hidden files
 - `ZLOB_EXTGLOB` - enable support for bash extglob patterns like `@(pattern-list)`, `!(pattern-list)`, `?(pattern-list)`, `*(pattern-list)` and `+(pattern-list)`
 
@@ -192,7 +191,7 @@ walker designed to replace the Rust `walkdir` and `ignore` crates, available fro
 - **.gitignore first**: Specifically optimized to handle file ignoring first
   P.S. Also let's use reuse assembled (incl nested) gitignore rules after the walk finished
 
-1. **Collect** - efficinet way to collect the results in to the memory if you need to store them
+1. **Collect** - efficient way to collect the results in to the memory if you need to store them
 2. **Run** - call the callback per the matched entries (for grep style print on search and other workflows when you don't need to store the files list)
 
 Traversal can also be narrowed with a one or many (z)glob patterns.
@@ -294,7 +293,7 @@ const size_t path_count = sizeof(paths) / sizeof(paths[0]);
 zlob_t pzlob;
 int result = zlob_match_paths("**/*.c", paths, path_count, ZLOB_RECOMMENDED, &pzlob);
 
-// Make sure that this does NOT free the input paths, the pointer to the pats are owned by the caller
+// Make sure that this does NOT free the input paths, the pointer to the paths are owned by the caller
 // and have to be freed by the caller only after the zlob_t struct is freed to prevent dangling pointer
 zlobfree(&pzlob);
 ```
@@ -311,7 +310,7 @@ make test
 make install <PREFIX>
 ```
 
-I know it might be annoying to install zig but zig's linker is currently a decent way to cross compiler any native code so I would definitely recommend trying it out.
+I know it might be annoying to install zig but zig's linker is currently a decent way to cross compile any native code so I would definitely recommend trying it out.
 
 ## Benchmarks
 
@@ -343,11 +342,10 @@ The script just sets `REPO=` and runs `cargo bench --bench glob_comparison`. The
 
 ## Naming
 
-This is my favourite part. `zlob` is not just zig zlob but also it means redneck in a varios Eastern-European languages but in polish it means "a manger", which I find very funny.
+This is my favourite part. `zlob` is not just zig zlob but also it means redneck in a various Eastern-European languages but in Polish it means "a manger", which I find very funny.
 
 ## License
 
 zlob is licensed under MIT license, see [LICENSE](./LICENSE.md) file for more details.
 
 P.S. No AI was used in the making of this README.md file thank you for reading it till the end.
-
