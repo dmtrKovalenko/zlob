@@ -18,6 +18,30 @@ typedef __UINT64_TYPE__ uint64_t;\n\
 typedef __INTPTR_TYPE__ intptr_t;\n\
 typedef __UINTPTR_TYPE__ uintptr_t;\n";
 
+#[derive(Debug)]
+struct BindgenCallbacks {
+    out_dir: PathBuf,
+}
+
+impl bindgen::callbacks::ParseCallbacks for BindgenCallbacks {
+    fn header_file(&self, filename: &str) {
+        self.include_file(filename);
+    }
+
+    fn include_file(&self, filename: &str) {
+        // becuase we have to write libclang header for docs generation, but because we write it on
+        // every build we invalidate the cargo builds on our own, so we want to avoid listing those
+        // files in rerun-if-changed intrinsic
+        if !std::path::Path::new(filename).starts_with(&self.out_dir) {
+            println!("cargo:rerun-if-changed={filename}");
+        }
+    }
+
+    fn read_env_var(&self, key: &str) {
+        println!("cargo:rerun-if-env-changed={key}");
+    }
+}
+
 fn main() {
     // docs.rs sets this env var; skip native build since Zig isn't available there
     if env::var("DOCS_RS").is_ok() {
@@ -27,9 +51,6 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 
-    // Find the zlob project root and determine source directory:
-    // 1. For local dev: parent directory, sources in "src"
-    // 2. For published crate: manifest_dir itself, sources in "zig-src"
     let (zlob_root, zig_src_dir) = if let Some(parent) = manifest_dir.parent() {
         if parent.join("build.zig").exists() && parent.join("include/zlob.h").exists() {
             // Local development - use parent directory with default "src"
@@ -75,12 +96,9 @@ fn main() {
     let target = env::var("TARGET").unwrap();
     let host = env::var("HOST").unwrap();
 
-    // zlob.h only needs size_t and the fixed-width integer types. Instead of
-    // relying on the target's libc/toolchain headers (which are missing or
-    // inconsistent across cross-compile setups: host glibc lacks the target's
-    // bits/libc-header-start.h, and Zig's freestanding stdint.h references
-    // undefined macros), we point clang at a self-contained stub that defines
-    // exactly those types. `-nostdinc` guarantees only our stub is used.
+    // zlob.h only needs size_t and the fixed-width integer types.
+    // Instead of relying on the target's libc/toolchain headers which will be missing
+    // in case of real cross compilation and docs generation
     let stub_dir = out_dir.join("bindgen-stubs");
     std::fs::create_dir_all(&stub_dir).expect("create bindgen stub dir");
     std::fs::write(stub_dir.join("stddef.h"), STDDEF_STUB).expect("write stddef stub");
@@ -93,7 +111,9 @@ fn main() {
         .use_core()
         .generate_comments(false)
         .default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
+        .parse_callbacks(Box::new(BindgenCallbacks {
+            out_dir: out_dir.clone(),
+        }));
 
     // Give clang the target triple so integer/pointer widths match the target.
     if target != host {
