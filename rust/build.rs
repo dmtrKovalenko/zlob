@@ -142,22 +142,15 @@ fn main() {
         panic!("Failed to run zig. Please ensure zig is installed and accessible.");
     }
 
-    // In CI, always map through rust_target_to_zig() so the produced artifact
-    // uses the generic baseline CPU for that ISA. Otherwise Zig's "native"
-    // would bake in whatever SIMD the CI runner happens to have (e.g.
-    // AVX-512 on some Intel SKUs), and downstream users on older CPUs hit
-    // SIGILL / "Illegal instruction" at runtime.
-    //
-    // For Windows targets, always map through rust_target_to_zig() regardless
-    // of CI: using "native" on Windows would cause Zig to resolve to GNU/MinGW
-    // ABI (because Zig ships its own MinGW libc), but Rust's MSVC linker
-    // expects MSVC symbols (e.g., __chkstk vs ___chkstk_ms).
-    let in_ci = env::var("CI").is_ok();
-    let zig_target = if target == host && !target.contains("windows") && !in_ci {
-        "native"
-    } else {
-        rust_target_to_zig(&target)
-    };
+    // Windows note: "native" would also resolve to GNU/MinGW ABI (Zig ships
+    // its own MinGW libc), but Rust's MSVC linker expects MSVC symbols
+    // (__chkstk vs ___chkstk_ms), so the explicit mapping is required there
+    // regardless.
+    let zig_target = rust_target_to_zig(&target);
+
+    // allow to ovveride the cpu to a specific architecture e.g. x86_64v3 for AVX2
+    println!("cargo:rerun-if-env-changed=ZLOB_ZIG_CPU");
+    let zig_cpu = env::var("ZLOB_ZIG_CPU").ok().filter(|s| !s.is_empty());
 
     let profile = env::var("PROFILE").unwrap();
     let optimize = match profile.as_str() {
@@ -184,6 +177,13 @@ fn main() {
 
     if zig_target != "native" {
         cmd.arg(format!("-Dtarget={}", zig_target));
+    }
+
+    if let Some(cpu) = &zig_cpu {
+        cmd.arg(format!("-Dcpu={}", cpu));
+    } else if zig_target == "native" {
+        // explicitly provide a baseline cpu otherwise we might be screwed
+        cmd.arg("-Dcpu=baseline");
     }
 
     println!(
