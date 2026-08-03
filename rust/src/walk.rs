@@ -446,6 +446,18 @@ impl IgnoreRules<'_> {
         };
         unsafe { ffi::zlob_ignore_rules_match_path(self.handle, cpath.as_ptr()) != 0 }
     }
+
+    /// Match a root-relative candidate without requiring it to exist.
+    /// `is_dir` controls directory-only patterns; invalid paths fail closed.
+    pub fn is_ignored_candidate(&self, relative_path: impl AsRef<Path>, is_dir: bool) -> bool {
+        let Ok(cpath) = CString::new(path_to_bytes(relative_path.as_ref())) else {
+            return true;
+        };
+        unsafe {
+            ffi::zlob_ignore_rules_match_candidate(self.handle, cpath.as_ptr(), u8::from(is_dir))
+                != 0
+        }
+    }
 }
 
 /// Owned results of [`WalkBuilder::collect`]. Holds all paths and metadata in
@@ -1330,6 +1342,39 @@ mod tests {
         // Sanity: non-ignored path from a visited subtree.
         assert!(!rules.is_ignored("src/main.rs"));
         assert!(!rules.is_ignored("src/lib.rs"));
+    }
+
+    #[test]
+    fn candidate_matcher_reuses_all_layers_without_lstat() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("notes")).unwrap();
+        fs::write(root.join(".gitignore"), "*.root\nbuild/\n!keep.root\n").unwrap();
+        fs::write(root.join("notes/.gitignore"), "*.tmp\n!keep.tmp\n").unwrap();
+
+        let results = WalkBuilder::new(root)
+            .unwrap()
+            .base_ignore(&["*.global"])
+            .unwrap()
+            .extra_ignore(&["node_modules"])
+            .unwrap()
+            .collect()
+            .unwrap();
+        let rules = results.ignore_rules().expect("rules retained");
+
+        assert!(rules.is_ignored_candidate("future.global", false));
+        assert!(rules.is_ignored_candidate("future.root", false));
+        assert!(!rules.is_ignored_candidate("keep.root", false));
+        assert!(rules.is_ignored_candidate("notes/future.tmp", false));
+        assert!(!rules.is_ignored_candidate("notes/keep.tmp", false));
+        assert!(rules.is_ignored_candidate("node_modules/pkg/index.js", false));
+        assert!(rules.is_ignored_candidate("build", true));
+        assert!(!rules.is_ignored_candidate("build", false));
+        assert!(rules.is_ignored_candidate("", true));
+        assert!(rules.is_ignored_candidate("./future.md", false));
+        assert!(!rules.is_ignored(root));
+        assert!(!rules.is_ignored(""));
+        assert!(!root.join("future.root").exists());
     }
 
     #[test]

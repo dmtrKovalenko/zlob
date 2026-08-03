@@ -302,4 +302,10 @@ unsafe extern "C" {
         rules: *mut core::ffi::c_void,
         path: *const c_char,
     ) -> c_int;
+
+    pub fn zlob_ignore_rules_match_candidate(
+        rules: *mut core::ffi::c_void,
+        relative_path: *const c_char,
+        is_dir: u8,
+    ) -> c_int;
 }

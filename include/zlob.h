@@ -467,6 +467,14 @@ void *zlob_walk_result_ignore_rules(const zlob_walk_result_t *result);
  */
 int zlob_ignore_rules_match_path(void *rules, const char *path);
 
+/**
+ * Match a root-relative candidate without requiring it to exist.
+ * `is_dir` controls directory-only ignore patterns. Absolute paths, empty
+ * paths, and paths containing `.` or `..` components fail closed.
+ * Returns 1 when ignored (or invalid), 0 when accepted.
+ */
+int zlob_ignore_rules_match_candidate(void *rules, const char *relative_path, uint8_t is_dir);
+
 #ifdef __cplusplus
 }
 #endif

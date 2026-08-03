@@ -1004,3 +1004,12 @@ pub export fn zlob_ignore_rules_match_path(
     const r: *const walk.IgnoreRules = @ptrCast(@alignCast(rules orelse return 0));
     return @intFromBool(r.isIgnoredPath(mem.sliceTo(path, 0)));
 }
+
+pub export fn zlob_ignore_rules_match_candidate(
+    rules: ?*anyopaque,
+    relative_path: [*:0]const u8,
+    is_dir: u8,
+) c_int {
+    const r: *const walk.IgnoreRules = @ptrCast(@alignCast(rules orelse return 1));
+    return @intFromBool(r.isIgnoredCandidate(mem.sliceTo(relative_path, 0), is_dir != 0));
+}

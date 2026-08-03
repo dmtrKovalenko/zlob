@@ -70,9 +70,30 @@ pub const IgnoreRules = struct {
 
         // ignore if the path is unreachable
         const is_dir = lstatIsDir(abs_z) orelse return true;
+        if (relative.len == 0) return false;
+        return self.isIgnoredCandidate(relative, is_dir);
+    }
 
-        const basename = if (mem.lastIndexOfScalar(u8, relative, '/')) |p| relative[p + 1 ..] else relative;
-        return self.isIgnoredResolved(relative, basename, is_dir);
+    /// Match a root-relative candidate without touching the filesystem.
+    pub fn isIgnoredCandidate(self: *const IgnoreRules, path: []const u8, is_dir: bool) bool {
+        var normalized_buffer: [MAX_PATH]u8 = undefined;
+        const normalized: []const u8 = if (mem.indexOfScalar(u8, path, '\\')) |_| blk: {
+            if (path.len > normalized_buffer.len) return true;
+            @memcpy(normalized_buffer[0..path.len], path);
+            for (normalized_buffer[0..path.len]) |*b| {
+                if (b.* == '\\') b.* = '/';
+            }
+            break :blk normalized_buffer[0..path.len];
+        } else path;
+        if (normalized.len == 0 or std.fs.path.isAbsolute(normalized)) return true;
+        var components = mem.splitScalar(u8, normalized, '/');
+        while (components.next()) |component| {
+            if (component.len == 0 or mem.eql(u8, component, ".") or mem.eql(u8, component, ".."))
+                return true;
+        }
+
+        const basename = if (mem.lastIndexOfScalar(u8, normalized, '/')) |p| normalized[p + 1 ..] else normalized;
+        return self.isIgnoredResolved(normalized, basename, is_dir);
     }
 
     fn isIgnoredResolved(
@@ -383,6 +404,42 @@ test "isIgnoredResolved: nested rules, ancestor pruning, negation, fast==slow" {
         try expectFastEqualsSlow(&rules, c, false);
         try expectFastEqualsSlow(&rules, c, true);
     }
+}
+
+test "isIgnoredCandidate: matches nonexistent files without lstat" {
+    const alloc = testing.allocator;
+    var rules: IgnoreRules = .{ .allocator = alloc };
+    defer rules.deinit();
+
+    try rules.put("", try testNode(alloc, "", "*.log\nbuild/\n!keep.log\n"));
+    (rules.by_dir.get("").?).release(alloc);
+    try rules.put("notes", try testNode(alloc, "notes", "*.tmp\n!keep.tmp\n"));
+    (rules.by_dir.get("notes").?).release(alloc);
+
+    try testing.expect(rules.isIgnoredCandidate("future.log", false));
+    try testing.expect(!rules.isIgnoredCandidate("keep.log", false));
+    try testing.expect(rules.isIgnoredCandidate("build", true));
+    try testing.expect(!rules.isIgnoredCandidate("build", false));
+    try testing.expect(rules.isIgnoredCandidate("notes/future.tmp", false));
+    try testing.expect(!rules.isIgnoredCandidate("notes/keep.tmp", false));
+    try testing.expect(rules.isIgnoredCandidate("../outside.md", false));
+    try testing.expect(rules.isIgnoredCandidate("./future.md", false));
+    try testing.expect(rules.isIgnoredCandidate("", true));
+}
+
+test "isIgnoredPath: the verified walk root remains accepted" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+
+    var rules: IgnoreRules = .{ .allocator = alloc };
+    defer rules.deinit();
+    try rules.setWalkRoot(root);
+
+    try testing.expect(!rules.isIgnoredPath(root));
+    try testing.expect(!rules.isIgnoredPath(""));
 }
 
 test "isIgnoredResolved: overflow beyond MAX_DIR_CHAIN falls back and matches" {
