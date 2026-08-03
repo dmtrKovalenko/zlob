@@ -659,6 +659,12 @@ pub const GitIgnore = struct {
             // For directory patterns, also match paths that are inside the directory
             // e.g., pattern "rust/target" should match "rust/target/debug/foo.rs"
             if (pattern.dir_only) {
+                if (pattern.segments.len > 0) {
+                    if (path_segments) |ps| {
+                        return path_matcher.matchGlobSimplePresplitAnyPrefixWithPath(pattern.segments, ps);
+                    }
+                    return path_matcher.matchGlobSimplePresplitAnyPrefix(pattern.segments, path);
+                }
                 // Check exact match first
                 if (mem.eql(u8, text, path)) return true;
                 // Check if path is inside this directory (path starts with "pattern/")

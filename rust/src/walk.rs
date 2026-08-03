@@ -118,6 +118,7 @@ pub enum WalkEntryKind {
 /// Builder for a parallel directory walk. Settings diefault to [`WalkFlags::RECOMMENDED`]
 #[derive(Debug, Clone)]
 pub struct WalkBuilder {
+    base_ignore: Option<CString>,
     extra_ignore: Option<CString>,
     flags: WalkFlags,
     max_depth: u16,
@@ -139,6 +140,7 @@ impl WalkBuilder {
             max_depth: 0,
             pattern_flags: 0,
             pattern: None,
+            base_ignore: None,
             extra_ignore: None,
         })
     }
@@ -215,6 +217,18 @@ impl WalkBuilder {
         Ok(self)
     }
 
+    /// Root-relative ignore rules below every discovered ignore file.
+    pub fn base_ignore<S: AsRef<str>>(&mut self, patterns: &[S]) -> Result<&mut Self> {
+        let mut joined = String::new();
+        for p in patterns {
+            joined.push_str(p.as_ref());
+            joined.push('\n');
+        }
+
+        self.base_ignore = Some(CString::new(joined).map_err(|_| ZlobError::InvalidInput)?);
+        Ok(self)
+    }
+
     /// Number of worker threads. `0` (default) = one per CPU; `1` = run on the calling thread.
     pub fn threads(&mut self, n: usize) -> &mut Self {
         self.threads = n.min(u16::MAX as usize) as u16;
@@ -268,6 +282,10 @@ impl WalkBuilder {
             Some(p) => p.as_ptr(),
             None => std::ptr::null(),
         };
+        let base_ignore = match self.base_ignore.as_ref() {
+            Some(p) => p.as_ptr(),
+            None => std::ptr::null(),
+        };
 
         Ok((
             root,
@@ -279,6 +297,7 @@ impl WalkBuilder {
                 errfunc: None,
                 pattern,
                 pattern_flags: self.pattern_flags as u32,
+                base_ignore,
                 extra_ignore,
             },
         ))
@@ -426,6 +445,18 @@ impl IgnoreRules<'_> {
             return false; // an interior NUL can't match any real path
         };
         unsafe { ffi::zlob_ignore_rules_match_path(self.handle, cpath.as_ptr()) != 0 }
+    }
+
+    /// Match a root-relative candidate without requiring it to exist.
+    /// `is_dir` controls directory-only patterns; invalid paths fail closed.
+    pub fn is_ignored_candidate(&self, relative_path: impl AsRef<Path>, is_dir: bool) -> bool {
+        let Ok(cpath) = CString::new(path_to_bytes(relative_path.as_ref())) else {
+            return true;
+        };
+        unsafe {
+            ffi::zlob_ignore_rules_match_candidate(self.handle, cpath.as_ptr(), u8::from(is_dir))
+                != 0
+        }
     }
 }
 
@@ -1081,6 +1112,80 @@ mod tests {
     }
 
     #[test]
+    fn nested_directory_negation_prevents_pruning() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), "*\n!*.*\n!/**/\n").unwrap();
+        fs::create_dir_all(root.join("sub1/sub2")).unwrap();
+        fs::write(root.join("top.rs"), "").unwrap();
+        fs::write(root.join("sub1/mid.rs"), "").unwrap();
+        fs::write(root.join("sub1/sub2/deep.rs"), "").unwrap();
+
+        let results = WalkBuilder::new(root).unwrap().collect().unwrap();
+        let names: Vec<_> = results
+            .iter()
+            .filter(|entry| entry.is_file())
+            .map(|entry| entry.relative_path().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(names.contains(&"top.rs".to_string()), "got {names:?}");
+        assert!(names.contains(&"sub1/mid.rs".to_string()), "got {names:?}");
+        assert!(
+            names.contains(&"sub1/sub2/deep.rs".to_string()),
+            "got {names:?}"
+        );
+    }
+
+    #[test]
+    fn base_ignore_has_lower_precedence_than_discovered_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), "!root-keep.log\n").unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/.gitignore"), "!nested-keep.log\n").unwrap();
+        for path in [
+            "drop.log",
+            "root-keep.log",
+            "nested/drop.log",
+            "nested/nested-keep.log",
+        ] {
+            fs::write(root.join(path), "").unwrap();
+        }
+
+        let results = WalkBuilder::new(root)
+            .unwrap()
+            .base_ignore(&["*.log"])
+            .unwrap()
+            .collect()
+            .unwrap();
+        let names: Vec<_> = results
+            .iter()
+            .filter(|entry| entry.is_file())
+            .map(|entry| entry.relative_path().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(!names.contains(&"drop.log".to_string()), "got {names:?}");
+        assert!(
+            names.contains(&"root-keep.log".to_string()),
+            "got {names:?}"
+        );
+        assert!(
+            !names.contains(&"nested/drop.log".to_string()),
+            "got {names:?}"
+        );
+        assert!(
+            names.contains(&"nested/nested-keep.log".to_string()),
+            "got {names:?}"
+        );
+
+        let rules = results.ignore_rules().expect("base ignore retains rules");
+        assert!(rules.is_ignored("drop.log"));
+        assert!(!rules.is_ignored("root-keep.log"));
+        assert!(rules.is_ignored("nested/drop.log"));
+        assert!(!rules.is_ignored("nested/nested-keep.log"));
+    }
+
+    #[test]
     fn extra_ignore_adds_new_rules() {
         // No project .gitignore; extra_ignore alone supplies the ignore list.
         // Confirms many patterns batch into one matcher and surface in the
@@ -1237,6 +1342,39 @@ mod tests {
         // Sanity: non-ignored path from a visited subtree.
         assert!(!rules.is_ignored("src/main.rs"));
         assert!(!rules.is_ignored("src/lib.rs"));
+    }
+
+    #[test]
+    fn candidate_matcher_reuses_all_layers_without_lstat() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("notes")).unwrap();
+        fs::write(root.join(".gitignore"), "*.root\nbuild/\n!keep.root\n").unwrap();
+        fs::write(root.join("notes/.gitignore"), "*.tmp\n!keep.tmp\n").unwrap();
+
+        let results = WalkBuilder::new(root)
+            .unwrap()
+            .base_ignore(&["*.global"])
+            .unwrap()
+            .extra_ignore(&["node_modules"])
+            .unwrap()
+            .collect()
+            .unwrap();
+        let rules = results.ignore_rules().expect("rules retained");
+
+        assert!(rules.is_ignored_candidate("future.global", false));
+        assert!(rules.is_ignored_candidate("future.root", false));
+        assert!(!rules.is_ignored_candidate("keep.root", false));
+        assert!(rules.is_ignored_candidate("notes/future.tmp", false));
+        assert!(!rules.is_ignored_candidate("notes/keep.tmp", false));
+        assert!(rules.is_ignored_candidate("node_modules/pkg/index.js", false));
+        assert!(rules.is_ignored_candidate("build", true));
+        assert!(!rules.is_ignored_candidate("build", false));
+        assert!(rules.is_ignored_candidate("", true));
+        assert!(rules.is_ignored_candidate("./future.md", false));
+        assert!(!rules.is_ignored(root));
+        assert!(!rules.is_ignored(""));
+        assert!(!root.join("future.root").exists());
     }
 
     #[test]

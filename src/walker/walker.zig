@@ -189,13 +189,17 @@ fn walkImpl(
     }
     defer if (compiled) |*c| c.deinit();
 
+    const base_root = try buildIgnoreRoot(allocator, options.base_ignore);
+    defer if (base_root) |root_node| root_node.release(allocator);
+    if (base_root) |x| ignore_rules.setBase(x);
+
     // Extra-ignore root: caller-supplied patterns turned into a synthetic
     // .gitignore. `chainIgnored` checks it FIRST (deepest), so `!negation`
     // rules override the project's discovered .gitignore — same precedence a
     // deeper nested .gitignore would have. The walker holds one ref; the
     // IgnoreRules surface holds another so post-walk `isIgnored` matches the
     // same source set the walk used.
-    const extra_root = try buildExtraIgnoreRoot(allocator, options.extra_ignore);
+    const extra_root = try buildIgnoreRoot(allocator, options.extra_ignore);
     defer if (extra_root) |root_node| root_node.release(allocator);
     if (extra_root) |x| ignore_rules.setExtra(x);
 
@@ -246,8 +250,13 @@ fn walkImpl(
     sh.workers = workers;
     sh.threads = threads;
 
-    const root_task = try allocator.create(DirTask);
-    root_task.* = .{ .rel = try allocator.dupe(u8, ""), .depth = 0, .ignore = null, .parent = null };
+    const root_rel = try allocator.dupe(u8, "");
+    const root_task = allocator.create(DirTask) catch |err| {
+        allocator.free(root_rel);
+        return err;
+    };
+    if (base_root) |node| node.retain();
+    root_task.* = .{ .rel = root_rel, .depth = 0, .ignore = base_root, .parent = null };
     sh.queue.push(allocator, sh.io, 0, root_task) catch |err| {
         worker.freeTask(&sh, root_task);
         return err;
@@ -265,7 +274,7 @@ fn walkImpl(
 /// project-discovered rules. `doc` is a `.gitignore`-style document (one rule
 /// per line). Returns null on null/empty input. Refcount = 1; caller owns
 /// that ref and must `.release()` when done.
-fn buildExtraIgnoreRoot(allocator: Allocator, doc: ?[]const u8) WalkError!?*worker.IgnoreNode {
+fn buildIgnoreRoot(allocator: Allocator, doc: ?[]const u8) WalkError!?*worker.IgnoreNode {
     const content = doc orelse return null;
     if (content.len == 0) return null;
     var gi = try GitIgnore.parse(allocator, content);

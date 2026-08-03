@@ -12,6 +12,7 @@ const MAX_DIR_CHAIN = 64;
 pub const IgnoreRules = struct {
     allocator: std.mem.Allocator,
     by_dir: std.StringHashMapUnmanaged(*IgnoreNode) = .empty,
+    base: ?*IgnoreNode = null,
     extra: ?*IgnoreNode = null,
     walk_root: []const u8 = &.{},
 
@@ -69,9 +70,30 @@ pub const IgnoreRules = struct {
 
         // ignore if the path is unreachable
         const is_dir = lstatIsDir(abs_z) orelse return true;
+        if (relative.len == 0) return false;
+        return self.isIgnoredCandidate(relative, is_dir);
+    }
 
-        const basename = if (mem.lastIndexOfScalar(u8, relative, '/')) |p| relative[p + 1 ..] else relative;
-        return self.isIgnoredResolved(relative, basename, is_dir);
+    /// Match a root-relative candidate without touching the filesystem.
+    pub fn isIgnoredCandidate(self: *const IgnoreRules, path: []const u8, is_dir: bool) bool {
+        var normalized_buffer: [MAX_PATH]u8 = undefined;
+        const normalized: []const u8 = if (mem.indexOfScalar(u8, path, '\\')) |_| blk: {
+            if (path.len > normalized_buffer.len) return true;
+            @memcpy(normalized_buffer[0..path.len], path);
+            for (normalized_buffer[0..path.len]) |*b| {
+                if (b.* == '\\') b.* = '/';
+            }
+            break :blk normalized_buffer[0..path.len];
+        } else path;
+        if (normalized.len == 0 or std.fs.path.isAbsolute(normalized)) return true;
+        var components = mem.splitScalar(u8, normalized, '/');
+        while (components.next()) |component| {
+            if (component.len == 0 or mem.eql(u8, component, ".") or mem.eql(u8, component, ".."))
+                return true;
+        }
+
+        const basename = if (mem.lastIndexOfScalar(u8, normalized, '/')) |p| normalized[p + 1 ..] else normalized;
+        return self.isIgnoredResolved(normalized, basename, is_dir);
     }
 
     fn isIgnoredResolved(
@@ -127,45 +149,13 @@ pub const IgnoreRules = struct {
             else
                 ancestor;
 
-            if (self.extra) |x| {
-                if (x.gi.checkWithBasename(ancestor, ancestor_basename, true)) |v| {
-                    if (v) return true;
-                }
-            }
-            for (chain[0..chain_len]) |node| {
-                // A node only has scope over `ancestor` when its directory is
-                // an ancestor-or-equal of it, i.e. `relative_offset` fits.
-                if (node.relative_offset > ancestor.len) continue;
-                if (node.gi.checkWithBasename(
-                    ancestor[node.relative_offset..],
-                    ancestor_basename,
-                    true,
-                )) |v| {
-                    if (v) return true;
-                }
-            }
+            if (resolveChain(self, chain[0..chain_len], ancestor, ancestor_basename, true) == true)
+                return true;
             offset = slash + 1;
         }
 
         // now we have to check every single node in the chain as git would do it
-        if (self.extra) |x| {
-            if (x.gi.checkWithBasename(normalized, basename, is_dir)) |verdict| {
-                return verdict;
-            }
-        }
-        var i: usize = chain_len;
-        while (i > 0) {
-            i -= 1;
-            const node = chain[i];
-            if (node.gi.checkWithBasename(
-                normalized[node.relative_offset..],
-                basename,
-                is_dir,
-            )) |verdict| {
-                return verdict;
-            }
-        }
-        return false;
+        return resolveChain(self, chain[0..chain_len], normalized, basename, is_dir) orelse false;
     }
 
     fn isIgnoredPathSlow(
@@ -182,61 +172,36 @@ pub const IgnoreRules = struct {
             else
                 ancestor;
 
-            if (self.extra) |x| {
-                if (x.gi.checkWithBasename(ancestor, ancestor_basename, true)) |v| {
-                    if (v) return true;
-                }
-            }
-            if (self.by_dir.get("")) |node| {
-                if (node.gi.checkWithBasename(ancestor, ancestor_basename, true)) |v| {
-                    if (v) return true;
-                }
-            }
-            var mid_off: usize = 0;
-            while (mem.indexOfScalarPos(u8, ancestor, mid_off, '/')) |mid_slash| {
-                const mid_dir = ancestor[0..mid_slash];
-                if (self.by_dir.get(mid_dir)) |node| {
-                    if (node.gi.checkWithBasename(
-                        ancestor[node.relative_offset..],
-                        ancestor_basename,
-                        true,
-                    )) |v| {
-                        if (v) return true;
-                    }
-                }
-                mid_off = mid_slash + 1;
-            }
+            if (self.resolveSlowVerdict(ancestor, ancestor_basename, true) == true) return true;
             off = slash + 1;
         }
+        return self.resolveSlowVerdict(norm, basename, is_dir) orelse false;
+    }
 
-        if (self.extra) |x| {
-            if (x.gi.checkWithBasename(norm, basename, is_dir)) |verdict| {
-                return verdict;
-            }
+    fn resolveSlowVerdict(
+        self: *const IgnoreRules,
+        norm: []const u8,
+        basename: []const u8,
+        is_dir: bool,
+    ) ?bool {
+        if (self.extra) |node| {
+            if (node.gi.checkWithBasename(norm, basename, is_dir)) |verdict| return verdict;
         }
-
-        // Leaf resolution, deepest -> shallowest. Walk directory prefixes
-        // from the deepest slash back toward the root, then the root ruleset.
         var end: usize = norm.len;
         while (mem.lastIndexOfScalar(u8, norm[0..end], '/')) |slash| {
-            const dir = norm[0..slash];
-            if (self.by_dir.get(dir)) |node| {
-                if (node.gi.checkWithBasename(
-                    norm[node.relative_offset..],
-                    basename,
-                    is_dir,
-                )) |verdict| {
+            if (self.by_dir.get(norm[0..slash])) |node| {
+                if (node.gi.checkWithBasename(norm[node.relative_offset..], basename, is_dir)) |verdict|
                     return verdict;
-                }
             }
             end = slash;
         }
         if (self.by_dir.get("")) |node| {
-            if (node.gi.checkWithBasename(norm, basename, is_dir)) |verdict| {
-                return verdict;
-            }
+            if (node.gi.checkWithBasename(norm, basename, is_dir)) |verdict| return verdict;
         }
-        return false;
+        if (self.base) |node| {
+            if (node.gi.checkWithBasename(norm, basename, is_dir)) |verdict| return verdict;
+        }
+        return null;
     }
 
     pub fn isIgnoredInode(
@@ -278,6 +243,12 @@ pub const IgnoreRules = struct {
         if (node) |n| n.retain();
     }
 
+    pub fn setBase(self: *IgnoreRules, node: ?*IgnoreNode) void {
+        if (self.base) |old| old.release(self.allocator);
+        self.base = node;
+        if (node) |n| n.retain();
+    }
+
     pub fn setWalkRoot(self: *IgnoreRules, root: []const u8) !void {
         if (self.walk_root.len > 0) self.allocator.free(self.walk_root);
         self.walk_root = if (root.len == 0) &.{} else try self.allocator.dupe(u8, root);
@@ -288,6 +259,8 @@ pub const IgnoreRules = struct {
         self.walk_root = &.{};
         if (self.extra) |x| x.release(self.allocator);
         self.extra = null;
+        if (self.base) |x| x.release(self.allocator);
+        self.base = null;
         var it = self.by_dir.iterator();
         while (it.next()) |e| {
             self.allocator.free(e.key_ptr.*);
@@ -296,6 +269,30 @@ pub const IgnoreRules = struct {
         self.by_dir.deinit(self.allocator);
     }
 };
+
+fn resolveChain(
+    rules: *const IgnoreRules,
+    chain: []const *IgnoreNode,
+    norm: []const u8,
+    basename: []const u8,
+    is_dir: bool,
+) ?bool {
+    if (rules.extra) |node| {
+        if (node.gi.checkWithBasename(norm, basename, is_dir)) |verdict| return verdict;
+    }
+    var i = chain.len;
+    while (i > 0) {
+        i -= 1;
+        const node = chain[i];
+        if (node.relative_offset > norm.len) continue;
+        if (node.gi.checkWithBasename(norm[node.relative_offset..], basename, is_dir)) |verdict|
+            return verdict;
+    }
+    if (rules.base) |node| {
+        if (node.gi.checkWithBasename(norm, basename, is_dir)) |verdict| return verdict;
+    }
+    return null;
+}
 
 fn stripRootPrefix(root: []const u8, path: []const u8) ?[]const u8 {
     if (root.len == 0) return path;
@@ -407,6 +404,42 @@ test "isIgnoredResolved: nested rules, ancestor pruning, negation, fast==slow" {
         try expectFastEqualsSlow(&rules, c, false);
         try expectFastEqualsSlow(&rules, c, true);
     }
+}
+
+test "isIgnoredCandidate: matches nonexistent files without lstat" {
+    const alloc = testing.allocator;
+    var rules: IgnoreRules = .{ .allocator = alloc };
+    defer rules.deinit();
+
+    try rules.put("", try testNode(alloc, "", "*.log\nbuild/\n!keep.log\n"));
+    (rules.by_dir.get("").?).release(alloc);
+    try rules.put("notes", try testNode(alloc, "notes", "*.tmp\n!keep.tmp\n"));
+    (rules.by_dir.get("notes").?).release(alloc);
+
+    try testing.expect(rules.isIgnoredCandidate("future.log", false));
+    try testing.expect(!rules.isIgnoredCandidate("keep.log", false));
+    try testing.expect(rules.isIgnoredCandidate("build", true));
+    try testing.expect(!rules.isIgnoredCandidate("build", false));
+    try testing.expect(rules.isIgnoredCandidate("notes/future.tmp", false));
+    try testing.expect(!rules.isIgnoredCandidate("notes/keep.tmp", false));
+    try testing.expect(rules.isIgnoredCandidate("../outside.md", false));
+    try testing.expect(rules.isIgnoredCandidate("./future.md", false));
+    try testing.expect(rules.isIgnoredCandidate("", true));
+}
+
+test "isIgnoredPath: the verified walk root remains accepted" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+
+    var rules: IgnoreRules = .{ .allocator = alloc };
+    defer rules.deinit();
+    try rules.setWalkRoot(root);
+
+    try testing.expect(!rules.isIgnoredPath(root));
+    try testing.expect(!rules.isIgnoredPath(""));
 }
 
 test "isIgnoredResolved: overflow beyond MAX_DIR_CHAIN falls back and matches" {
