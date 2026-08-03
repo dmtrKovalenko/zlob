@@ -213,6 +213,9 @@ pub const Options = struct {
     pattern: ?[]const u8 = null,
     /// Flags for compiling/matching `pattern`. Default: brace + recursive `**`.
     pattern_flags: ZlobFlags = .{ .brace = true, .doublestar_recursive = true },
+    /// Root-relative ignore document below every discovered ignore file.
+    /// Later sources keep normal Git precedence over this baseline.
+    base_ignore: ?[]const u8 = null,
     /// Extra ignore document layered into the walker, `.gitignore` syntax,
     /// one rule per line. Callers building from Rust use
     /// `WalkBuilder::extra_ignore(&["a", "b"])` which joins for them; direct

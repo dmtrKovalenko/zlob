@@ -742,6 +742,8 @@ pub const zlob_walk_options_t = extern struct {
     errfunc: zlob_walk_errfunc_t = null,
     pattern: ?[*:0]const u8 = null,
     pattern_flags: u32 = 0,
+    /// Lowest-precedence root-relative ignore document. NULL = disabled.
+    base_ignore: ?[*:0]const u8 = null,
     /// Caller-supplied .gitignore document layered as the deepest node in the
     /// chain so its `!negation` rules win over project `.gitignore`. One rule
     /// per line, NUL-terminated. NULL = disabled.
@@ -810,6 +812,7 @@ fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
             ZlobFlags.fromU32(v.pattern_flags)
         else
             .{ .brace = true, .doublestar_recursive = true },
+        .base_ignore = if (v.base_ignore) |p| mem.sliceTo(p, 0) else null,
         .extra_ignore = if (v.extra_ignore) |p| mem.sliceTo(p, 0) else null,
         .meta = walk.MetaMask.fromInt(v.meta_mask),
         .sort = f & ZLOB_WALK_SORT != 0,

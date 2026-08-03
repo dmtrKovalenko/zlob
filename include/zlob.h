@@ -377,6 +377,9 @@ typedef struct zlob_walk_options {
   /* ZLOB_* flags used to compile/match `pattern`.
    * 0 = default (ZLOB_BRACE | ZLOB_DOUBLESTAR_RECURSIVE). */
   uint32_t pattern_flags;
+  /* Caller-supplied root-relative ignore document with lower precedence than
+   * every discovered .gitignore/.ignore. NULL = disabled. */
+  const char *base_ignore;
   /* Caller-supplied .gitignore document layered into the walker, one rule
    * per line, NUL-terminated. NULL = disabled. Surfaces as the *deepest*
    * node in the gitignore chain, so its `!negation` rules win over project

@@ -696,13 +696,19 @@ test "ZLOB_TILDE with recursive glob" {
     std.Io.Dir.cwd().createDir(io, test_dir_path, .default_dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, test_dir_path) catch {};
 
-    const test_file = try std.fmt.allocPrint(allocator, "{s}/test.txt", .{test_dir_path});
+    const nested_dir = try std.fmt.allocPrint(allocator, "{s}/nested", .{test_dir_path});
+    defer allocator.free(nested_dir);
+    std.Io.Dir.cwd().createDir(io, nested_dir, .default_dir) catch {};
+
+    const test_file = try std.fmt.allocPrint(allocator, "{s}/test.txt", .{nested_dir});
     defer allocator.free(test_file);
 
     var f = std.Io.Dir.cwd().createFile(io, test_file, .{}) catch return error.SkipZigTest;
     f.close(io);
 
-    const pattern = try allocator.dupeZ(u8, "~/**/.zlob_test_nested/*.txt");
+    // Keep the recursive walk inside the fixture. Scanning ~/** made this test
+    // depend on the size and accessibility of the developer's entire home.
+    const pattern = try allocator.dupeZ(u8, "~/.zlob_test_nested/**/*.txt");
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;

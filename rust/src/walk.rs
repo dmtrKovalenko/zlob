@@ -118,6 +118,7 @@ pub enum WalkEntryKind {
 /// Builder for a parallel directory walk. Settings diefault to [`WalkFlags::RECOMMENDED`]
 #[derive(Debug, Clone)]
 pub struct WalkBuilder {
+    base_ignore: Option<CString>,
     extra_ignore: Option<CString>,
     flags: WalkFlags,
     max_depth: u16,
@@ -139,6 +140,7 @@ impl WalkBuilder {
             max_depth: 0,
             pattern_flags: 0,
             pattern: None,
+            base_ignore: None,
             extra_ignore: None,
         })
     }
@@ -215,6 +217,18 @@ impl WalkBuilder {
         Ok(self)
     }
 
+    /// Root-relative ignore rules below every discovered ignore file.
+    pub fn base_ignore<S: AsRef<str>>(&mut self, patterns: &[S]) -> Result<&mut Self> {
+        let mut joined = String::new();
+        for p in patterns {
+            joined.push_str(p.as_ref());
+            joined.push('\n');
+        }
+
+        self.base_ignore = Some(CString::new(joined).map_err(|_| ZlobError::InvalidInput)?);
+        Ok(self)
+    }
+
     /// Number of worker threads. `0` (default) = one per CPU; `1` = run on the calling thread.
     pub fn threads(&mut self, n: usize) -> &mut Self {
         self.threads = n.min(u16::MAX as usize) as u16;
@@ -268,6 +282,10 @@ impl WalkBuilder {
             Some(p) => p.as_ptr(),
             None => std::ptr::null(),
         };
+        let base_ignore = match self.base_ignore.as_ref() {
+            Some(p) => p.as_ptr(),
+            None => std::ptr::null(),
+        };
 
         Ok((
             root,
@@ -279,6 +297,7 @@ impl WalkBuilder {
                 errfunc: None,
                 pattern,
                 pattern_flags: self.pattern_flags as u32,
+                base_ignore,
                 extra_ignore,
             },
         ))
@@ -1078,6 +1097,80 @@ mod tests {
         assert!(rules.is_ignored("drop.rs"));
         assert!(!rules.is_ignored("src/important/special.rs"));
         assert!(rules.is_ignored("src/main.rs"));
+    }
+
+    #[test]
+    fn nested_directory_negation_prevents_pruning() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), "*\n!*.*\n!/**/\n").unwrap();
+        fs::create_dir_all(root.join("sub1/sub2")).unwrap();
+        fs::write(root.join("top.rs"), "").unwrap();
+        fs::write(root.join("sub1/mid.rs"), "").unwrap();
+        fs::write(root.join("sub1/sub2/deep.rs"), "").unwrap();
+
+        let results = WalkBuilder::new(root).unwrap().collect().unwrap();
+        let names: Vec<_> = results
+            .iter()
+            .filter(|entry| entry.is_file())
+            .map(|entry| entry.relative_path().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(names.contains(&"top.rs".to_string()), "got {names:?}");
+        assert!(names.contains(&"sub1/mid.rs".to_string()), "got {names:?}");
+        assert!(
+            names.contains(&"sub1/sub2/deep.rs".to_string()),
+            "got {names:?}"
+        );
+    }
+
+    #[test]
+    fn base_ignore_has_lower_precedence_than_discovered_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), "!root-keep.log\n").unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/.gitignore"), "!nested-keep.log\n").unwrap();
+        for path in [
+            "drop.log",
+            "root-keep.log",
+            "nested/drop.log",
+            "nested/nested-keep.log",
+        ] {
+            fs::write(root.join(path), "").unwrap();
+        }
+
+        let results = WalkBuilder::new(root)
+            .unwrap()
+            .base_ignore(&["*.log"])
+            .unwrap()
+            .collect()
+            .unwrap();
+        let names: Vec<_> = results
+            .iter()
+            .filter(|entry| entry.is_file())
+            .map(|entry| entry.relative_path().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(!names.contains(&"drop.log".to_string()), "got {names:?}");
+        assert!(
+            names.contains(&"root-keep.log".to_string()),
+            "got {names:?}"
+        );
+        assert!(
+            !names.contains(&"nested/drop.log".to_string()),
+            "got {names:?}"
+        );
+        assert!(
+            names.contains(&"nested/nested-keep.log".to_string()),
+            "got {names:?}"
+        );
+
+        let rules = results.ignore_rules().expect("base ignore retains rules");
+        assert!(rules.is_ignored("drop.log"));
+        assert!(!rules.is_ignored("root-keep.log"));
+        assert!(rules.is_ignored("nested/drop.log"));
+        assert!(!rules.is_ignored("nested/nested-keep.log"));
     }
 
     #[test]
