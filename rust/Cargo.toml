@@ -43,6 +43,7 @@ glob = "0.3"
 globset = "0.4"
 walkdir = "2"
 ignore = "0.4"
+proptest = "1.11.0"
 
 [[bench]]
 name = "glob_comparison"

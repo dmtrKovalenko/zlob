@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const testing = std.testing;
 const zlob = @import("zlob");
 const walk = zlob.walk;
+const GitIgnore = @import("zlob_core").GitIgnore;
 
 const TestTree = struct {
     io: std.Io,
@@ -127,6 +128,88 @@ test "walk nested gitignore: deeper file overrides parent" {
         if (std.mem.eql(u8, e.relativePath(), ".git/config")) found_git = true;
     }
     try testing.expect(found_git);
+}
+
+// Regression: https://github.com/dmtrKovalenko/fff/issues/723
+//
+// The "ignore everything, then allow back" .gitignore idiom. `!/**/` is a
+// dir-only negation that re-includes every directory, which is the only reason
+// the walk may descend at all; `!*.*` re-includes extensioned files. If the
+// dir-only negation is dropped, every subdirectory stays ignored and gets
+// pruned, so the walker reports top-level files only — the reported symptom.
+//
+// The expected set is exactly what `git add -A -n` stages for this tree, plus
+// the directories (git does not track directories, walkers report them). The
+// `ignore` crate agrees.
+test "walk allowlist gitignore: '*' + '!*.*' + '!/**/' descends into subdirs" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("gitignore_allowlist");
+    defer t.deinit();
+
+    try t.mkdir("src");
+    try t.mkdir("src/deep");
+    try t.mkdir("dir.d");
+    try t.mkdir("plain");
+    try t.mkdir(".git");
+    try t.write(".gitignore",
+        \\# Ignore all
+        \\*
+        \\
+        \\# Unignore all with extensions
+        \\!*.*
+        \\
+        \\# Unignore all dirs
+        \\!/**/
+        \\
+    );
+    try t.write("main.rs", "");
+    try t.write("Makefile", "");
+    try t.write(".keep", "");
+    try t.write("src/lib.rs", "");
+    try t.write("src/noext", "");
+    try t.write("src/deep/a.txt", "");
+    try t.write("dir.d/x.md", "");
+    try t.write("dir.d/noext", "");
+    try t.write("plain/y.txt", "");
+    try t.write(".git/config", "");
+
+    // Serial and parallel must agree; the bug shows up in both.
+    for ([_]u16{ 1, 4 }) |threads| {
+        var results = try walk.collect(testing.allocator, t.root, .{
+            .threads = threads,
+            .sort = true,
+        });
+        defer results.deinit();
+
+        // Directories are re-included by `!/**/`, so the walk descends.
+        // `plain/` is the important one: its name has no dot, so *only* the
+        // dir-only negation can save it.
+        const kept = [_][]const u8{
+            ".gitignore", ".keep",       "dir.d", "dir.d/x.md", "main.rs",
+            "plain",      "plain/y.txt", "src",   "src/deep",   "src/deep/a.txt",
+            "src/lib.rs",
+        };
+        for (kept) |rel| {
+            if (findEntry(&results, rel) == null) {
+                std.debug.print("threads={d}: missing entry '{s}'\n", .{ threads, rel });
+                return error.TestExpectedEntry;
+            }
+        }
+
+        // Extensionless files are never re-included by `!*.*`.
+        const dropped = [_][]const u8{
+            "Makefile", "src/noext", "dir.d/noext", ".git", ".git/config",
+        };
+        for (dropped) |rel| {
+            if (findEntry(&results, rel) != null) {
+                std.debug.print("threads={d}: unexpected entry '{s}'\n", .{ threads, rel });
+                return error.TestUnexpectedEntry;
+            }
+        }
+
+        // Nothing else may sneak in.
+        try testing.expectEqual(kept.len, results.entries.len);
+    }
 }
 
 test "walk include_hidden=false skips hidden files and dirs" {
@@ -583,4 +666,139 @@ test "walk retains reusable IgnoreRules: nesting, negation, .ignore precedence" 
     try testing.expect(rules.isIgnoredPath(abs_app_log));
     // Absolute path outside the walk → ignored (not part of this walk).
     try testing.expect(rules.isIgnoredPath("/etc/passwd"));
+}
+
+fn testNode(alloc: std.mem.Allocator, dir_rel: []const u8, doc: []const u8) !*walk.__internal_test_api.IgnoreNode {
+    const gi = try GitIgnore.parse(alloc, doc);
+    const node = try alloc.create(walk.__internal_test_api.IgnoreNode);
+    node.* = .{
+        .parent = null,
+        .gi = gi,
+        .relative_offset = @intCast(if (dir_rel.len > 0) dir_rel.len + 1 else 0),
+        .refs = .init(1),
+    };
+    return node;
+}
+
+fn expectFastEqualsSlow(rules: *const walk.IgnoreRules, norm: []const u8, is_dir: bool) !void {
+    const basename = if (std.mem.lastIndexOfScalar(u8, norm, '/')) |p| norm[p + 1 ..] else norm;
+    const fast = walk.__internal_test_api.isIgnoredResolved(rules, norm, basename, is_dir);
+    const slow = walk.__internal_test_api.isIgnoredPathSlow(rules, norm, basename, is_dir);
+    testing.expectEqual(slow, fast) catch |err| {
+        std.debug.print("mismatch for '{s}' (is_dir={}): fast={} slow={}\n", .{ norm, is_dir, fast, slow });
+        return err;
+    };
+}
+
+test "isIgnoredResolved: nested rules, ancestor pruning, negation, fast==slow" {
+    const alloc = testing.allocator;
+    var rules: walk.IgnoreRules = .{ .allocator = alloc };
+    defer rules.deinit();
+
+    // root/.gitignore prunes `build/` entirely and ignores *.log everywhere.
+    try rules.put("", try testNode(alloc, "", "build/\n*.log\n"));
+    // root ref is held by `put`; drop the local creation ref.
+    (rules.by_dir.get("").?).release(alloc);
+
+    // src/.gitignore re-includes keep.log (negation) and ignores gen/.
+    try rules.put("src", try testNode(alloc, "src", "!keep.log\ngen/\n"));
+    (rules.by_dir.get("src").?).release(alloc);
+
+    // Concrete expectations -------------------------------------------------
+    // *.log ignored at root scope.
+    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "a.log", "a.log", false));
+    // build/ pruned: anything beneath it is ignored regardless of depth.
+    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "build/x/y.c", "y.c", false));
+    // src/keep.log is re-included by the nested negation → NOT ignored.
+    try testing.expect(!walk.__internal_test_api.isIgnoredResolved(&rules, "src/keep.log", "keep.log", false));
+    // src/other.log still hits the root *.log rule.
+    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "src/other.log", "other.log", false));
+    // src/gen/ pruned by the nested rule.
+    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "src/gen/out.o", "out.o", false));
+    // A plain source file is not ignored.
+    try testing.expect(!walk.__internal_test_api.isIgnoredResolved(&rules, "src/main.zig", "main.zig", false));
+
+    // Differential: fast path must equal slow path for a spread of queries,
+    // both file and dir forms.
+    const cases = [_][]const u8{
+        "a.log",               "build",           "build/x",
+        "build/x/y.c",         "src",             "src/keep.log",
+        "src/other.log",       "src/gen",         "src/gen/out.o",
+        "src/main.zig",        "src/nested/deep", "src/nested/deep/f.log",
+        "unrelated/thing.txt", "keep.log",        "src/gen/sub/x.log",
+    };
+    for (cases) |c| {
+        try expectFastEqualsSlow(&rules, c, false);
+        try expectFastEqualsSlow(&rules, c, true);
+    }
+}
+
+test "isIgnoredResolved: a nested negation re-includes a parent-excluded dir" {
+    // Regression: the ancestor phase used to ask "does any ruleset in scope
+    // ignore this ancestor?" and return true on the first hit, walking the chain
+    // shallowest-first. That let a shallow rule win over a deeper negation, so
+    // an ancestor git had re-included still pruned its whole subtree.
+    //
+    // Ground truth (git 2.x):
+    //   $ printf 'build/*\n' > .gitignore
+    //   $ printf '!keep\n'   > build/.gitignore
+    //   $ git ls-files -o --exclude-standard
+    //   .gitignore  build/.gitignore  build/keep/k.txt
+    const alloc = testing.allocator;
+    var rules: walk.IgnoreRules = .{ .allocator = alloc };
+    defer rules.deinit();
+
+    try rules.put("", try testNode(alloc, "", "build/*\n"));
+    (rules.by_dir.get("").?).release(alloc);
+    try rules.put("build", try testNode(alloc, "build", "!keep\n"));
+    (rules.by_dir.get("build").?).release(alloc);
+
+    // `build/keep` is excluded by the root rule but re-included by the deeper
+    // one, which has precedence — so neither it nor its contents are ignored.
+    try testing.expect(!walk.__internal_test_api.isIgnoredResolved(&rules, "build/keep", "keep", true));
+    try testing.expect(!walk.__internal_test_api.isIgnoredResolved(&rules, "build/keep/k.txt", "k.txt", false));
+    // A sibling the nested file says nothing about stays excluded.
+    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "build/other", "other", true));
+    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "build/other/x.o", "x.o", false));
+
+    for ([_][]const u8{
+        "build",           "build/keep",  "build/keep/k.txt",
+        "build/keep/deep", "build/other", "build/other/x.o",
+    }) |case| {
+        try expectFastEqualsSlow(&rules, case, false);
+        try expectFastEqualsSlow(&rules, case, true);
+    }
+}
+
+test "isIgnoredResolved: overflow beyond the directory-chain limit falls back and matches" {
+    const alloc = testing.allocator;
+    var rules: walk.IgnoreRules = .{ .allocator = alloc };
+    defer rules.deinit();
+
+    // Create a .gitignore at every directory level well past the fixed stack
+    // limit. The chain must fall back to the slow scan without changing its
+    // verdict; every level ignores `dead`.
+    var path_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer path_buf.deinit(alloc);
+    const levels = walk.__internal_test_api.max_dir_chain + 5;
+    var i: usize = 0;
+    while (i < levels) : (i += 1) {
+        const dir = path_buf.items;
+        const node = try testNode(alloc, dir, "dead\n");
+        try rules.put(dir, node);
+        node.release(alloc);
+        if (path_buf.items.len > 0) try path_buf.append(alloc, '/');
+        try path_buf.appendSlice(alloc, "d");
+    }
+
+    // A leaf that is `dead` under the deepest dir must still be ignored via the
+    // slow fallback, and the fast/slow cores must agree at a shallow depth.
+    var leaf: std.ArrayListUnmanaged(u8) = .empty;
+    defer leaf.deinit(alloc);
+    try leaf.appendSlice(alloc, path_buf.items);
+    try leaf.appendSlice(alloc, "/dead");
+    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, leaf.items, "dead", false));
+
+    try expectFastEqualsSlow(&rules, "d/d/d/keep", false);
+    try expectFastEqualsSlow(&rules, "d/d/d/dead", false);
 }

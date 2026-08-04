@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 702cc88d47356e13a7610cbd2010ddbbd9b8b5842ca40892c9f92473d1b79fad # shrinks to spec = [("", "/a**")]
+cc fe60e163ef0bdd5690ded5e5a804b4de5965010e80aca5fa6ec658879de24f88 # shrinks to spec = [("", "build/*"), ("build", "![!abc]*")]
+cc d37904a8e4cc5dcc8e998ffad181618b90f7996f181a94fa007294a0174d0227 # shrinks to spec = [("", "a"), ("src", "***/noext")]

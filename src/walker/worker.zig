@@ -507,28 +507,25 @@ fn openRoot(sh: *SharedWorkerState, root: []const u8) anyerror!Handle {
 // ---------------------------------------------------------------------------
 
 /// Deepest-first resolution across nested .gitignore files: the first decisive
-/// answer wins, mirroring git. Pruning is exact: once a directory is ignored
-/// nothing inside it can be re-included, so it is never descended.
+/// answer wins, mirroring git.
 ///
-/// `extra` is the caller-supplied synthetic .gitignore, layered as the
-/// *innermost* layer (checked even before `start`'s deepest node) so its
-/// `!negation` rules can un-ignore paths the real chain would otherwise drop.
-/// Anchoring is at the walk root: rules see the entry's full root-relative
-/// path. Pass `null` to skip.
+/// Deliberately not routed through `GitIgnore.verdictWithAncestors`. That exists
+/// for callers which must resolve a path in isolation, and its ancestor phase is
+/// pure overhead here: the walker prunes structurally and never descends into an
+/// ignored directory, so by the time an entry is tested every ancestor is
+/// already known not to be ignored. Wrapping this chain in a stack adapter just
+/// to reach the shared loop cost more scaffolding than the loop itself, so it
+/// walks the parent links directly and skips empty documents on the way.
 inline fn chainIgnored(start: ?*IgnoreNode, extra: ?*IgnoreNode, rel: []const u8, basename: []const u8, is_dir: bool) bool {
     if (extra) |x| {
         if (!x.gi.is_empty) {
-            if (x.gi.checkWithBasename(rel, basename, is_dir)) |verdict| {
-                return verdict;
-            }
+            if (x.gi.checkInode(rel, basename, is_dir)) |verdict| return verdict;
         }
     }
     var node: ?*IgnoreNode = start;
     while (node) |n| : (node = n.parent) {
         if (!n.gi.is_empty) {
-            if (n.gi.checkWithBasename(rel[n.relative_offset..], basename, is_dir)) |verdict| {
-                return verdict;
-            }
+            if (n.gi.checkInode(rel[n.relative_offset..], basename, is_dir)) |verdict| return verdict;
         }
     }
     return false;

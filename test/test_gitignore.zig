@@ -147,6 +147,135 @@ test "gitignore isIgnored - double star patterns" {
     try testing.expect(!gi.isIgnored("other/main.o", false));
 }
 
+// Regression: https://github.com/dmtrKovalenko/fff/issues/723
+//
+// The "deny everything, then allow back" idiom. `*` ignores every entry at
+// every level, `!*.*` re-includes anything whose basename contains a dot, and
+// the dir-only `!/**/` re-includes every directory so the walk can actually
+// descend. Without that last rule every subdirectory stays ignored and a
+// walker only ever sees the top level.
+//
+// Expectations below are the verbatim output of `git add -A -n` on a tree with
+// this exact .gitignore (git 2.x), which the `ignore` crate reproduces too.
+test "gitignore isIgnored - allowlist idiom: '*' then '!*.*' and '!/**/'" {
+    var gi = try GitIgnore.parse(testing.allocator,
+        \\# Ignore all
+        \\*
+        \\
+        \\# Unignore all with extensions
+        \\!*.*
+        \\
+        \\# Unignore all dirs
+        \\!/**/
+    );
+    defer gi.deinit();
+
+    // `!/**/` is dir-only, so every directory is re-included at any depth.
+    try testing.expect(!gi.isIgnored("src", true));
+    try testing.expect(!gi.isIgnored("src/deep", true));
+    try testing.expect(!gi.isIgnored("a/b/c/d/e", true));
+
+    // ...which is also what keeps the walker from pruning the whole subtree.
+    try testing.expect(!gi.shouldSkipDirectory("src"));
+    try testing.expect(!gi.shouldSkipDirectory("src/deep"));
+
+    // `!*.*` re-includes extensioned files at any depth, not just the root.
+    try testing.expect(!gi.isIgnored("main.rs", false));
+    try testing.expect(!gi.isIgnored("src/lib.rs", false));
+    try testing.expect(!gi.isIgnored("src/deep/a.txt", false));
+    try testing.expect(!gi.isIgnored("dir.d/x.md", false));
+
+    // A leading `*` matches the empty string, so dotfiles match `*.*` too.
+    try testing.expect(!gi.isIgnored(".gitignore", false));
+    try testing.expect(!gi.isIgnored(".keep", false));
+
+    // Extensionless files stay ignored — `!*.*` never re-includes them.
+    try testing.expect(gi.isIgnored("Makefile", false));
+    try testing.expect(gi.isIgnored("src/noext", false));
+    try testing.expect(gi.isIgnored("dir.d/noext", false));
+}
+
+test "gitignore isIgnored - allowlist idiom with unanchored '!**/'" {
+    var gi = try GitIgnore.parse(testing.allocator,
+        \\*
+        \\!*.*
+        \\!**/
+    );
+    defer gi.deinit();
+
+    try testing.expect(!gi.isIgnored("src", true));
+    try testing.expect(!gi.isIgnored("src/deep", true));
+    try testing.expect(!gi.shouldSkipDirectory("src"));
+    try testing.expect(!gi.isIgnored("src/deep/a.txt", false));
+    try testing.expect(gi.isIgnored("src/noext", false));
+}
+
+// Regression guard. This has been reverted twice by simplifying the doublestar
+// check in path_matcher.zig to `mem.eql(seg, "**")`, which looks equivalent and
+// is not: git treats a segment of *any* run of stars as a recursive doublestar.
+// Previously only the Rust differential suite caught it, so the feedback arrived
+// far from the edit — hence this test, next to the semantics it protects.
+//
+// Ground truth (git 2.x), tree a/b/noext:
+//   $ printf '***/noext\n' > .gitignore && git check-ignore -q a/b/noext  # -> ignored
+test "gitignore - runs of stars behave as **" {
+    inline for (.{ "**/noext", "***/noext", "****/noext" }) |doc| {
+        var gi = try GitIgnore.parse(testing.allocator, doc);
+        defer gi.deinit();
+        try testing.expect(gi.isIgnored("noext", false));
+        try testing.expect(gi.isIgnored("src/noext", false));
+        try testing.expect(gi.isIgnored("a/b/c/noext", false));
+        try testing.expect(!gi.isIgnored("src/other", false));
+    }
+
+    // Dir-only spelling, at any depth.
+    inline for (.{ "**/", "***/", "****/" }) |doc| {
+        var gi = try GitIgnore.parse(testing.allocator, doc);
+        defer gi.deinit();
+        try testing.expect(gi.isIgnored("src", true));
+        try testing.expect(gi.isIgnored("a/b/c", true));
+    }
+
+    // A segment that merely *contains* stars is NOT a doublestar: it matches
+    // within one path component only.
+    inline for (.{ "**a/x", "a**/x", "b**c/x" }) |doc| {
+        var gi = try GitIgnore.parse(testing.allocator, doc);
+        defer gi.deinit();
+        try testing.expect(!gi.isIgnored("deep/nested/a/x", false));
+    }
+}
+
+test "gitignore - wildcard matching beyond the fixed component buffer" {
+    var path_buf: [512]u8 = undefined;
+    var path_len: usize = 0;
+    for (0..129) |_| {
+        @memcpy(path_buf[path_len..][0..2], "a/");
+        path_len += 2;
+    }
+    @memcpy(path_buf[path_len..][0..5], "x.txt");
+    path_len += 5;
+
+    // A short recursive pattern exercises the streaming path fallback
+    var recursive = try GitIgnore.parse(testing.allocator, "**/*.txt");
+    defer recursive.deinit();
+    try testing.expect(recursive.isIgnored(path_buf[0..path_len], false));
+
+    // An equally deep anchored pattern also exercises unbounded pattern
+    // compilation; previously its empty segment list could never match
+    var pattern_buf: [512]u8 = undefined;
+    var pattern_len: usize = 0;
+    for (0..129) |_| {
+        @memcpy(pattern_buf[pattern_len..][0..2], "a/");
+        pattern_len += 2;
+    }
+    @memcpy(pattern_buf[pattern_len..][0..5], "?.txt");
+    pattern_len += 5;
+
+    var anchored = try GitIgnore.parse(testing.allocator, pattern_buf[0..pattern_len]);
+    defer anchored.deinit();
+    try testing.expect(anchored.isIgnored(path_buf[0..path_len], false));
+}
+
 test "gitignore shouldSkipDirectory" {
     var gi = try GitIgnore.parse(testing.allocator,
         \\node_modules/
@@ -158,9 +287,9 @@ test "gitignore shouldSkipDirectory" {
     // node_modules should be skipped
     try testing.expect(gi.shouldSkipDirectory("node_modules"));
 
-    // build has a negation for children, so we shouldn't prune
-    // (conservative approach to handle !build/keep/)
-    try testing.expect(!gi.shouldSkipDirectory("build"));
+    // `build/` excludes the directory itself, and git cannot re-include a path
+    // whose ancestor is excluded, so `!build/keep/` is inert and build is skipped.
+    try testing.expect(gi.shouldSkipDirectory("build"));
 }
 
 test "gitignore shouldSkipDirectory - anchored patterns" {
@@ -187,14 +316,9 @@ test "gitignore shouldSkipDirectory - anchored pattern with negated subdir" {
     );
     defer gi.deinit();
 
-    // rust/target should NOT be skipped because it has a negated child
-    try testing.expect(!gi.shouldSkipDirectory("rust/target"));
-
-    // rust-analyzer should not be skipped (it's negated)
-    try testing.expect(!gi.shouldSkipDirectory("rust/target/rust-analyzer"));
-
-    // debug should still be ignored via isIgnored (but shouldSkipDirectory is conservative)
-    // The walker will descend into rust/target, but isIgnored will filter debug files
+    try testing.expect(gi.shouldSkipDirectory("rust/target"));
+    // A sibling outside the excluded tree is untouched.
+    try testing.expect(!gi.shouldSkipDirectory("rust/src"));
 }
 
 test "gitignore isIgnored - anchored pattern with negated subdir" {
@@ -214,10 +338,31 @@ test "gitignore isIgnored - anchored pattern with negated subdir" {
     // (files inside ignored directories are also ignored)
     try testing.expect(gi.isIgnored("rust/target/debug/app.rs", false));
 
-    // rust/target/rust-analyzer is NOT ignored (negation)
-    try testing.expect(!gi.isIgnored("rust/target/rust-analyzer", true));
+    // The negation cannot take effect: git refuses to re-include anything whose
+    // ancestor directory is excluded, and `rust/target/` excludes the parent.
+    // Verified with git:
+    //   $ printf 'rust/target/\n!rust/target/rust-analyzer/\n' > .gitignore
+    //   $ git check-ignore -v rust/target/rust-analyzer/analysis.rs
+    //   .gitignore:1:rust/target/  rust/target/rust-analyzer/analysis.rs
+    // To actually re-include it the parent has to be un-excluded first, e.g.
+    // `rust/target/*` instead of `rust/target/`.
+    try testing.expect(gi.isIgnored("rust/target/rust-analyzer", true));
+    try testing.expect(gi.isIgnored("rust/target/rust-analyzer/analysis.rs", false));
+}
 
-    // Files in rust-analyzer are also not ignored
+// The working spelling of the above: excluding the *contents* rather than the
+// directory leaves the parent un-excluded, so the negation can take effect.
+// Verified against `git ls-files -o --exclude-standard`.
+test "gitignore isIgnored - re-include works when parent is not excluded" {
+    var gi = try GitIgnore.parse(testing.allocator,
+        \\rust/target/*
+        \\!rust/target/rust-analyzer
+    );
+    defer gi.deinit();
+
+    try testing.expect(gi.isIgnored("rust/target/debug", true));
+    try testing.expect(gi.isIgnored("rust/target/debug/app.rs", false));
+    try testing.expect(!gi.isIgnored("rust/target/rust-analyzer", true));
     try testing.expect(!gi.isIgnored("rust/target/rust-analyzer/analysis.rs", false));
 }
 

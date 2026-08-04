@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const worker = @import("worker.zig");
 const scan = @import("scan.zig");
 const compiled_pattern = @import("../compiled_pattern.zig");
+const ignore_rules_mod = @import("ignore_rules.zig");
 
 const SharedWorkerState = worker.SharedWorkerState;
 const Worker = worker.Worker;
@@ -24,10 +25,18 @@ pub const Options = types.Options;
 pub const ErrCallbackFn = types.ErrCallbackFn;
 pub const ZlobFlags = types.ZlobFlags;
 pub const GitIgnore = @import("../gitignore.zig").GitIgnore;
-pub const IgnoreRules = @import("ignore_rules.zig").IgnoreRules;
+pub const IgnoreRules = ignore_rules_mod.IgnoreRules;
+
+/// internal constructors and resolution hooks used by `test/test_walk.zig`.
+/// the namespace is empty in normal library builds.
+pub const __internal_test_api = if (builtin.is_test) struct {
+    pub const IgnoreNode = worker.IgnoreNode;
+    pub const max_dir_chain = ignore_rules_mod.__internal_test_api.max_dir_chain;
+    pub const isIgnoredResolved = ignore_rules_mod.__internal_test_api.isIgnoredResolved;
+    pub const isIgnoredPathSlow = ignore_rules_mod.__internal_test_api.isIgnoredPathSlow;
+} else struct {};
 
 pub const WalkError = types.WalkError;
-
 pub const WalkerResult = struct {
     entries: []Entry,
     chunks: [][]u8,

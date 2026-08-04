@@ -1877,7 +1877,10 @@ fn globRecursiveWalk(
         if (is_dir and !info.directories_only) continue;
 
         if (rec_pattern.gitignore_filter) |gi| {
-            if (gi.isIgnored(entry.path, is_dir)) continue;
+            // The directory filter above prunes top-down, so every ancestor of
+            // this entry is already known to be included. Avoid re-walking the
+            // ancestor chain for every result.
+            if (gi.checkInode(entry.path, entry.basename, is_dir) orelse false) continue;
         }
 
         // For patterns with dir_components like **/foo/bar/*.c:

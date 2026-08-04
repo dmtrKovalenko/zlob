@@ -317,7 +317,7 @@ impl WalkBuilder {
     /// Stream entries through `visitor` on the calling thread only.
     /// This allows to pass non-Sync cb to the walker for example mutate reference
     ///
-    /// Returns a [`WalkRulesHandle`] just like [`Self::run`].
+    /// Returns a [`WalkerOutcomeRules`] just like [`Self::run`].
     pub fn run_serial<F>(&self, mut visitor: F) -> Result<WalkerOutcomeRules>
     where
         F: FnMut(WalkEntry<'_>) -> WalkState,
@@ -500,7 +500,7 @@ impl std::fmt::Debug for WalkResults {
     }
 }
 
-/// The rules that were assembled during a previous walker run
+/// All the gitignore rules that were assembled during a previous walker run
 pub struct WalkerOutcomeRules {
     raw: *mut c_void,
 }
@@ -534,7 +534,7 @@ impl Drop for WalkerOutcomeRules {
 
 impl std::fmt::Debug for WalkerOutcomeRules {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WalkRulesHandle").finish_non_exhaustive()
+        f.debug_struct("WalkerOutcomeRules").finish_non_exhaustive()
     }
 }
 
@@ -1123,6 +1123,103 @@ mod tests {
         assert!(rules.is_ignored("node_modules/"));
         assert!(rules.is_ignored("target/"));
         assert!(!rules.is_ignored("main.rs"));
+    }
+
+    // Regression: https://github.com/dmtrKovalenko/fff/issues/723
+    // Standard allowlist pattern: ignore everything, then re-include files with
+    // extensions and every directory needed to reach them.
+    //
+    // *
+    // !*.*
+    // !/**/
+    #[test]
+    fn allowlist_gitignore_descends_into_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for d in ["src", "src/deep", "dir.d", "plain"] {
+            fs::create_dir(root.join(d)).unwrap();
+        }
+        fs::write(
+            root.join(".gitignore"),
+            "# Ignore all\n*\n\n# Unignore all with extensions\n!*.*\n\n# Unignore all dirs\n!/**/\n",
+        )
+        .unwrap();
+        for f in [
+            "main.rs",
+            "Makefile",
+            ".keep",
+            "src/lib.rs",
+            "src/noext",
+            "src/deep/a.txt",
+            "dir.d/x.md",
+            "dir.d/noext",
+            "plain/y.txt",
+        ] {
+            fs::write(root.join(f), "").unwrap();
+        }
+
+        // GITIGNORE without SKIP_HIDDEN, so dotfiles stay in and the result can
+        // be compared against git's answer verbatim.
+        let names: Vec<String> = WalkBuilder::new(root)
+            .unwrap()
+            .options(WalkFlags::GITIGNORE | WalkFlags::SORT)
+            .threads(1)
+            .collect()
+            .unwrap()
+            .iter()
+            .map(|e| e.relative_path().to_string_lossy().into_owned())
+            .collect();
+
+        // `plain` is the load-bearing case: no dot in its name, so only the
+        // dir-only negation can re-include it and let the walk enter it.
+        let kept = [
+            ".gitignore",
+            ".keep",
+            "dir.d",
+            "dir.d/x.md",
+            "main.rs",
+            "plain",
+            "plain/y.txt",
+            "src",
+            "src/deep",
+            "src/deep/a.txt",
+            "src/lib.rs",
+        ];
+        assert_eq!(names, kept, "walk should match git's answer");
+
+        // `names == kept` already proves the extensionless files are excluded;
+        // walk again with no flags to prove they exist on disk, so a typo in the
+        // fixture can't make the assertion above pass vacuously.
+        let unfiltered: Vec<String> = WalkBuilder::new(root)
+            .unwrap()
+            .options(WalkFlags::empty())
+            .threads(1)
+            .collect()
+            .unwrap()
+            .iter()
+            .map(|e| e.relative_path().to_string_lossy().into_owned())
+            .collect();
+
+        for f in ["Makefile", "src/noext", "dir.d/noext"] {
+            assert!(
+                unfiltered.iter().any(|p| p == f),
+                "fixture should contain {f}, got {unfiltered:?}"
+            );
+        }
+
+        // The reusable rules handle must agree with the walk.
+        let rules_results = WalkBuilder::new(root)
+            .unwrap()
+            .options(WalkFlags::GITIGNORE)
+            .threads(1)
+            .collect()
+            .unwrap();
+        let rules = rules_results.ignore_rules().expect("rules always present");
+        assert!(!rules.is_ignored("plain"));
+        assert!(!rules.is_ignored("plain/y.txt"));
+        assert!(!rules.is_ignored("src/deep/a.txt"));
+        assert!(rules.is_ignored("Makefile"));
+        assert!(rules.is_ignored("src/noext"));
     }
 
     #[test]
