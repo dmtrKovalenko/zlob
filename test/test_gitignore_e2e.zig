@@ -527,8 +527,16 @@ test "gitignore e2e - negated subdirectory of ignored directory" {
         const gitignore_path = try std.fmt.bufPrint(&gitignore_path_buf, "{s}/.gitignore", .{tmp_dir});
         var gitignore_file = try std.Io.Dir.createFileAbsolute(io, gitignore_path, .{});
         defer gitignore_file.close(io);
-        // Ignore rust/target/ but NOT rust/target/rust-analyzer/
-        try gitignore_file.writeStreamingAll(io, "rust/target/\n!rust/target/rust-analyzer/\n");
+        // Exclude the *contents* of rust/target rather than the directory
+        // itself, so the negation can take effect. Spelling this as
+        // "rust/target/" would exclude the parent directory, and git refuses to
+        // re-include anything under an excluded directory — see the companion
+        // unit tests in test_gitignore.zig. Verified with git:
+        //   $ printf 'rust/target/*\n!rust/target/rust-analyzer\n' > .gitignore
+        //   $ git ls-files -o --exclude-standard
+        //   .gitignore
+        //   rust/target/rust-analyzer/analysis.rs
+        try gitignore_file.writeStreamingAll(io, "rust/target/*\n!rust/target/rust-analyzer\n");
     }
 
     // Change to temp dir

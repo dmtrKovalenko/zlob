@@ -1,8 +1,3 @@
-//! This is a very simple gitignoire parser using already existing code for wildcard matching
-//! it was easy to implement but it is not 100% optimized.
-//!
-//! There are a bunch of things other libs are doing to optimize ignoring like grouping, pattern combination,
-//! caching and so on, imporving the performance but this is a good start for what it worth.
 const std = @import("std");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
@@ -12,9 +7,7 @@ const compiled_pattern = @import("compiled_pattern.zig");
 
 /// A single gitignore pattern with pre-computed metadata
 pub const Pattern = struct {
-    /// The pattern text — slices into one of the buffers held by
-    /// `GitIgnore.sources`. Never freed directly by the pattern; freed with
-    /// the source buffer in `GitIgnore.deinit`.
+    /// Full pattern slice
     text: []const u8,
     /// Pattern is negated (starts with !)
     negated: bool,
@@ -31,8 +24,7 @@ pub const Pattern = struct {
     /// Required last byte of matching strings (null if not statically known).
     /// Used for cheap rejection of wildcard patterns before fnmatch.
     required_last_char: ?u8,
-    /// For simple suffix patterns like *.rs - the suffix without * (e.g., ".rs")
-    /// Used for both suffix_patterns hash map grouping and fast matching
+    /// For simple suffix patterns like *.rs
     suffix: ?[]const u8,
     /// Pre-computed suffix length for fast comparison
     suffix_len: u8,
@@ -40,11 +32,8 @@ pub const Pattern = struct {
     suffix_u32: u32,
     /// Index in original pattern list (for negation ordering)
     index: u16,
-    /// Pre-split path segments for patterns containing `**`. Empty for
-    /// patterns without `**` (those route through fnmatch, not segment
-    /// matching). Segments slice into `text` so no string duplication is
-    /// needed — only the pointer array is heap-allocated. Allocated in
-    /// `parseOwnedMulti`, freed in `deinit`.
+    /// Pre-split components for anchored or recursive wildcard matching.
+    /// Empty for basename-only wildcard patterns.
     segments: [][]const u8 = &.{},
 };
 
@@ -59,6 +48,9 @@ const PatternMatch = struct {
 
 /// Gitignore pattern set with optimized matching
 pub const GitIgnore = struct {
+    allocator: Allocator,
+    /// Owned source buffers backing every pattern slice.
+    sources: [][]const u8,
     /// All patterns for full matching
     patterns: []Pattern,
     /// Wildcard patterns only (excludes literals)
@@ -81,22 +73,11 @@ pub const GitIgnore = struct {
     has_negations: bool,
     /// Index of first negation pattern (for early termination)
     first_negation_index: u16,
-    /// True when no patterns were parsed (empty/comment-only .gitignore).
-    /// Lets `chainIgnored` skip the entire `checkWithBasename` call.
+    /// True when no patterns were parsed (empty/comment-only .gitignore)
     is_empty: bool,
-    /// True when any wildcard pattern has `**`. Determines whether
-    /// `checkWithBasename` needs to pre-split the entry's path for segment
-    /// matching — when false, the path split (and its 2 KB stack buffer) is
-    /// avoided entirely.
+    /// True when wildcard matching needs the caller's path pre-split. The field
+    /// name is retained for source compatibility.
     has_double_star_wildcards: bool,
-    /// Allocator for cleanup
-    allocator: Allocator,
-    /// Owned source buffers — `Pattern.text` and everything derived from it
-    /// (suffix, segments) slices into these. `deinit` frees each buffer and
-    /// the outer slice. A list of buffers rather than a single blob lets
-    /// callers layer multiple files (e.g. `.gitignore` + `.ignore`) without
-    /// having to concatenate first.
-    sources: [][]const u8,
     /// Cache for directory decisions: path -> should_skip
     dir_cache: std.StringHashMap(bool),
 
@@ -117,8 +98,8 @@ pub const GitIgnore = struct {
         return try parseOwnedMulti(allocator, sources);
     }
 
-    /// Load and parse .gitignore from a specific directory
-    /// Returns null if no .gitignore file exists
+    /// Load and parse `.gitignore` from a specific directory.
+    /// Returns null when the file does not exist or exceeds the size limit.
     pub fn loadFromDir(allocator: Allocator, io: std.Io, dir_path: []const u8) !?Self {
         var path_buf: [4096]u8 = undefined;
         const gitignore_path = if (dir_path.len > 0 and !mem.eql(u8, dir_path, "."))
@@ -128,8 +109,7 @@ pub const GitIgnore = struct {
 
         const cwd = std.Io.Dir.cwd();
         const content = cwd.readFileAlloc(io, gitignore_path, allocator, .limited(1024 * 1024)) catch |err| {
-            if (err == error.FileNotFound) return null;
-            if (err == error.StreamTooLong) return null;
+            if (err == error.FileNotFound or err == error.StreamTooLong) return null;
             return err;
         };
         errdefer allocator.free(content);
@@ -143,7 +123,72 @@ pub const GitIgnore = struct {
         return glob.hasWildcardsBasic(text);
     }
 
-    /// Extract suffix from a simple *.ext pattern
+    fn countPathComponents(path: []const u8) usize {
+        var count: usize = 0;
+        var in_component = false;
+        for (path) |byte| {
+            if (glob.isPathSep(byte)) {
+                in_component = false;
+            } else if (!in_component) {
+                count += 1;
+                in_component = true;
+            }
+        }
+        return count;
+    }
+
+    fn unescapeLiteralInPlace(text: []const u8) []const u8 {
+        const buf = @constCast(text);
+        // Two cursors over the same buffer: `read` scans the original bytes,
+        // `write` trails behind it emitting the kept ones. `write <= read`
+        // always, which is what makes overwriting in place safe.
+        var write: usize = 0;
+        var read: usize = 0;
+        while (read < buf.len) : (read += 1) {
+            // On a backslash, skip it and take the byte it escapes verbatim.
+            if (buf[read] == '\\' and read + 1 < buf.len) read += 1;
+            buf[write] = buf[read];
+            write += 1;
+        }
+        return buf[0..write];
+    }
+
+    /// folds runs of doublestar segments in place: `a/**/**/b` -> `a/**/b`
+    fn collapseDoubleStarRuns(text: []const u8) []const u8 {
+        const buf = @constCast(text);
+        // Same two-cursor compaction as `unescapeLiteralInPlace`, but a segment
+        // at a time: `read` walks to the next `/`, `write` trails behind
+        // emitting the segments we keep.
+        var write: usize = 0;
+        var read: usize = 0;
+        var prev_was_doublestar = false;
+        var wrote_any = false;
+        while (true) {
+            const seg_end = mem.indexOfScalarPos(u8, buf, read, '/') orelse buf.len;
+            const segment = buf[read..seg_end];
+            const is_doublestar = segment.len >= 2 and mem.allEqual(u8, segment, '*');
+            if (!(is_doublestar and prev_was_doublestar)) {
+                // Emit the separator *before* each segment but the first. Using
+                // `wrote_any` rather than `write > 0` matters for a leading
+                // empty segment (from an anchoring `/`): it emits no bytes but
+                // must still be followed by its slash, or `/a**` would collapse
+                // to `a**` and silently lose its anchoring.
+                if (wrote_any) {
+                    buf[write] = '/';
+                    write += 1;
+                }
+                mem.copyForwards(u8, buf[write..][0..segment.len], segment);
+                write += segment.len;
+                prev_was_doublestar = is_doublestar;
+                wrote_any = true;
+            }
+            if (seg_end == buf.len) break;
+            read = seg_end + 1;
+        }
+        return buf[0..write];
+    }
+
+    /// should be only called during parsing cause expensive
     fn extractSuffix(text: []const u8) ?[]const u8 {
         // Must start with * and have no other wildcards
         if (text.len < 2 or text[0] != '*') return null;
@@ -152,6 +197,10 @@ pub const GitIgnore = struct {
         const rest = text[1..];
         // Rest must have no wildcards
         if (hasWildcards(rest)) return null;
+        // An escaped byte is a literal one (`*\.log` matches `a.log`), but the
+        // suffix is compared raw, so a backslash here would be matched
+        // literally. Just ignore it and fallback to fnmatch
+        if (mem.indexOfScalar(u8, rest, '\\') != null) return null;
         return rest;
     }
 
@@ -169,8 +218,7 @@ pub const GitIgnore = struct {
     /// Parse multiple gitignore documents in one pass and take ownership of
     /// every input buffer plus the outer slice. Sources are consumed in the
     /// given order, so patterns from later files get higher indices and win
-    /// ties (`.ignore` after `.gitignore` — ripgrep precedence). On error
-    /// every input is freed.
+    /// ties (`.ignore` after `.gitignore` like ripgrep does)
     pub fn parseOwnedMulti(allocator: Allocator, sources: [][]const u8) !Self {
         errdefer {
             for (sources) |src| allocator.free(src);
@@ -272,23 +320,22 @@ pub const GitIgnore = struct {
             suffix_bucket_end[last] = @intCast(i + 1);
         }
 
-        // Pre-split path segments for ** patterns so matchGlobSimplePresplit
-        // can skip re-splitting the pattern on every call. Segments slice
-        // into `text` (which slices into `sources`), so only the pointer
-        // array is heap-allocated.
+        errdefer for (wildcard_patterns) |p| {
+            if (p.segments.len > 0) allocator.free(p.segments);
+        };
         for (wildcard_patterns) |*p| {
-            if (!p.has_double_star) continue;
-            var seg_buf: [32][]const u8 = undefined;
-            if (compiled_pattern.splitPathComponentsNormalized(p.text, &seg_buf)) |segs| {
-                const owned = allocator.alloc([]const u8, segs.len) catch return error.OutOfMemory;
-                @memcpy(owned, segs);
-                p.segments = owned;
-            }
+            if (!p.anchored and !p.has_double_star) continue;
+            const component_count = countPathComponents(p.text);
+            const owned = try allocator.alloc([]const u8, component_count);
+            const segments = compiled_pattern.splitPathComponentsNormalized(p.text, owned) orelse unreachable;
+            std.debug.assert(segments.len == owned.len);
+            p.segments = owned;
         }
 
+        // Whether any pattern needs the caller's path pre-split.
         var has_ds_wildcards = false;
         for (wildcard_patterns) |p| {
-            if (p.has_double_star) {
+            if (p.segments.len > 0) {
                 has_ds_wildcards = true;
                 break;
             }
@@ -358,6 +405,14 @@ pub const GitIgnore = struct {
             if (text.len == 0) return null;
         }
 
+        // `**/**` is equivalent to `**`, so fold runs down to one before any
+        // other field is derived from `text`. This keeps absurdly repetitive
+        // patterns inside the segment budget and saves matchSegmentsSimple a
+        // recursion per redundant doublestar.
+        if (mem.indexOf(u8, text, "**") != null) {
+            text = collapseDoubleStarRuns(text);
+        }
+
         var anchored = false;
         if (text[0] == '/') {
             anchored = true;
@@ -372,6 +427,12 @@ pub const GitIgnore = struct {
         }
 
         const is_literal = !hasWildcards(text);
+        // Literal patterns are compared byte-for-byte (hash lookups, memcmp),
+        if (is_literal and mem.indexOfScalar(u8, text, '\\') != null) {
+            text = unescapeLiteralInPlace(text);
+            if (text.len == 0) return null;
+        }
+
         const suffix = if (!anchored) extractSuffix(text) else null;
         const has_slash = glob.indexOfCharSIMD(text, '/') != null;
 
@@ -406,27 +467,22 @@ pub const GitIgnore = struct {
         return self.check(path, is_dir) orelse false;
     }
 
-    /// Tri-state match for hierarchical (nested .gitignore) resolution:
-    /// - `true`: a pattern in this file ignores the path
-    /// - `false`: a negation in this file re-includes the path
-    /// - `null`: no pattern matched — defer to parent .gitignore
+    /// Return the standalone document's verdict for `path`, including ignored
+    /// ancestor directories. Null means no pattern matched.
     pub fn check(self: *const Self, path: []const u8, is_dir: bool) ?bool {
         // Fast path: skip ./ prefix if present (common case: no prefix)
         const normalized_path = if (path.len > 2 and path[0] == '.' and path[1] == '/') path[2..] else path;
-
-        const basename = if (glob.lastIndexOfCharSIMD(normalized_path, '/')) |pos|
-            normalized_path[pos + 1 ..]
-        else
-            normalized_path;
-
-        return self.checkWithBasename(normalized_path, basename, is_dir);
+        // A stack of exactly this document: a standalone `GitIgnore` then gets
+        // the same precedence and subtree rules as a walker's nested chain.
+        const docs = [_]ScopedRules{.{ .gi = self, .offset = 0 }};
+        const stack = Stack{ .docs = &docs };
+        return stack.verdictWithAncestors(normalized_path, basenameOf(normalized_path), is_dir);
     }
 
-    /// Same as `check` but with a pre-computed basename and a path already
-    /// normalized (no `./` prefix). Hot path for walkers that know both.
-    pub fn checkWithBasename(self: *const Self, normalized_path: []const u8, basename: []const u8, is_dir: bool) ?bool {
+    /// Match specific inode path to a pattern
+    pub fn checkInode(self: *const Self, normalized_path: []const u8, basename: []const u8, is_dir: bool) ?bool {
         // Pre-split path segments once for ** wildcard patterns. Reused across
-        // all patterns in the loop below — avoids N redundant path splits per
+        // all patterns in the loop below avoids N redundant path splits per
         // entry. The 2 KB stack buffer is only touched when ** patterns exist.
         var path_seg_buf: [compiled_pattern.MAX_PATH_COMPONENTS][]const u8 = undefined;
         const path_segs: ?[][]const u8 = if (self.has_double_star_wildcards)
@@ -455,7 +511,7 @@ pub const GitIgnore = struct {
             }
 
             for (self.anchored_literal_dirs) |pattern| {
-                if (matchAnchoredLiteralDir(&pattern, normalized_path)) return true;
+                if (matchAnchoredLiteralDir(&pattern, normalized_path, is_dir)) return true;
             }
 
             // Check wildcard patterns - these require actual pattern matching
@@ -471,11 +527,12 @@ pub const GitIgnore = struct {
                 if (pattern.required_last_char) |rc| {
                     if (!pattern.anchored and !pattern.has_slash) {
                         if (basename.len == 0 or basename[basename.len - 1] != rc) continue;
-                    } else if (!pattern.has_double_star) {
+                    } else if (!pattern.has_double_star and !pattern.dir_only) {
                         if (normalized_path.len == 0 or normalized_path[normalized_path.len - 1] != rc) continue;
                     }
                 }
-                if (matchPatternFast(&pattern, normalized_path, basename, path_segs)) {
+
+                if (matchPatternFast(&pattern, normalized_path, basename, path_segs, is_dir)) {
                     return true;
                 }
             }
@@ -508,7 +565,7 @@ pub const GitIgnore = struct {
         }
 
         for (self.anchored_literal_dirs) |pattern| {
-            if (matchAnchoredLiteralDir(&pattern, normalized_path)) {
+            if (matchAnchoredLiteralDir(&pattern, normalized_path, is_dir)) {
                 recordMatch(&best_index, &ignored, pattern.index, pattern.negated);
             }
         }
@@ -518,16 +575,21 @@ pub const GitIgnore = struct {
             if (pattern.required_last_char) |rc| {
                 if (!pattern.anchored and !pattern.has_slash) {
                     if (basename.len == 0 or basename[basename.len - 1] != rc) continue;
-                } else if (!pattern.has_double_star) {
+                } else if (!pattern.has_double_star and !pattern.dir_only) {
                     if (normalized_path.len == 0 or normalized_path[normalized_path.len - 1] != rc) continue;
                 }
             }
-            if (matchPatternFast(&pattern, normalized_path, basename, path_segs)) {
+            if (matchPatternFast(&pattern, normalized_path, basename, path_segs, is_dir)) {
                 recordMatch(&best_index, &ignored, pattern.index, pattern.negated);
             }
         }
 
         return ignored;
+    }
+
+    /// Compatibility alias for callers using the previous public name.
+    pub fn checkWithBasename(self: *const Self, normalized_path: []const u8, basename: []const u8, is_dir: bool) ?bool {
+        return self.checkInode(normalized_path, basename, is_dir);
     }
 
     inline fn recordMatch(best_index: *u16, ignored: *?bool, index: u16, negated: bool) void {
@@ -537,10 +599,11 @@ pub const GitIgnore = struct {
         }
     }
 
-    inline fn matchAnchoredLiteralDir(pattern: *const Pattern, path: []const u8) bool {
-        const text = pattern.text;
-        if (mem.eql(u8, text, path)) return true;
-        return path.len > text.len and mem.startsWith(u8, path, text) and path[text.len] == '/';
+    /// An anchored literal dir-only pattern matches the directory itself.
+    /// Subtree propagation is resolved by the caller (`check`, or the walker's
+    /// structural pruning), never per-pattern.
+    inline fn matchAnchoredLiteralDir(pattern: *const Pattern, path: []const u8, is_dir: bool) bool {
+        return is_dir and mem.eql(u8, pattern.text, path);
     }
 
     inline fn tailPackedU32(basename: []const u8, suffix_len: u8) u32 {
@@ -648,196 +711,43 @@ pub const GitIgnore = struct {
         };
     }
 
-    inline fn matchPatternFast(pattern: *const Pattern, path: []const u8, basename: []const u8, path_segments: ?[][]const u8) bool {
+    inline fn matchPatternFast(pattern: *const Pattern, path: []const u8, basename: []const u8, path_segments: ?[][]const u8, is_dir: bool) bool {
+        std.debug.assert(!pattern.is_literal);
+        std.debug.assert(pattern.anchored or !pattern.has_slash);
+
         const text = pattern.text;
 
-        // Anchored patterns match against full path only
+        // Anchored patterns match against the full path.
         if (pattern.anchored) {
-            if (pattern.is_literal and !pattern.dir_only) {
-                return mem.eql(u8, text, path);
-            }
-            // For directory patterns, also match paths that are inside the directory
-            // e.g., pattern "rust/target" should match "rust/target/debug/foo.rs"
-            if (pattern.dir_only) {
-                // Check exact match first
-                if (mem.eql(u8, text, path)) return true;
-                // Check if path is inside this directory (path starts with "pattern/")
-                if (path.len > text.len and
-                    mem.startsWith(u8, path, text) and
-                    path[text.len] == '/')
-                {
-                    return true;
-                }
-                return false;
-            }
-            // Pre-split ** segments avoid re-splitting the pattern on every call
-            if (pattern.segments.len > 0) {
-                if (path_segments) |ps| {
-                    return path_matcher.matchGlobSimplePresplitWithPath(pattern.segments, ps);
-                }
-                return path_matcher.matchGlobSimplePresplit(pattern.segments, path);
-            }
-            // No ** → skip matchGlobSimple's ** scan, call fnmatch directly
-            return glob.fnmatch.fnmatch(text, path, .{});
-        }
-
-        // Non-anchored patterns without / match against basename only
-        if (!pattern.has_slash) {
-            // Fast path for simple suffix patterns (*.o, *.rs)
-            // Use SIMD-style matching with pre-computed u32
-            if (pattern.suffix_len > 0) {
-                return matchSuffixFast(pattern, basename);
-            }
-            // Literal patterns
-            if (pattern.is_literal) {
-                return mem.eql(u8, text, basename);
-            }
-            // Complex wildcard patterns (*.o.*, .*,  etc)
-            return glob.fnmatch.fnmatch(text, basename, .{});
-        }
-
-        // Non-anchored patterns with / - match full path
-        // For directory patterns, also match paths inside the directory
-        if (pattern.is_literal and !pattern.dir_only) {
-            return mem.eql(u8, text, path);
-        }
-        if (pattern.dir_only) {
-            // Pre-split ** segments: use pre-split path segments when available,
-            // avoiding both pattern AND path splitting.
-            if (pattern.segments.len > 0) {
-                if (path_segments) |ps| {
-                    return path_matcher.matchGlobSimplePresplitAnyPrefixWithPath(pattern.segments, ps);
-                }
-                return path_matcher.matchGlobSimplePresplitAnyPrefix(pattern.segments, path);
-            }
-            // Non-** dir_only: skip matchGlobSimple's ** scan
-            if (glob.fnmatch.fnmatch(text, path, .{})) return true;
-            // Check if any path component matches and this is a child path
-            // e.g., pattern "target" with dir_only should match "foo/target/bar.rs"
-            var start: usize = 0;
-            while (start < path.len) {
-                const end = mem.indexOfPos(u8, path, start, "/") orelse path.len;
-                const component_path = path[0..end];
-                if (glob.fnmatch.fnmatch(text, component_path, .{})) {
-                    return true;
-                }
-                if (end >= path.len) break;
-                start = end + 1;
-            }
-            return false;
-        }
-        // Non-anchored, non-dir_only with /, has **
-        if (pattern.segments.len > 0) {
+            // Directory ancestry is resolved by the caller.
+            if (pattern.dir_only and !is_dir) return false;
             if (path_segments) |ps| {
                 return path_matcher.matchGlobSimplePresplitWithPath(pattern.segments, ps);
+            } else {
+                return path_matcher.matchGlobSimplePresplit(pattern.segments, path);
             }
-            return path_matcher.matchGlobSimplePresplit(pattern.segments, path);
         }
-        // Non-anchored, non-dir_only with /, no **
-        return glob.fnmatch.fnmatch(text, path, .{});
+
+        // Non-anchored patterns carry no `/`, so they match the basename.
+        // Simple suffix patterns (`*.o`, `*.rs`) use the pre-computed u32 tail.
+        if (pattern.suffix_len > 0) {
+            return matchSuffixFast(pattern, basename);
+        }
+        return glob.fnmatch.fnmatch(text, basename, .{});
     }
 
-    /// Check if a directory should be skipped entirely (not traversed)
-    /// This is called for every directory during traversal, so it must be fast.
-    /// We only skip directories that are DEFINITELY ignored with no possibility
-    /// of negation patterns affecting their children.
+    /// Whether a directory can be skipped without traversing it.
     pub fn shouldSkipDirectory(self: *Self, dir_path: []const u8) bool {
         const normalized_path = if (dir_path.len > 2 and dir_path[0] == '.' and dir_path[1] == '/') dir_path[2..] else dir_path;
 
-        // Check cache first - this is critical for performance
         if (self.dir_cache.get(normalized_path)) |cached| {
             return cached;
         }
 
-        const basename = if (glob.lastIndexOfCharSIMD(normalized_path, '/')) |pos|
-            normalized_path[pos + 1 ..]
-        else
-            normalized_path;
-
-        // FAST PATH: Check literal directory patterns (O(1) lookup)
-        // Common patterns like "node_modules/", "target/", ".git/"
-        if (self.literal_dirs.get(basename)) |match| {
-            if (!match.negated) {
-                // Check if any negation could affect this directory or its children
-                if (!self.has_negations) {
-                    // No negations at all - safe to skip
-                    self.cacheResult(normalized_path, true);
-                    return true;
-                }
-
-                // Has negations - check if any could affect this directory
-                // A negation can affect this directory if:
-                // 1. It directly re-includes this directory path
-                // 2. It re-includes something under this directory (starts with our path + /)
-                var dominated_by_negation = false;
-                for (self.patterns) |pattern| {
-                    if (!pattern.negated) continue;
-
-                    // Check if negation could affect this dir or its children
-                    if (pattern.has_double_star) {
-                        // ** negation could match anywhere - must be conservative
-                        dominated_by_negation = true;
-                        break;
-                    }
-
-                    // Check if negation pattern matches or is under our path
-                    if (mem.startsWith(u8, pattern.text, normalized_path)) {
-                        dominated_by_negation = true;
-                        break;
-                    }
-                    if (mem.startsWith(u8, pattern.text, basename)) {
-                        dominated_by_negation = true;
-                        break;
-                    }
-                }
-
-                if (!dominated_by_negation) {
-                    self.cacheResult(normalized_path, true);
-                    return true;
-                }
-            }
-        }
-
-        // Check anchored literal directory patterns (e.g., "rust/target/", "src/build/")
-        for (self.anchored_literal_dirs) |pattern| {
-            if (pattern.negated) continue;
-
-            // For anchored literal directory patterns, check exact match
-            if (mem.eql(u8, pattern.text, normalized_path)) {
-                // Check if any negation could affect this directory or its children
-                if (!self.has_negations) {
-                    self.cacheResult(normalized_path, true);
-                    return true;
-                }
-
-                // Check for dominating negations
-                var dominated_by_negation = false;
-                for (self.patterns) |neg_pattern| {
-                    if (!neg_pattern.negated) continue;
-
-                    if (neg_pattern.has_double_star) {
-                        dominated_by_negation = true;
-                        break;
-                    }
-
-                    // Check if negation pattern could affect this dir or its children
-                    if (mem.startsWith(u8, neg_pattern.text, normalized_path)) {
-                        dominated_by_negation = true;
-                        break;
-                    }
-                }
-
-                if (!dominated_by_negation) {
-                    self.cacheResult(normalized_path, true);
-                    return true;
-                }
-            }
-        }
-
-        // For non-literal patterns or when negations might interfere,
-        // we need to be conservative and NOT skip
-        self.cacheResult(normalized_path, false);
-        return false;
+        const basename = basenameOf(normalized_path);
+        const skip = self.checkInode(normalized_path, basename, true) orelse false;
+        self.cacheResult(normalized_path, skip);
+        return skip;
     }
 
     /// Cache a directory skip result - duplicates the key since it may be from a stack buffer
@@ -874,9 +784,44 @@ pub const GitIgnore = struct {
         for (self.sources) |src| self.allocator.free(src);
         self.allocator.free(self.sources);
     }
+
+    pub const ScopedRules = struct {
+        gi: *const Self,
+        offset: usize,
+    };
+
+    pub inline fn basenameOf(path: []const u8) []const u8 {
+        return if (mem.lastIndexOfScalar(u8, path, '/')) |slash| path[slash + 1 ..] else path;
+    }
+
+    /// Ignore documents that may affect a path, ordered innermost first.
+    pub const Stack = struct {
+        docs: []const ScopedRules,
+
+        /// Return the first matching document's verdict.
+        pub fn verdict(self: Stack, path: []const u8, basename: []const u8, is_dir: bool) ?bool {
+            for (self.docs) |doc| {
+                // A document only has scope over `path` when its directory is an
+                // ancestor-or-equal of it, i.e. its offset fits inside the path.
+                if (doc.offset > path.len) continue;
+                if (doc.gi.checkInode(path[doc.offset..], basename, is_dir)) |answer| return answer;
+            }
+            return null;
+        }
+
+        /// Resolve ignored ancestors before evaluating the path itself.
+        pub fn verdictWithAncestors(self: Stack, path: []const u8, basename: []const u8, is_dir: bool) ?bool {
+            var offset: usize = 0;
+            while (mem.indexOfScalarPos(u8, path, offset, '/')) |slash| {
+                const ancestor = path[0..slash];
+                if (self.verdict(ancestor, basenameOf(ancestor), true) == true) return true;
+                offset = slash + 1;
+            }
+            return self.verdict(path, basename, is_dir);
+        }
+    };
 };
 
-// Tests
 test "parse empty content" {
     const allocator = std.testing.allocator;
     var gi = try GitIgnore.parse(allocator, "");
@@ -981,7 +926,9 @@ test "shouldSkipDirectory" {
     defer gi.deinit();
 
     try std.testing.expect(gi.shouldSkipDirectory("node_modules"));
-    try std.testing.expect(!gi.shouldSkipDirectory("build"));
+    // Exact, not conservative: `!build/keep/` cannot re-include anything once
+    // `build/` has excluded the parent, so the subtree is unreachable.
+    try std.testing.expect(gi.shouldSkipDirectory("build"));
 }
 
 test "literal pattern optimization" {

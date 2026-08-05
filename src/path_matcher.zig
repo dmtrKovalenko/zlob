@@ -1,54 +1,25 @@
 const std = @import("std");
-const mem = std.mem;
-
 const glob = @import("zlob.zig");
 const compiled_pattern = @import("compiled_pattern.zig");
 
+const mem = std.mem;
 const fnmatch_mod = glob.fnmatch;
 const splitPathComponentsNormalized = compiled_pattern.splitPathComponentsNormalized;
 
-/// Simple glob pattern matching with `**` support — no allocation required.
-/// Lightweight alternative to `compiled_pattern.matchSinglePath` for cases
-/// that don't need `ZLOB_PERIOD` handling or pre-computed pattern contexts.
-///
-/// Note: `**` is always treated as recursive doublestar here (gitignore
-/// semantics). The full matcher's `ZLOB_DOUBLESTAR_RECURSIVE`-gated
-/// behaviour lives in `compiled_pattern.zig`.
-///
-/// Supports:
-/// - `*` matches any characters except `/`
-/// - `?` matches exactly one character except `/`
-/// - `[abc]` matches one character from the set
-/// - `**` matches zero or more directories
-pub fn matchGlobSimple(pattern: []const u8, path: []const u8) bool {
-    if (mem.indexOf(u8, pattern, "**") == null) {
-        return fnmatch_mod.fnmatch(pattern, path, .{});
-    }
-
-    var pat_segments_buf: [32][]const u8 = undefined;
-    var path_segments_buf: [compiled_pattern.MAX_PATH_COMPONENTS][]const u8 = undefined;
-
-    const pat_segments = splitPathComponentsNormalized(pattern, &pat_segments_buf) orelse return false;
-    const path_segments = splitPathComponentsNormalized(path, &path_segments_buf) orelse return false;
-
-    return matchSegmentsSimple(pat_segments, path_segments, 0, 0);
-}
-
+/// Match pre-split pattern segments against a path that still needs splitting.
 pub fn matchGlobSimplePresplit(pat_segments: [][]const u8, path: []const u8) bool {
     var path_segments_buf: [compiled_pattern.MAX_PATH_COMPONENTS][]const u8 = undefined;
-    const path_segments = splitPathComponentsNormalized(path, &path_segments_buf) orelse return false;
-    return matchSegmentsSimple(pat_segments, path_segments, 0, 0);
+    if (splitPathComponentsNormalized(path, &path_segments_buf)) |path_segments| {
+        return matchSegmentsSimple(pat_segments, path_segments, 0, 0);
+    }
+
+    // Deep paths exceed the fixed stack buffer. Match directly against the raw
+    // path instead of turning a valid pattern into a false negative or
+    // allocating on this hot path.
+    return matchSegmentsStreaming(pat_segments, path, 0, 0);
 }
 
-pub fn matchGlobSimplePresplitAnyPrefix(pat_segments: [][]const u8, path: []const u8) bool {
-    var path_seg_buf: [compiled_pattern.MAX_PATH_COMPONENTS][]const u8 = undefined;
-    const path_segs = splitPathComponentsNormalized(path, &path_seg_buf) orelse return false;
-    if (matchSegmentsSimple(pat_segments, path_segs, 0, 0)) return true;
-    for (1..path_segs.len) |prefix_len| {
-        if (matchSegmentsSimple(pat_segments, path_segs[0..prefix_len], 0, 0)) return true;
-    }
-    return false;
-}
+/// Match pre-split pattern segments against pre-split path segments.
 pub fn matchGlobSimplePresplitWithPath(
     pat_segments: [][]const u8,
     path_segments: [][]const u8,
@@ -56,20 +27,73 @@ pub fn matchGlobSimplePresplitWithPath(
     return matchSegmentsSimple(pat_segments, path_segments, 0, 0);
 }
 
-/// Like [`matchGlobSimplePresplitAnyPrefix`] but accepts pre-split path segments
-pub fn matchGlobSimplePresplitAnyPrefixWithPath(
-    pat_segments: [][]const u8,
-    path_segments: [][]const u8,
+/// True when a pattern segment acts as a recursive `**`
+/// (git matcher treats double stars as anything that is more than 2 stars while glibc not)
+inline fn isDoubleStarSegment(seg: []const u8) bool {
+    return seg.len >= 2 and mem.allEqual(u8, seg, '*');
+}
+
+const PathSegment = struct {
+    text: []const u8,
+    next_offset: usize,
+};
+
+inline fn nextPathSegment(path: []const u8, initial_offset: usize) ?PathSegment {
+    var start = initial_offset;
+    while (start < path.len and glob.isPathSep(path[start])) : (start += 1) {}
+    if (start == path.len) return null;
+
+    var end = start;
+    while (end < path.len and !glob.isPathSep(path[end])) : (end += 1) {}
+    return .{ .text = path[start..end], .next_offset = end };
+}
+
+/// Unbounded fallback for paths that do not fit the fixed pre-split buffer.
+/// Pattern segments are already compiled; only the path is consumed lazily.
+fn matchSegmentsStreaming(
+    pattern_segments: []const []const u8,
+    path: []const u8,
+    initial_pat_idx: usize,
+    initial_path_offset: usize,
 ) bool {
-    if (matchSegmentsSimple(pat_segments, path_segments, 0, 0)) return true;
-    for (1..path_segments.len) |prefix_len| {
-        if (matchSegmentsSimple(pat_segments, path_segments[0..prefix_len], 0, 0)) return true;
+    var pat_idx = initial_pat_idx;
+    var path_offset = initial_path_offset;
+
+    while (true) {
+        if (pat_idx >= pattern_segments.len) {
+            return nextPathSegment(path, path_offset) == null;
+        }
+
+        const current_pattern = pattern_segments[pat_idx];
+        if (isDoubleStarSegment(current_pattern)) {
+            if (pat_idx + 1 >= pattern_segments.len) {
+                return nextPathSegment(path, path_offset) != null;
+            }
+
+            if (matchSegmentsStreaming(pattern_segments, path, pat_idx + 1, path_offset)) {
+                return true;
+            }
+
+            var scan_offset = path_offset;
+            while (nextPathSegment(path, scan_offset)) |segment| {
+                scan_offset = segment.next_offset;
+                if (matchSegmentsStreaming(pattern_segments, path, pat_idx + 1, scan_offset)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        const segment = nextPathSegment(path, path_offset) orelse return false;
+        if (!fnmatch_mod.fnmatch(current_pattern, segment.text, .{})) return false;
+
+        pat_idx += 1;
+        path_offset = segment.next_offset;
     }
-    return false;
 }
 
 /// Core recursive segment matching for `**` patterns (no allocation, no PERIOD).
-pub fn matchSegmentsSimple(
+fn matchSegmentsSimple(
     pattern_segments: []const []const u8,
     path_segments: []const []const u8,
     initial_pat_idx: usize,
@@ -85,9 +109,12 @@ pub fn matchSegmentsSimple(
 
         const current_pattern = pattern_segments[pat_idx];
 
-        if (current_pattern.len == 2 and current_pattern[0] == '*' and current_pattern[1] == '*') {
+        if (isDoubleStarSegment(current_pattern)) {
             if (pat_idx + 1 >= pattern_segments.len) {
-                return true;
+                // A trailing `**` means "everything below", so it has to consume
+                // at least one segment: git matches `a/**` against `a/f.txt` but
+                // not against `a` itself.
+                return path_idx < path_segments.len;
             }
 
             if (matchSegmentsSimple(pattern_segments, path_segments, pat_idx + 1, path_idx)) {
