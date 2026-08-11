@@ -312,13 +312,7 @@ inline fn matchBracketBitmap(pattern: []const u8, bracket_pos: usize, ch: u8) st
             pi += 1;
             const range_end = pattern[pi];
             pi += 1;
-            if (set_c <= range_end) {
-                var range_c = set_c;
-                while (range_c <= range_end) : (range_c += 1) {
-                    bitmap[range_c >> 3] |= @as(u8, 1) << @as(u3, @truncate(range_c & 7));
-                    if (range_c == 255) break;
-                }
-            }
+            setBitmapRange(&bitmap, set_c, range_end);
         } else {
             // Single character
             bitmap[set_c >> 3] |= @as(u8, 1) << @as(u3, @truncate(set_c & 7));
@@ -391,19 +385,21 @@ fn getPosixClassType(name: []const u8) PosixCharClass {
     return .invalid;
 }
 
-fn addPosixClassToBitmap(bitmap: *[32]u8, class_type: PosixCharClass) void {
+/// Comptime-precomputed 256-bit bitmap for each POSIX character class.
+fn posixClassBitmap(comptime class_type: PosixCharClass) [32]u8 {
+    var bitmap: [32]u8 = [_]u8{0} ** 32;
     switch (class_type) {
         .alpha => {
-            addRangeToBitmap(bitmap, 'A', 'Z');
-            addRangeToBitmap(bitmap, 'a', 'z');
+            addRangeToBitmap(&bitmap, 'A', 'Z');
+            addRangeToBitmap(&bitmap, 'a', 'z');
         },
         .digit => {
-            addRangeToBitmap(bitmap, '0', '9');
+            addRangeToBitmap(&bitmap, '0', '9');
         },
         .alnum => {
-            addRangeToBitmap(bitmap, 'A', 'Z');
-            addRangeToBitmap(bitmap, 'a', 'z');
-            addRangeToBitmap(bitmap, '0', '9');
+            addRangeToBitmap(&bitmap, 'A', 'Z');
+            addRangeToBitmap(&bitmap, 'a', 'z');
+            addRangeToBitmap(&bitmap, '0', '9');
         },
         .space => {
             const space_chars = [_]u8{ ' ', '\t', '\n', '\r', 0x0C, 0x0B };
@@ -416,10 +412,10 @@ fn addPosixClassToBitmap(bitmap: *[32]u8, class_type: PosixCharClass) void {
             bitmap['\t' >> 3] |= @as(u8, 1) << @as(u3, @truncate('\t' & 7));
         },
         .lower => {
-            addRangeToBitmap(bitmap, 'a', 'z');
+            addRangeToBitmap(&bitmap, 'a', 'z');
         },
         .upper => {
-            addRangeToBitmap(bitmap, 'A', 'Z');
+            addRangeToBitmap(&bitmap, 'A', 'Z');
         },
         .punct => {
             const punct_chars = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
@@ -428,30 +424,64 @@ fn addPosixClassToBitmap(bitmap: *[32]u8, class_type: PosixCharClass) void {
             }
         },
         .xdigit => {
-            addRangeToBitmap(bitmap, '0', '9');
-            addRangeToBitmap(bitmap, 'A', 'F');
-            addRangeToBitmap(bitmap, 'a', 'f');
+            addRangeToBitmap(&bitmap, '0', '9');
+            addRangeToBitmap(&bitmap, 'A', 'F');
+            addRangeToBitmap(&bitmap, 'a', 'f');
         },
         .cntrl => {
-            addRangeToBitmap(bitmap, 0x00, 0x1F);
+            addRangeToBitmap(&bitmap, 0x00, 0x1F);
             bitmap[0x7F >> 3] |= @as(u8, 1) << @as(u3, @truncate(0x7F & 7));
         },
         .graph => {
-            addRangeToBitmap(bitmap, 0x21, 0x7E);
+            addRangeToBitmap(&bitmap, 0x21, 0x7E);
         },
         .print => {
-            addRangeToBitmap(bitmap, 0x20, 0x7E);
+            addRangeToBitmap(&bitmap, 0x20, 0x7E);
         },
         .invalid => {},
     }
+    return bitmap;
+}
+
+/// Lookup table of precomputed POSIX class bitmaps, indexed by enum value.
+const posix_class_bitmaps = blk: {
+    const fields = @typeInfo(PosixCharClass).@"enum".fields;
+    var table: [fields.len][32]u8 = undefined;
+    for (fields) |field| {
+        table[field.value] = posixClassBitmap(@enumFromInt(field.value));
+    }
+    break :blk table;
+};
+
+fn addPosixClassToBitmap(bitmap: *[32]u8, class_type: PosixCharClass) void {
+    const class_bits: @Vector(32, u8) = posix_class_bitmaps[@intFromEnum(class_type)];
+    const current: @Vector(32, u8) = bitmap.*;
+    bitmap.* = current | class_bits;
 }
 
 inline fn addRangeToBitmap(bitmap: *[32]u8, start: u8, end: u8) void {
-    var ch: u8 = start;
-    while (ch <= end) : (ch += 1) {
-        bitmap[ch >> 3] |= @as(u8, 1) << @as(u3, @truncate(ch & 7));
-        if (ch == 255) break;
+    setBitmapRange(bitmap, start, end);
+}
+
+/// Set all bits in [start, end] using byte-wide masks instead of one bit per
+/// iteration. Equivalent to looping start..end and OR-ing each bit, but does
+/// at most 32 byte stores regardless of range width.
+inline fn setBitmapRange(bitmap: *[32]u8, start: u8, end: u8) void {
+    if (start > end) return;
+    const first_byte: usize = start >> 3;
+    const last_byte: usize = end >> 3;
+    const first_mask = @as(u8, 0xFF) << @as(u3, @truncate(start & 7));
+    const last_mask = @as(u8, 0xFF) >> @as(u3, @truncate(7 - (end & 7)));
+    if (first_byte == last_byte) {
+        bitmap[first_byte] |= first_mask & last_mask;
+        return;
     }
+    bitmap[first_byte] |= first_mask;
+    var b = first_byte + 1;
+    while (b < last_byte) : (b += 1) {
+        bitmap[b] = 0xFF;
+    }
+    bitmap[last_byte] |= last_mask;
 }
 
 // Extended glob from bash (extglob)

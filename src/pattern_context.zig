@@ -287,12 +287,21 @@ fn compileBracketBitmap(pattern: []const u8, bracket_start: usize) ?BracketBitma
             const range_end = pattern[pi];
             pi += 1;
 
-            // Set all bits in range
+            // Set all bits in range with byte-wide masks (at most 32 stores)
             if (c <= range_end) {
-                var ch = c;
-                while (ch <= range_end) : (ch += 1) {
-                    bitmap.bitmap[ch >> 3] |= @as(u8, 1) << @as(u3, @truncate(ch & 7));
-                    if (ch == 255) break;
+                const first_byte: usize = c >> 3;
+                const last_byte: usize = range_end >> 3;
+                const first_mask = @as(u8, 0xFF) << @as(u3, @truncate(c & 7));
+                const last_mask = @as(u8, 0xFF) >> @as(u3, @truncate(7 - (range_end & 7)));
+                if (first_byte == last_byte) {
+                    bitmap.bitmap[first_byte] |= first_mask & last_mask;
+                } else {
+                    bitmap.bitmap[first_byte] |= first_mask;
+                    var b = first_byte + 1;
+                    while (b < last_byte) : (b += 1) {
+                        bitmap.bitmap[b] = 0xFF;
+                    }
+                    bitmap.bitmap[last_byte] |= last_mask;
                 }
             }
         } else {
