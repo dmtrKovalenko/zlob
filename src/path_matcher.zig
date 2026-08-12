@@ -117,6 +117,28 @@ fn matchSegmentsSimple(
                 return path_idx < path_segments.len;
             }
 
+            // Fast path: when the tail after `**` has no further `**`
+            // we can quickly match the segment even if it contains additional
+            // syntax like ranges or braces (which should be resolved at this point)
+            // and save the time by applying full segment matching corpus
+            const tail = pattern_segments[pat_idx + 1 ..];
+            var tail_has_double_star = false;
+            for (tail) |seg| {
+                if (seg.len == 2 and seg[0] == '*' and seg[1] == '*') {
+                    tail_has_double_star = true;
+                    break;
+                }
+            }
+            if (!tail_has_double_star) {
+                const remaining = path_segments.len - path_idx;
+                if (remaining < tail.len) return false;
+                const start = path_segments.len - tail.len;
+                for (tail, path_segments[start..]) |tail_segment, pattern_segment| {
+                    if (!fnmatch_mod.fnmatch(tail_segment, pattern_segment, .{})) return false;
+                }
+                return true;
+            }
+
             if (matchSegmentsSimple(pattern_segments, path_segments, pat_idx + 1, path_idx)) {
                 return true;
             }
