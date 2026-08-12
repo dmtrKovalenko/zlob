@@ -40,6 +40,72 @@ pub const Pattern = struct {
 /// String hash map for O(1) literal lookups
 const StringHashMap = std.StringHashMap(PatternMatch);
 
+/// Compact per-wildcard-pattern reject data, kept in a side array parallel to
+/// `wildcard_patterns`. The hot loop in `checkWithBasename` walks only these
+/// 2-byte gates (one cache line covers 32 patterns) and touches the full
+/// ~100-byte `Pattern` struct only when a gate passes — for typical entries
+/// every pattern is rejected right here.
+pub const WildcardGate = packed struct(u16) {
+    /// Required last char (valid when `has_rc`).
+    rc: u8,
+    has_rc: bool,
+    /// `rc` is checked against the basename; otherwise against the full path.
+    rc_on_basename: bool,
+    /// Full-path `rc` check is sound (pattern has no `**`, or isn't dir_only).
+    rc_on_path: bool,
+    /// dir_only basename pattern: skip entirely for non-directories.
+    skip_for_file: bool,
+    _pad: u4 = 0,
+
+    fn init(p: *const Pattern) WildcardGate {
+        const basename_only = !p.anchored and !p.has_slash;
+        return .{
+            .rc = p.required_last_char orelse 0,
+            .has_rc = p.required_last_char != null,
+            .rc_on_basename = basename_only,
+            .rc_on_path = !p.has_double_star or !p.dir_only,
+            .skip_for_file = p.dir_only and basename_only,
+        };
+    }
+
+    /// True when the pattern cannot match this entry — mirrors the inline
+    /// reject checks previously duplicated in both checkWithBasename loops.
+    inline fn rejects(g: WildcardGate, path_last: i16, basename_last: i16, is_dir: bool) bool {
+        if (g.skip_for_file and !is_dir) return true;
+        if (g.has_rc) {
+            if (g.rc_on_basename) {
+                if (basename_last != g.rc) return true;
+            } else if (g.rc_on_path) {
+                if (path_last != g.rc) return true;
+            }
+        }
+        return false;
+    }
+};
+
+/// 256-bit presence filter keyed by a string's last byte.
+pub const LastByteFilter = struct {
+    bits: [4]u64 = .{ 0, 0, 0, 0 },
+
+    inline fn add(self: *LastByteFilter, key: []const u8) void {
+        const b = key[key.len - 1];
+        self.bits[b >> 6] |= @as(u64, 1) << @as(u6, @truncate(b));
+    }
+
+    inline fn mayContain(self: *const LastByteFilter, key: []const u8) bool {
+        if (key.len == 0) return false;
+        const b = key[key.len - 1];
+        return (self.bits[b >> 6] >> @as(u6, @truncate(b))) & 1 != 0;
+    }
+
+    fn fromMap(map: *const StringHashMap) LastByteFilter {
+        var f = LastByteFilter{};
+        var it = map.keyIterator();
+        while (it.next()) |key| f.add(key.*);
+        return f;
+    }
+};
+
 const PatternMatch = struct {
     negated: bool,
     dir_only: bool,
@@ -55,6 +121,8 @@ pub const GitIgnore = struct {
     patterns: []Pattern,
     /// Wildcard patterns only (excludes literals)
     wildcard_patterns: []Pattern,
+    /// Reject gates parallel to `wildcard_patterns` (see WildcardGate).
+    wildcard_gates: []WildcardGate,
     /// Literal directory patterns for O(1) lookup (e.g., "target", "node_modules")
     literal_dirs: StringHashMap,
     /// Literal file patterns for O(1) lookup
@@ -65,6 +133,14 @@ pub const GitIgnore = struct {
     anchored_literal_dirs: []Pattern,
     /// Simple suffix patterns like "*.rs", "*~", "*.vcxproj.filters"
     suffix_patterns: []Pattern,
+    /// 256-bit filters over the *last byte* of the keys in each literal hash
+    /// map. A hash lookup only runs when the candidate string's last byte has
+    /// its bit set — for the common non-matching entry this replaces a wyhash
+    /// of the basename (or the full path for anchored patterns) with one
+    /// bit test. All-zero when the map is empty.
+    literal_dirs_last: LastByteFilter,
+    literal_files_last: LastByteFilter,
+    anchored_paths_last: LastByteFilter,
     /// Inclusive start offset in suffix_patterns for each suffix last byte.
     suffix_bucket_start: [256]u32,
     /// Exclusive end offset in suffix_patterns for each suffix last byte.
@@ -333,6 +409,10 @@ pub const GitIgnore = struct {
         }
 
         // Whether any pattern needs the caller's path pre-split.
+        const wildcard_gates = try allocator.alloc(WildcardGate, wildcard_patterns.len);
+        errdefer allocator.free(wildcard_gates);
+        for (wildcard_patterns, wildcard_gates) |*p, *g| g.* = WildcardGate.init(p);
+
         var has_ds_wildcards = false;
         for (wildcard_patterns) |p| {
             if (p.segments.len > 0) {
@@ -344,6 +424,10 @@ pub const GitIgnore = struct {
         return Self{
             .patterns = patterns,
             .wildcard_patterns = wildcard_patterns,
+            .wildcard_gates = wildcard_gates,
+            .literal_dirs_last = LastByteFilter.fromMap(&literal_dirs),
+            .literal_files_last = LastByteFilter.fromMap(&literal_files),
+            .anchored_paths_last = LastByteFilter.fromMap(&anchored_literal_paths),
             .literal_dirs = literal_dirs,
             .literal_files = literal_files,
             .anchored_literal_paths = anchored_literal_paths,
@@ -492,47 +576,41 @@ pub const GitIgnore = struct {
 
         // Fast path: if no negations exist, we can use optimized lookups
         if (!self.has_negations) {
-            if (is_dir) {
+            if (is_dir and self.literal_dirs_last.mayContain(basename)) {
                 if (self.literal_dirs.get(basename)) |_| {
                     return true;
                 }
             }
 
-            if (self.literal_files.get(basename)) |match| {
-                if (!match.dir_only or is_dir) {
-                    return true;
+            if (self.literal_files_last.mayContain(basename)) {
+                if (self.literal_files.get(basename)) |match| {
+                    if (!match.dir_only or is_dir) {
+                        return true;
+                    }
                 }
             }
 
             if (self.matchAnySuffix(basename, is_dir)) return true;
 
-            if (self.anchored_literal_paths.get(normalized_path)) |_| {
-                return true;
+            if (self.anchored_paths_last.mayContain(normalized_path)) {
+                if (self.anchored_literal_paths.get(normalized_path)) |_| {
+                    return true;
+                }
             }
 
             for (self.anchored_literal_dirs) |pattern| {
                 if (matchAnchoredLiteralDir(&pattern, normalized_path, is_dir)) return true;
             }
 
-            // Check wildcard patterns - these require actual pattern matching
-            // OPTIMIZATION: Most wildcard patterns in typical .gitignore files
-            // are basename-only (no /), so we only need to check against basename
-            for (self.wildcard_patterns) |pattern| {
-                // For dir_only patterns checking a file: only skip if the pattern
-                // cannot match a parent directory. matchPatternFast handles the
-                // "is this file inside an ignored directory" check.
-                if (pattern.dir_only and !is_dir and !pattern.anchored and !pattern.has_slash) continue;
-                // Cheap rejection: if the required last char is known and doesn't
-                // match the end of the target string, skip the expensive fnmatch.
-                if (pattern.required_last_char) |rc| {
-                    if (!pattern.anchored and !pattern.has_slash) {
-                        if (basename.len == 0 or basename[basename.len - 1] != rc) continue;
-                    } else if (!pattern.has_double_star and !pattern.dir_only) {
-                        if (normalized_path.len == 0 or normalized_path[normalized_path.len - 1] != rc) continue;
-                    }
-                }
-
-                if (matchPatternFast(&pattern, normalized_path, basename, path_segs, is_dir)) {
+            // Check wildcard patterns - these require actual pattern matching.
+            // The parallel `wildcard_gates` array carries all the cheap reject
+            // data (dir_only skip + required-last-char), so the typical
+            // non-matching entry never loads the wide Pattern structs at all.
+            const path_last: i16 = if (normalized_path.len > 0) normalized_path[normalized_path.len - 1] else -1;
+            const base_last: i16 = if (basename.len > 0) basename[basename.len - 1] else -1;
+            for (self.wildcard_gates, 0..) |gate, i| {
+                if (gate.rejects(path_last, base_last, is_dir)) continue;
+                if (matchPatternFast(&self.wildcard_patterns[i], normalized_path, basename, path_segs, is_dir)) {
                     return true;
                 }
             }
@@ -546,22 +624,26 @@ pub const GitIgnore = struct {
         var ignored: ?bool = null;
         var best_index: u16 = 0;
 
-        if (is_dir) {
+        if (is_dir and self.literal_dirs_last.mayContain(basename)) {
             if (self.literal_dirs.get(basename)) |match| {
                 recordMatch(&best_index, &ignored, match.index, match.negated);
             }
         }
 
-        if (self.literal_files.get(basename)) |match| {
-            if (!match.dir_only or is_dir) {
-                recordMatch(&best_index, &ignored, match.index, match.negated);
+        if (self.literal_files_last.mayContain(basename)) {
+            if (self.literal_files.get(basename)) |match| {
+                if (!match.dir_only or is_dir) {
+                    recordMatch(&best_index, &ignored, match.index, match.negated);
+                }
             }
         }
 
         self.recordSuffixMatches(basename, is_dir, &best_index, &ignored);
 
-        if (self.anchored_literal_paths.get(normalized_path)) |match| {
-            recordMatch(&best_index, &ignored, match.index, match.negated);
+        if (self.anchored_paths_last.mayContain(normalized_path)) {
+            if (self.anchored_literal_paths.get(normalized_path)) |match| {
+                recordMatch(&best_index, &ignored, match.index, match.negated);
+            }
         }
 
         for (self.anchored_literal_dirs) |pattern| {
@@ -570,16 +652,12 @@ pub const GitIgnore = struct {
             }
         }
 
-        for (self.wildcard_patterns) |pattern| {
-            if (pattern.dir_only and !is_dir and !pattern.anchored and !pattern.has_slash) continue;
-            if (pattern.required_last_char) |rc| {
-                if (!pattern.anchored and !pattern.has_slash) {
-                    if (basename.len == 0 or basename[basename.len - 1] != rc) continue;
-                } else if (!pattern.has_double_star and !pattern.dir_only) {
-                    if (normalized_path.len == 0 or normalized_path[normalized_path.len - 1] != rc) continue;
-                }
-            }
-            if (matchPatternFast(&pattern, normalized_path, basename, path_segs, is_dir)) {
+        const path_last: i16 = if (normalized_path.len > 0) normalized_path[normalized_path.len - 1] else -1;
+        const base_last: i16 = if (basename.len > 0) basename[basename.len - 1] else -1;
+        for (self.wildcard_gates, 0..) |gate, i| {
+            if (gate.rejects(path_last, base_last, is_dir)) continue;
+            const pattern = &self.wildcard_patterns[i];
+            if (matchPatternFast(pattern, normalized_path, basename, path_segs, is_dir)) {
                 recordMatch(&best_index, &ignored, pattern.index, pattern.negated);
             }
         }
@@ -780,6 +858,7 @@ pub const GitIgnore = struct {
 
         self.allocator.free(self.patterns);
         self.allocator.free(self.wildcard_patterns);
+        self.allocator.free(self.wildcard_gates);
         self.allocator.free(self.anchored_literal_dirs);
         for (self.sources) |src| self.allocator.free(src);
         self.allocator.free(self.sources);
