@@ -173,11 +173,13 @@ pub const SharedWorkerState = struct {
     }
 };
 
+/// Per-entry scratch record. Metadata lives in the parallel `Worker.metas`
+/// list and only when the caller requested it (`options.meta.any()`), so the
+/// common no-metadata walk moves 12 bytes per entry instead of ~90.
 pub const Scratch = struct {
     name_off: u32,
     name_len: u32,
     kind: EntryKind,
-    meta: Metadata,
 };
 
 pub const Worker = struct {
@@ -188,6 +190,8 @@ pub const Worker = struct {
     /// Per-directory name bytes (reset per task, capacity retained).
     names: std.ArrayList(u8) = .empty,
     entries: std.ArrayList(Scratch) = .empty,
+    /// Parallel to `entries`; filled only when `options.meta.any()`.
+    metas: std.ArrayList(Metadata) = .empty,
     saw_gitignore: bool = false,
     saw_ignore: bool = false,
     /// Kernel buffer for getdents64 / getattrlistbulk.
@@ -212,6 +216,7 @@ pub const Worker = struct {
 
         w.names.deinit(allocator);
         w.entries.deinit(allocator);
+        w.metas.deinit(allocator);
         if (w.io_buf.len > 0) allocator.free(w.io_buf);
     }
 };
@@ -259,6 +264,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
 
     w.names.clearRetainingCapacity();
     w.entries.clearRetainingCapacity();
+    w.metas.clearRetainingCapacity();
     w.saw_gitignore = false;
     w.saw_ignore = false;
     scan.scanDir(sh, w, handle) catch |err| switch (err) {
@@ -295,9 +301,10 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     var child_ref: ?*HandleRef = null;
     defer if (child_ref) |cr| cr.release(sh);
 
-    for (w.entries.items) |se| {
+    for (w.entries.items, 0..) |se, i| {
         const name = w.names.items[se.name_off..][0..se.name_len];
-        try processEntry(sh, w, handle, name, se.kind, if (want_meta) se.meta else .{}, ignore, prefix_len, entry_depth, may_descend, &child_ref, &handle_consumed);
+        const meta: Metadata = if (want_meta) w.metas.items[i] else .{};
+        try processEntry(sh, w, handle, name, se.kind, meta, ignore, prefix_len, entry_depth, may_descend, &child_ref, &handle_consumed);
     }
 }
 
