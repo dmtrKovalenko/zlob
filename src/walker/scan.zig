@@ -76,8 +76,12 @@ inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: RawEntry) WalkE
         .name_off = off,
         .name_len = @intCast(name.len),
         .kind = raw.kind,
-        .meta = raw.meta,
     });
+    // Metadata rides in the parallel list only when the caller asked for it;
+    // processDir indexes it by entry position.
+    if (sh.options.meta.any()) {
+        try w.metas.append(sh.allocator, raw.meta);
+    }
 }
 
 inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []const u8, kind: EntryKind) WalkError!void {
@@ -96,7 +100,6 @@ inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []const 
         .name_off = off,
         .name_len = @intCast(name.len),
         .kind = kind,
-        .meta = undefined,
     });
 }
 
@@ -138,7 +141,11 @@ fn scanLinux(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!void 
             off += reclen;
 
             const name_ptr: [*:0]const u8 = @ptrCast(w.io_buf.ptr + base + 19);
-            const name = mem.sliceTo(name_ptr, 0);
+            // The name is NUL-terminated within the record, so a bounded
+            // vectorized scan beats compiler_rt's byte-wise strlen.
+            const name_area = w.io_buf[base + 19 .. base + reclen];
+            const name_len = mem.indexOfScalar(u8, name_area, 0) orelse name_area.len;
+            const name = name_area[0..name_len];
             if (name.len == 0) continue;
             if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
 
