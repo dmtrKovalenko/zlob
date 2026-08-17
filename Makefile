@@ -10,7 +10,7 @@ CFLAGS = -Wall -Wextra -O2
 CARGO ?= cargo
 CLANG_FORMAT ?= clang-format
 
-C_FORMAT_FILES = include/zlob.h test/test_c_api.c
+C_FORMAT_FILES = include/zlob.h test/test_c_api.c test/test_nolibc_threads.c
 
 # Detect OS for library extension
 UNAME_S := $(shell uname -s)
@@ -25,7 +25,7 @@ else
     LIBEXT = dll
 endif
 
-.PHONY: all build install uninstall test clean cli install-cli uninstall-cli dev dev-test test-libc format format-check help
+.PHONY: all build install uninstall test clean cli install-cli uninstall-cli dev dev-test test-libc test-nolibc-threads format format-check help
 
 all: build
 
@@ -81,6 +81,11 @@ ifneq ($(filter Linux Darwin,$(UNAME_S)),)
 		-Wl,-rpath,./zig-out/lib
 	./test_c_api
 	@rm -f test_c_api
+endif
+ifneq ($(filter Linux Darwin,$(UNAME_S)),)
+	@echo "========================"
+	@echo "-> Running no-libc thread test (fff#786)"
+	$(MAKE) test-nolibc-threads
 endif
 	@echo "========================"
 	@echo "-> Running Rust tests"
@@ -159,6 +164,15 @@ dev-test: build
 	@echo "All tests passed!"
 	@echo "========================================"
 
+test-nolibc-threads:
+	./scripts/test_nolibc_threads.sh
+	@if command -v qemu-aarch64-static >/dev/null 2>&1; then \
+		./scripts/test_nolibc_threads.sh aarch64-linux-musl qemu-aarch64-static; \
+	else \
+		echo "note: qemu-aarch64-static not installed, skipping the aarch64 case"; \
+		echo "      (x86_64 alone cannot catch fff#786)"; \
+	fi
+
 # Run libc comparison tests only
 test-libc: build
 	@echo "========================================"
@@ -184,6 +198,7 @@ help:
 	@echo "  make install      - Install library and headers (may require sudo)"
 	@echo "  make test         - Run all tests (Zig + Rust, plus C API on Linux/macOS)"
 	@echo "  make test-libc    - Run libc comparison tests (requires TEST_DIR)"
+	@echo "  make test-nolibc-threads - Regression test for the Android/Termux thread crash (fff#786)"
 	@echo "  make cli          - Build the CLI executable"
 	@echo "  make install-cli  - Install CLI executable (may require sudo)"
 	@echo "  make clean        - Remove build artifacts"

@@ -10,8 +10,10 @@ const gitignore_mod = @import("../gitignore.zig");
 const compiled_pattern = @import("../compiled_pattern.zig");
 const pattern_context = @import("../pattern_context.zig");
 const ignore_rules = @import("ignore_rules.zig");
+const thread_mod = @import("thread.zig");
 
 pub const IgnoreRules = ignore_rules.IgnoreRules;
+pub const Thread = thread_mod.Thread;
 
 const posix = std.posix;
 const linux = std.os.linux;
@@ -129,7 +131,7 @@ pub const SharedWorkerState = struct {
     /// Lazy worker spawning: helper threads are created only once the walk has
     /// demonstrably parallel work, so shallow trees never pay the spawn cost.
     workers: []Worker = &.{},
-    threads: []std.Thread = &.{},
+    threads: []Thread = &.{},
     spawn_started: std.atomic.Value(bool) = .init(false),
     spawned: usize = 0,
 
@@ -155,8 +157,11 @@ pub const SharedWorkerState = struct {
         if (sh.threads.len == 0) return;
         if (sh.spawn_started.swap(true, .acq_rel)) return;
 
+        // A failed spawn is not fatal -- the remaining work stays with the
+        // workers already running (worker 0 at minimum), so the walk still
+        // completes, just with less parallelism.
         for (sh.threads, 1..) |*t, i| {
-            t.* = std.Thread.spawn(.{}, workerLoop, .{ sh, &sh.workers[i] }) catch break;
+            t.* = Thread.spawn(workerThreadMain, @ptrCast(&sh.workers[i])) catch break;
             sh.spawned += 1;
         }
 
@@ -226,6 +231,11 @@ pub fn freeTask(sh: *SharedWorkerState, t: *DirTask) void {
     if (t.ignore) |ig| ig.release(sh.allocator);
     sh.allocator.free(t.rel);
     sh.allocator.destroy(t);
+}
+
+fn workerThreadMain(ctx: *anyopaque) void {
+    const w: *Worker = @ptrCast(@alignCast(ctx));
+    workerLoop(w.sh, w);
 }
 
 pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {

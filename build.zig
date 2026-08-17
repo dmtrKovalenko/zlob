@@ -41,7 +41,15 @@ pub fn build(b: *std.Build) void {
         else => false,
     };
 
-    const use_libc = !is_windows_msvc and !is_android and !is_apple_mobile;
+    // bug pinning: we had an issue with android targets compilation without libc linked
+    // so this option allows to force no libc without changing the targets for verification
+    const force_no_libc = b.option(
+        bool,
+        "force-no-libc",
+        "Build without libc even on targets that support it (reproduces the Android config)",
+    ) orelse false;
+
+    const use_libc = !is_windows_msvc and !is_android and !is_apple_mobile and !force_no_libc;
 
     // Source directory option - allows overriding for Rust crate builds
     const src_dir = b.option([]const u8, "src-dir", "Source directory (default: src)") orelse "src";

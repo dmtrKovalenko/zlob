@@ -246,8 +246,8 @@ fn walkImpl(
         inited += 1;
     }
 
-    const threads: []std.Thread = if (n_workers > 1)
-        try allocator.alloc(std.Thread, n_workers - 1)
+    const threads: []worker.Thread = if (n_workers > 1)
+        try allocator.alloc(worker.Thread, n_workers - 1)
     else
         &.{};
     defer if (threads.len > 0) allocator.free(threads);
