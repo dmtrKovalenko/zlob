@@ -79,6 +79,55 @@ test "walk basic tree: paths, kinds, depths, NUL termination" {
     try testing.expectEqual(@as(u16, 3), c.depth);
 }
 
+test "walk unicode and invalid-UTF-8 names: byte-exact paths and offsets" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("unicode");
+    defer t.deinit();
+
+    try t.mkdir("ünïcode");
+    try t.mkdir("ünïcode/日本語ディレクトリ");
+    try t.write("ünïcode/日本語ディレクトリ/файл-🚀.txt", "x");
+
+    // POSIX filenames are arbitrary bytes; names with invalid UTF-8 (from the
+    // fff#799 reproducer) must round-trip byte-exact through the walker.
+    // Only Linux filesystems reliably accept them.
+    const invalid_dir = "#fq\x1c\xf0\x2a\x038k9\x8b\x0b\x95\x82K";
+    const invalid_file = "\x07\xfa\x04yA!\xfa\xd9\xf1zR\xa3s\xa6";
+    var expect_total: usize = 3;
+    if (builtin.os.tag == .linux) {
+        try t.mkdir(invalid_dir);
+        try t.write(invalid_dir ++ "/" ++ invalid_file, "");
+        expect_total += 2;
+    }
+
+    var results = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .sort = true });
+    defer results.deinit();
+    try testing.expectEqual(expect_total, results.entries.len);
+
+    // Offsets are byte offsets and must hold for every entry regardless of
+    // how the name decodes: relative part starts right after "root/", the
+    // basename right after the last '/'.
+    for (results.entries) |*e| {
+        try testing.expect(std.mem.startsWith(u8, e.path, t.root));
+        try testing.expectEqual(t.root.len + 1, e.relative_offset);
+        try testing.expectEqual(@as(u8, '/'), e.path[e.relative_offset - 1]);
+        const last_slash = std.mem.lastIndexOfScalar(u8, e.path, '/').?;
+        try testing.expectEqualStrings(e.path[last_slash + 1 ..], e.basename);
+    }
+
+    const rocket = findEntry(&results, "ünïcode/日本語ディレクトリ/файл-🚀.txt").?;
+    try testing.expectEqualStrings("файл-🚀.txt", rocket.basename);
+    try testing.expectEqual(@as(u16, 3), rocket.depth);
+    try testing.expectEqual(walk.EntryKind.file, rocket.kind);
+
+    if (builtin.os.tag == .linux) {
+        const deep = findEntry(&results, invalid_dir ++ "/" ++ invalid_file).?;
+        try testing.expectEqualStrings(invalid_file, deep.basename);
+        try testing.expectEqual(walk.EntryKind.file, deep.kind);
+        try testing.expectEqual(walk.EntryKind.directory, findEntry(&results, invalid_dir).?.kind);
+    }
+}
+
 test "walk nested gitignore: deeper file overrides parent" {
     var t: TestTree = .{ .io = undefined };
     try t.init("gitignore");
