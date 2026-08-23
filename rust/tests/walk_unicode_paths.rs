@@ -187,10 +187,7 @@ fn valid_multibyte_unicode_names() {
 
     for e in results.iter() {
         // valid UTF-8: lossy view is identical and the offsets agree
-        assert_eq!(
-            e.relative_path_lossy().as_bytes(),
-            e.relative_path_bytes()
-        );
+        assert_eq!(e.relative_path_lossy().as_bytes(), e.relative_path_bytes());
         assert_eq!(
             e.basename_offset_in_relative_lossy(),
             e.basename_offset_in_relative() as usize

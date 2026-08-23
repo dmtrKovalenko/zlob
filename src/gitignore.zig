@@ -534,7 +534,9 @@ pub const GitIgnore = struct {
                 @memcpy(@as([*]u8, @ptrCast(&suffix_u32))[0..s.len], s);
             }
             if (s.len <= 8) {
-                @memcpy(@as([*]u8, @ptrCast(&suffix_u64))[0..s.len], s);
+                // Explicitly little-endian so the shift trick in
+                // matchSuffixFast keeps the suffix bytes on any host.
+                suffix_u64 = mem.readVarInt(u64, s, .little);
             }
         }
 
@@ -809,7 +811,7 @@ pub const GitIgnore = struct {
                 // leaves exactly the last suffix_len bytes for one compare.
                 if (basename.len < 8) break :blk mem.endsWith(u8, basename, pattern.suffix.?);
                 const tail_ptr = basename.ptr + basename.len - 8;
-                const tail: u64 = @as(*align(1) const u64, @ptrCast(tail_ptr)).*;
+                const tail: u64 = mem.readInt(u64, tail_ptr[0..8], .little);
                 const shift: u6 = @intCast(8 * (8 - @as(u32, suffix_len)));
                 break :blk (tail >> shift) == pattern.suffix_u64;
             },

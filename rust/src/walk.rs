@@ -570,34 +570,12 @@ impl<'a> WalkEntry<'a> {
     }
 
     /// Path relative to the walk root, decoded as UTF-8 with invalid
-    /// sequences replaced by U+FFFD. Borrows (no allocation) when the path
-    /// is valid UTF-8.
-    ///
-    /// Slice this only with [`Self::basename_offset_in_relative_lossy`] —
-    /// the raw [`Self::basename_offset_in_relative`] indexes the raw bytes
-    /// and lands inside a replacement character when the directory part
-    /// contains invalid UTF-8.
+    /// sequences replaced by U+FFFD. Doesn't allocate if string is valid UT-F8
     #[inline]
     pub fn relative_path_lossy(&self) -> std::borrow::Cow<'a, str> {
         String::from_utf8_lossy(self.relative_path_bytes())
     }
 
-    /// Byte offset where the basename begins inside
-    /// [`Self::relative_path_lossy`]. Always a char boundary of the lossy
-    /// string; equals [`Self::basename_offset_in_relative`] whenever the
-    /// directory part is valid UTF-8 (the common case, checked without
-    /// allocating).
-    pub fn basename_offset_in_relative_lossy(&self) -> usize {
-        let raw = self.basename_offset_in_relative() as usize;
-        let dirs = &self.relative_path_bytes()[..raw];
-        if std::str::from_utf8(dirs).is_ok() {
-            return raw;
-        }
-        // The basename starts right after an ASCII '/', so no multibyte
-        // sequence spans the cut: decoding the directory part alone yields
-        // exactly the prefix of the full lossy decode.
-        String::from_utf8_lossy(dirs).len()
-    }
 
     /// If the item is kind of `WalkEntryKind::File` returns it's filename, otherwise None
     #[inline]
@@ -621,6 +599,18 @@ impl<'a> WalkEntry<'a> {
             .raw
             .basename_offset
             .saturating_sub(self.raw.relative_offset)) as u16
+    }
+
+    /// Byte offset where the basename begins inside
+    /// [`Self::relative_path_lossy`]. But supports lossy fallbacks for non utf-8 strings.
+    pub fn basename_offset_in_relative_lossy(&self) -> usize {
+        let raw = self.basename_offset_in_relative() as usize;
+        let dirs = &self.relative_path_bytes()[..raw];
+        if std::str::from_utf8(dirs).is_ok() {
+            return raw;
+        }
+
+        String::from_utf8_lossy(dirs).len()
     }
 
     /// Depth below the root — direct children of the root are at depth 1.
