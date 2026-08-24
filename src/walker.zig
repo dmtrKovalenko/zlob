@@ -1444,8 +1444,9 @@ pub const AltFs = struct {
 
 test "walker basic" {
     const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var walker = try DefaultWalker.init(allocator, ".", .{ .hidden = HiddenConfig.posix_default });
+    var walker = try DefaultWalker.init(allocator, io, ".", .{ .hidden = HiddenConfig.posix_default });
     defer walker.deinit();
 
     var count: usize = 0;
@@ -1455,6 +1456,32 @@ test "walker basic" {
     }
 
     try std.testing.expect(count > 0);
+}
+
+test "direntNameLen finds the terminator across word boundaries" {
+    // Names are laid out as the kernel writes them: NUL-terminated, then
+    // padded to the record length.
+    var area: [64]u8 = undefined;
+    for ([_]usize{ 0, 1, 7, 8, 9, 15, 16, 31 }) |name_len| {
+        @memset(&area, 'a');
+        area[name_len] = 0;
+        @memset(area[name_len + 1 ..], 0);
+        try std.testing.expectEqual(name_len, direntNameLen(&area, area.len));
+    }
+}
+
+test "direntNameLen clamps when the area has no terminator" {
+    // A malformed record without a NUL must report the area length rather
+    // than running past it.
+    var area: [24]u8 = @splat('a');
+    try std.testing.expectEqual(area.len, direntNameLen(&area, area.len));
+
+    // Unterminated area whose length is not a multiple of the word size:
+    // the final word read spans past area_len, so the result must clamp.
+    var padded: [32]u8 = @splat('a');
+    @memset(padded[21..], 0);
+    try std.testing.expectEqual(@as(usize, 21), direntNameLen(&padded, 21));
+    try std.testing.expectEqual(@as(usize, 13), direntNameLen(&padded, 13));
 }
 
 test "EntryKind is std.Io.File.Kind" {

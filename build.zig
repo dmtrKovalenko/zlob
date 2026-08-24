@@ -271,6 +271,7 @@ pub fn build(b: *std.Build) void {
         "test/test_walk.zig",
         "test/test_walker_paths.zig",
         // files with inline tests
+        "src/walker.zig",
         "src/brace_optimizer.zig",
         "src/gitignore.zig",
         "src/fnmatch.zig",
