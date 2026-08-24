@@ -118,7 +118,8 @@ fn scanLinux(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!void 
     const only_inode = sh.options.meta.toInt() == (MetaMask{ .inode = true }).toInt();
 
     while (true) {
-        const rc = linux.getdents64(fd, w.io_buf.ptr, w.io_buf.len);
+        // Short by 8 so the word-at-a-time name scan below stays in bounds.
+        const rc = linux.getdents64(fd, w.io_buf.ptr, w.io_buf.len - 8);
         const n: isize = @bitCast(rc);
         if (n < 0) {
             return switch (linux.errno(rc)) {
@@ -141,10 +142,20 @@ fn scanLinux(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!void 
             off += reclen;
 
             const name_ptr: [*:0]const u8 = @ptrCast(w.io_buf.ptr + base + 19);
-            // The name is NUL-terminated within the record, so a bounded
-            // vectorized scan beats compiler_rt's byte-wise strlen.
+            // The name is NUL-terminated within the record; scan a word at a
+            // time. Vectorized scans do not amortize at these lengths.
             const name_area = w.io_buf[base + 19 .. base + reclen];
-            const name_len = mem.indexOfScalar(u8, name_area, 0) orelse name_area.len;
+            const name_len = blk: {
+                const lo: u64 = 0x0101010101010101;
+                const hi: u64 = 0x8080808080808080;
+                var k: usize = 0;
+                while (k < name_area.len) : (k += 8) {
+                    const word = mem.readInt(u64, name_area.ptr[k..][0..8], .little);
+                    const zero_mask = (word -% lo) & ~word & hi;
+                    if (zero_mask != 0) break :blk @min(k + (@ctz(zero_mask) >> 3), name_area.len);
+                }
+                break :blk name_area.len;
+            };
             const name = name_area[0..name_len];
             if (name.len == 0) continue;
             if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;

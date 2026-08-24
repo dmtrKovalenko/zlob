@@ -269,6 +269,7 @@ pub fn build(b: *std.Build) void {
         "test/test_edge_cases.zig",
         "test/test_absolute_paths.zig",
         "test/test_walk.zig",
+        "test/test_walker_paths.zig",
         // files with inline tests
         "src/brace_optimizer.zig",
         "src/gitignore.zig",

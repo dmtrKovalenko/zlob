@@ -176,28 +176,7 @@ fn globLiteralPath(allocator: Allocator, path: []const u8, flags: ZlobFlags, pzl
     }
 
     const needs_slash = flags.mark and is_dir;
-    const final_len = return_path.len + (if (needs_slash) @as(usize, 1) else 0);
-
-    var path_copy = try allocator.allocSentinel(u8, final_len, 0);
-    @memcpy(path_copy[0..return_path.len], return_path);
-    if (needs_slash) {
-        path_copy[return_path.len] = '/';
-    }
-
-    const path_ptr: [*c]u8 = @ptrCast(path_copy.ptr);
-
-    const pathv_buf = try allocator.alloc([*c]u8, 2);
-    const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-    result[0] = path_ptr;
-    result[1] = null;
-
-    const pathlen_buf = try allocator.alloc(usize, 1);
-    pathlen_buf[0] = final_len; // Length from slice - no strlen()!
-
-    pzlob.zlo_pathc = 1;
-    pzlob.zlo_pathv = result;
-    pzlob.zlo_pathlen = pathlen_buf.ptr;
-    pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
+    try emitSingleResult(allocator, pzlob, return_path, needs_slash);
 
     return true;
 }
@@ -227,33 +206,39 @@ pub const DT_DIR = std.c.DT.DIR;
 pub const ResultsList = struct {
     const INLINE_CAP = 32;
 
-    /// Heap-allocated buffers (null when using inline)
-    heap_paths: ?[*][*c]u8 = null,
+    /// Heap-allocated record buffers (null when using inline)
+    heap_offsets: ?[*]usize = null,
     heap_lengths: ?[*]usize = null,
 
     count: usize = 0,
     capacity: usize = INLINE_CAP,
     allocator: Allocator,
-    // Inline buffers for small result sets - avoids heap allocation for <=32 results
-    inline_paths: [INLINE_CAP][*c]u8 = undefined,
+    /// Backing storage for every path's bytes, each NUL-terminated. Records
+    /// reference it by offset so it can realloc freely as results accumulate;
+    /// offsets only become pointers in emit().
+    bytes: std.ArrayList(u8) = .empty,
+    // Inline record buffers for small result sets - avoids heap allocation
+    // for the records of <=32 results
+    inline_offsets: [INLINE_CAP]usize = undefined,
     inline_lengths: [INLINE_CAP]usize = undefined,
 
-    /// Initialize with inline (stack) capacity - zero heap allocations.
+    /// Initialize with inline (stack) record capacity.
     pub fn init(allocator: Allocator) ResultsList {
         return .{ .allocator = allocator };
     }
 
-    /// Initialize with pre-allocated capacity.
+    /// Initialize with pre-allocated record capacity.
     /// If requested capacity <= INLINE_CAP, uses the inline buffer (no heap alloc).
     /// Otherwise allocates on the heap.
     pub fn initWithCapacity(allocator: Allocator, capacity: usize) Allocator.Error!ResultsList {
         if (capacity <= INLINE_CAP) {
             return init(allocator);
         }
-        const hp = try allocator.alloc([*c]u8, capacity);
+        const ho = try allocator.alloc(usize, capacity);
+        errdefer allocator.free(ho);
         const hl = try allocator.alloc(usize, capacity);
         return .{
-            .heap_paths = hp.ptr,
+            .heap_offsets = ho.ptr,
             .heap_lengths = hl.ptr,
             .capacity = capacity,
             .allocator = allocator,
@@ -261,12 +246,12 @@ pub const ResultsList = struct {
     }
 
     inline fn isInline(self: *const ResultsList) bool {
-        return self.heap_paths == null;
+        return self.heap_offsets == null;
     }
 
-    /// Get pointer to current paths storage
-    inline fn pathsPtr(self: *ResultsList) [*][*c]u8 {
-        return self.heap_paths orelse @as([*][*c]u8, @ptrCast(&self.inline_paths));
+    /// Get pointer to current offsets storage
+    inline fn offsetsPtr(self: *ResultsList) [*]usize {
+        return self.heap_offsets orelse @as([*]usize, @ptrCast(&self.inline_offsets));
     }
 
     /// Get pointer to current lengths storage
@@ -276,102 +261,120 @@ pub const ResultsList = struct {
 
     pub fn deinit(self: *ResultsList) void {
         if (!self.isInline()) {
-            self.allocator.free(self.heap_paths.?[0..self.capacity]);
+            self.allocator.free(self.heap_offsets.?[0..self.capacity]);
             self.allocator.free(self.heap_lengths.?[0..self.capacity]);
         }
+        self.bytes.deinit(self.allocator);
     }
 
-    pub fn ensureTotalCapacity(self: *ResultsList, capacity: usize) Allocator.Error!void {
-        if (capacity <= self.capacity) return;
-        try self.grow(capacity);
-    }
-
-    /// Grow to at least the given capacity, spilling from inline to heap if needed.
+    /// Grow the record arrays to at least the given capacity, spilling from
+    /// inline to heap if needed.
     fn grow(self: *ResultsList, min_capacity: usize) Allocator.Error!void {
         const new_cap = @max(min_capacity, self.capacity * 2);
-        const new_paths = try self.allocator.alloc([*c]u8, new_cap);
+        const new_offsets = try self.allocator.alloc(usize, new_cap);
+        errdefer self.allocator.free(new_offsets);
         const new_lengths = try self.allocator.alloc(usize, new_cap);
         // Copy existing data
         if (self.count > 0) {
-            const src_p = self.pathsPtr();
-            const src_l = self.lengthsPtr();
-            @memcpy(new_paths[0..self.count], src_p[0..self.count]);
-            @memcpy(new_lengths[0..self.count], src_l[0..self.count]);
+            @memcpy(new_offsets[0..self.count], self.offsetsPtr()[0..self.count]);
+            @memcpy(new_lengths[0..self.count], self.lengthsPtr()[0..self.count]);
         }
         // Free old heap buffers (inline buffers are part of the struct, nothing to free)
         if (!self.isInline()) {
-            self.allocator.free(self.heap_paths.?[0..self.capacity]);
+            self.allocator.free(self.heap_offsets.?[0..self.capacity]);
             self.allocator.free(self.heap_lengths.?[0..self.capacity]);
         }
-        self.heap_paths = new_paths.ptr;
+        self.heap_offsets = new_offsets.ptr;
         self.heap_lengths = new_lengths.ptr;
         self.capacity = new_cap;
     }
 
-    /// Add a path with its known length - O(1) amortized
-    pub fn append(self: *ResultsList, ptr: [*c]u8, path_len: usize) Allocator.Error!void {
+    /// Reserve a record plus `path_len + 1` bytes and return the writable path
+    /// slice for the caller to fill. The trailing NUL is already placed.
+    pub fn addPath(self: *ResultsList, path_len: usize) Allocator.Error![]u8 {
         if (self.count >= self.capacity) {
             try self.grow(self.capacity + 1);
         }
-        const p = self.pathsPtr();
-        const l = self.lengthsPtr();
-        p[self.count] = ptr;
-        l[self.count] = path_len;
+        const off = self.bytes.items.len;
+        try self.bytes.ensureUnusedCapacity(self.allocator, path_len + 1);
+        self.bytes.items.len += path_len + 1;
+        self.bytes.items[off + path_len] = 0;
+        self.offsetsPtr()[self.count] = off;
+        self.lengthsPtr()[self.count] = path_len;
         self.count += 1;
+        return self.bytes.items[off..][0..path_len];
+    }
+
+    /// Copy a complete path into the shared buffer - O(1) amortized.
+    pub fn appendPath(self: *ResultsList, path: []const u8) Allocator.Error!void {
+        const dst = try self.addPath(path.len);
+        @memcpy(dst, path);
+    }
+
+    /// Drop the most recently added path, for filters that reject it after
+    /// it has already been built into the buffer.
+    pub fn discardLast(self: *ResultsList) void {
+        self.count -= 1;
+        self.bytes.items.len = self.offsetsPtr()[self.count];
     }
 
     pub fn len(self: *const ResultsList) usize {
         return self.count;
     }
 
-    /// Get the current paths as a slice
-    pub inline fn pathSlice(self: *ResultsList) [][*c]u8 {
-        return self.pathsPtr()[0..self.count];
+    /// View of the i-th path's bytes. Invalidated by any subsequent addPath.
+    pub fn getPath(self: *ResultsList, i: usize) []const u8 {
+        return self.bytes.items[self.offsetsPtr()[i]..][0..self.lengthsPtr()[i]];
     }
 
-    /// Get the current lengths as a slice
-    pub inline fn lengthSlice(self: *ResultsList) []usize {
-        return self.lengthsPtr()[0..self.count];
-    }
-
-    /// Transfer ownership of the paths array, adding a null terminator.
-    /// Returns a heap-allocated buffer with null terminator appended.
-    /// Note: count is NOT reset here so toOwnedLengths can still read it.
-    pub fn toOwnedPathv(self: *ResultsList) Allocator.Error![][*c]u8 {
+    /// Emit the collected results into `pzlob`:
+    ///   pathv:   [offs nulls][count pointers][null]         (offs+count+1 slots)
+    ///   pathlen: [count lengths][bytes base][bytes capacity] (count+2 slots)
+    /// Ownership of the byte buffer moves into the zlob_t, and the two slots
+    /// past the visible lengths let globfreeInternal release the whole result
+    /// set in three frees. They are invisible to C callers, which only ever
+    /// see zlo_pathlen as a pointer.
+    /// On error the list is unchanged and still safe to deinit.
+    pub fn emit(self: *ResultsList, offs: usize, pzlob: *zlob_t) Allocator.Error!void {
         const count = self.count;
-        // Always allocate exact-sized buffer and copy (simple + correct)
-        const buf = try self.allocator.alloc([*c]u8, count + 1);
-        if (count > 0) {
-            const src = self.pathsPtr();
-            @memcpy(buf[0..count], src[0..count]);
-        }
-        buf[count] = null;
-        // Free heap paths buffer if any (but preserve count for toOwnedLengths)
-        if (!self.isInline()) {
-            self.allocator.free(self.heap_paths.?[0..self.capacity]);
-            self.heap_paths = null;
-        }
-        return buf;
-    }
+        const pathv_buf = try self.allocator.alloc([*c]u8, offs + count + 1);
+        errdefer self.allocator.free(pathv_buf);
+        const pathlen_buf = try self.allocator.alloc(usize, count + 2);
 
-    /// Transfer ownership of the lengths array (exact-sized allocation).
-    /// Note: count is NOT reset here; call deinit() when done with both arrays.
-    pub fn toOwnedLengths(self: *ResultsList) Allocator.Error![]usize {
-        const count = self.count;
-        // Always allocate exact-sized buffer and copy (simple + correct)
-        const buf = try self.allocator.alloc(usize, count);
-        if (count > 0) {
-            const src = self.lengthsPtr();
-            @memcpy(buf[0..count], src[0..count]);
+        @memset(pathv_buf[0..offs], null);
+        const base = self.bytes.items.ptr;
+        const offsets = self.offsetsPtr();
+        const lengths = self.lengthsPtr();
+        for (0..count) |i| {
+            pathv_buf[offs + i] = @ptrCast(base + offsets[i]);
+            pathlen_buf[i] = lengths[i];
         }
-        // Free heap lengths buffer if any
-        if (self.heap_lengths) |hl| {
-            self.allocator.free(hl[0..self.capacity]);
-            self.heap_lengths = null;
-        }
-        return buf;
+        pathv_buf[offs + count] = null;
+        pathlen_buf[count] = @intFromPtr(base);
+        pathlen_buf[count + 1] = self.bytes.capacity;
+
+        pzlob.zlo_pathc = count;
+        pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
+        pzlob.zlo_pathlen = pathlen_buf.ptr;
+        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
+
+        // The byte buffer now belongs to pzlob; deinit must not free it.
+        self.bytes = .empty;
     }
 };
+
+/// Emit a lone result path (NOCHECK pattern echo, literal path hit) in the
+/// format ResultsList.emit produces, so globfreeInternal can treat every
+/// OWNS_STRINGS zlob_t the same way.
+pub fn emitSingleResult(allocator: Allocator, pzlob: *zlob_t, path: []const u8, append_slash: bool) Allocator.Error!void {
+    var list = ResultsList.init(allocator);
+    defer list.deinit();
+    const total = path.len + @intFromBool(append_slash);
+    const dst = try list.addPath(total);
+    @memcpy(dst[0..path.len], path);
+    if (append_slash) dst[path.len] = '/';
+    try list.emit(0, pzlob);
+}
 
 const PatternInfo = struct {
     literal_prefix: []const u8, // e.g., "src/foo" from "src/foo/*.txt"
@@ -545,9 +548,26 @@ inline fn matchWithAlternativesExtglob(name: []const u8, alternatives: []const [
     return false;
 }
 
-inline fn matchWithAlternativesPrecomputedExtglob(name: []const u8, patterns: []const []const u8, contexts: []const PatternContext, enable_extglob: bool) bool {
-    for (patterns, contexts) |pat, *ctx| {
-        if (enable_extglob and fnmatch_impl.containsExtglob(pat)) {
+/// Bitmask of which alternatives contain extglob syntax, computed once per
+/// glob call. Alternatives past 64 fall back to a live scan in altIsExtglob.
+fn altExtglobMask(alternatives: anytype) u64 {
+    var mask: u64 = 0;
+    const alts = alternatives orelse return 0;
+    for (alts, 0..) |alt, i| {
+        if (i >= 64) break;
+        if (fnmatch_impl.containsExtglob(alt)) mask |= @as(u64, 1) << @intCast(i);
+    }
+    return mask;
+}
+
+inline fn altIsExtglob(mask: u64, i: usize, pattern: []const u8) bool {
+    if (i < 64) return (mask >> @intCast(i)) & 1 != 0;
+    return fnmatch_impl.containsExtglob(pattern);
+}
+
+inline fn matchWithAlternativesPrecomputedExtglob(name: []const u8, patterns: []const []const u8, contexts: []const PatternContext, extglob_mask: u64) bool {
+    for (patterns, contexts, 0..) |pat, *ctx, i| {
+        if (altIsExtglob(extglob_mask, i, pat)) {
             if (fnmatch_impl.matchExtglob(pat, name)) return true;
         } else {
             if (ctx.single_suffix_matcher) |*batched| {
@@ -567,7 +587,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     // The main recursive and filtered paths handle gitignore
     _ = gitignore_filter;
 
-    var components: [64][]const u8 = undefined;
+    var components: [64]WildcardComponent = undefined;
     var component_count: usize = 0;
 
     const effective_pattern = info.wildcard_suffix;
@@ -576,14 +596,14 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     for (effective_pattern, 0..) |ch, idx| {
         if (isSep(ch)) {
             if (idx > start) {
-                components[component_count] = effective_pattern[start..idx];
+                components[component_count] = WildcardComponent.init(effective_pattern[start..idx], flags);
                 component_count += 1;
             }
             start = idx + 1;
         }
     }
     if (start < effective_pattern.len) {
-        components[component_count] = effective_pattern[start..];
+        components[component_count] = WildcardComponent.init(effective_pattern[start..], flags);
         component_count += 1;
     }
 
@@ -596,38 +616,16 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
 
     var result_paths = ResultsList.initWithCapacity(allocator, estimated_capacity) catch ResultsList.init(allocator);
     defer result_paths.deinit();
-    errdefer {
-        for (result_paths.pathSlice(), result_paths.lengthSlice()) |path, path_len| {
-            const path_slice = @as([*]u8, @ptrCast(path))[0 .. path_len + 1];
-            allocator.free(path_slice);
-        }
-    }
-
     const start_dir = if (info.literal_prefix.len > 0)
         info.literal_prefix
     else
         ".";
 
-    try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc, io, base_dir, fs_provider);
+    try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc, io, base_dir, fs_provider, base_dir, start_dir);
 
     if (result_paths.len() == 0) {
         if (flags.nocheck) {
-            const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
-            @memcpy(pat_copy[0..pattern.len], pattern);
-            const path: [*c]u8 = @ptrCast(pat_copy.ptr);
-
-            const pathv_buf = allocator.alloc([*c]u8, 2) catch return error.OutOfMemory;
-            const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-            result[0] = path;
-            result[1] = null;
-
-            const pathlen_buf = allocator.alloc(usize, 1) catch return error.OutOfMemory;
-            pathlen_buf[0] = pattern.len;
-
-            pzlob.zlo_pathc = 1;
-            pzlob.zlo_pathv = result;
-            pzlob.zlo_pathlen = pathlen_buf.ptr;
-            pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
+            emitSingleResult(allocator, pzlob, pattern, false) catch return error.OutOfMemory;
             return;
         }
         return null;
@@ -636,10 +634,31 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     return finalizeResults(allocator, &result_paths, flags, pzlob);
 }
 
+/// One path component of a wildcard-dirs pattern, with its match state
+/// precomputed: expandWildcardComponents matches the same component against
+/// every directory it visits.
+const WildcardComponent = struct {
+    text: []const u8,
+    ctx: PatternContext,
+    /// flags.extglob AND the component contains extglob syntax
+    is_extglob: bool,
+
+    fn init(text: []const u8, flags: ZlobFlags) WildcardComponent {
+        return .{
+            .text = text,
+            .ctx = PatternContext.init(text),
+            .is_extglob = flags.extglob and fnmatch_impl.containsExtglob(text),
+        };
+    }
+};
+
+/// `current_dir` is the full path from the walk root, used for results and
+/// error reporting. `(rel_base, rel_path)` names the same directory relative
+/// to an already-open ancestor fd where the platform offers one.
 fn expandWildcardComponents(
     allocator: std.mem.Allocator,
     current_dir: []const u8,
-    components: []const []const u8,
+    components: []const WildcardComponent,
     component_idx: usize,
     results: *ResultsList,
     directories_only: bool,
@@ -648,6 +667,8 @@ fn expandWildcardComponents(
     io: Io,
     base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
+    rel_base: ?std.Io.Dir,
+    rel_path: []const u8,
 ) !void {
     if (component_idx > 65536) {
         @branchHint(.unlikely);
@@ -658,19 +679,15 @@ fn expandWildcardComponents(
     if (component_idx >= components.len) {
         @branchHint(.unlikely);
 
-        const path_copy = try allocator.allocSentinel(u8, current_dir.len, 0);
-        @memcpy(path_copy[0..current_dir.len], current_dir);
-        const path: [*c]u8 = @ptrCast(path_copy.ptr);
-        try results.append(path, current_dir.len);
+        try results.appendPath(current_dir);
         return;
     }
 
-    const component = components[component_idx];
+    const component = &components[component_idx];
     const is_final = component_idx == components.len - 1;
 
-    const component_ctx = PatternContext.init(component);
-    const enable_extglob = flags.extglob;
-    const has_extglob_pattern = enable_extglob and fnmatch_impl.containsExtglob(component);
+    const component_ctx = &component.ctx;
+    const has_extglob_pattern = component.is_extglob;
     const needs_wildcard_matching = component_ctx.has_wildcards or has_extglob_pattern;
 
     if (needs_wildcard_matching) {
@@ -680,51 +697,88 @@ fn expandWildcardComponents(
             flags.period,
         );
 
-        var iter = walker.DirIterator.openHandled(io, current_dir, base_dir, hidden_config, fs_provider, .{
+        var iter: walker.DirIterator = undefined;
+        const opened = walker.DirIterator.openHandledInto(&iter, io, rel_path, rel_base, hidden_config, fs_provider, .{
             .err_callback = errfunc,
             .abort_on_error = flags.err,
+            .report_path = current_dir,
         }) catch return error.Aborted;
-        if (iter == null) return;
-        defer iter.?.close();
+        if (!opened) return;
+        defer iter.close();
 
-        while (iter.?.next()) |entry| {
+        const child_base = iter.relativeBase();
+
+        while (iter.next()) |entry| {
             const name = entry.name;
             if (!is_final and entry.kind != .directory) continue;
 
             const matches = if (has_extglob_pattern) blk: {
-                break :blk fnmatch_impl.matchExtglob(component, name);
+                break :blk fnmatch_impl.matchExtglob(component.text, name);
             } else if (is_final and component_ctx.single_suffix_matcher != null)
                 component_ctx.single_suffix_matcher.?.matchSuffix(name)
             else
-                fnmatch_impl.fnmatchWithContext(&component_ctx, name, .{});
+                fnmatch_impl.fnmatchWithContext(component_ctx, name, .{});
 
             if (matches) {
-                if (is_final and directories_only and entry.kind != .directory) continue;
+                if (is_final) {
+                    if (directories_only and entry.kind != .directory) continue;
+                    // Build "dir/name" straight into the results buffer;
+                    // recursing would stage it in a stack buffer first.
+                    const use_dir = current_dir.len > 0 and !mem.eql(u8, current_dir, ".");
+                    const total_len = if (use_dir) current_dir.len + 1 + name.len else name.len;
+                    if (total_len >= 4096) continue;
+                    const dst = try results.addPath(total_len);
+                    if (use_dir) {
+                        @memcpy(dst[0..current_dir.len], current_dir);
+                        dst[current_dir.len] = '/';
+                        @memcpy(dst[current_dir.len + 1 ..][0..name.len], name);
+                    } else {
+                        @memcpy(dst[0..name.len], name);
+                    }
+                    continue;
+                }
 
                 var new_path_buf: [4096]u8 = undefined;
                 const new_path = buildPathInBuffer(&new_path_buf, current_dir, name);
                 if (new_path.len >= 4096) continue;
 
-                try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, io, base_dir, fs_provider);
+                if (child_base) |cb| {
+                    try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, io, base_dir, fs_provider, cb, name);
+                } else {
+                    var rel_buf: [4096]u8 = undefined;
+                    const new_rel = if (rel_path.len == current_dir.len and rel_path.ptr == current_dir.ptr)
+                        new_path
+                    else
+                        buildPathInBuffer(&rel_buf, rel_path, name);
+                    if (new_rel.len >= 4096) continue;
+                    try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, io, base_dir, fs_provider, rel_base, new_rel);
+                }
             }
         }
     } else {
         // Literal component - just check if it exists
         var new_path_buf: [4096]u8 = undefined;
-        const new_path = buildPathInBuffer(&new_path_buf, current_dir, component);
+        const new_path = buildPathInBuffer(&new_path_buf, current_dir, component.text);
 
         if (new_path.len >= 4096) return;
+
+        var rel_buf: [4096]u8 = undefined;
+        const new_rel = if (rel_path.len == current_dir.len and rel_path.ptr == current_dir.ptr)
+            new_path
+        else
+            buildPathInBuffer(&rel_buf, rel_path, component.text);
+        if (new_rel.len >= 4096) return;
 
         if (!is_final) {
             // For non-final literal components, skip the stat() syscall entirely.
             // Just try to recurse - if the path doesn't exist, the next opendir will fail gracefully.
-            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, io, base_dir, fs_provider);
+            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, io, base_dir, fs_provider, rel_base, new_rel);
         } else {
             // For final component, we need stat to check existence and directory-ness
-            const root = base_dir orelse std.Io.Dir.cwd();
-            const stat = root.statFile(io, new_path, .{}) catch return;
+            const root = rel_base orelse std.Io.Dir.cwd();
+            const stat = root.statFile(io, new_rel, .{}) catch return;
             if (directories_only and stat.kind != .directory) return;
-            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, io, base_dir, fs_provider);
+            try expandWildcardComponents(allocator, new_path, components, component_idx + 1, results, directories_only, flags, errfunc, io, base_dir, fs_provider, rel_base, new_rel);
         }
     }
 }
@@ -919,22 +973,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
 }
 
 fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, pzlob: *zlob_t) !?void {
-    const path_copy = try allocator.allocSentinel(u8, pattern.len, 0);
-    @memcpy(path_copy[0..pattern.len], pattern);
-    const path: [*c]u8 = @ptrCast(path_copy.ptr);
-
-    const pathv_buf = try allocator.alloc([*c]u8, 2);
-    const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-    result[0] = path;
-    result[1] = null;
-
-    const pathlen_buf = try allocator.alloc(usize, 1);
-    pathlen_buf[0] = pattern.len;
-
-    pzlob.zlo_pathc = 1;
-    pzlob.zlo_pathv = result;
-    pzlob.zlo_pathlen = pathlen_buf.ptr;
-    pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
+    try emitSingleResult(allocator, pzlob, pattern, false);
     return;
 }
 
@@ -1098,38 +1137,20 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
 
         _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true }), errfunc, &temp_pzlob, gitignore_filter, io, base_dir, fs_provider);
 
-        // Collect results from temp_pzlob
+        // Copy each path's bytes into the shared buffer, then release the
+        // sub-glob's result set.
         if (temp_pzlob.zlo_pathc > 0) {
             for (0..temp_pzlob.zlo_pathc) |i| {
-                try all_results.append(temp_pzlob.zlo_pathv[i], temp_pzlob.zlo_pathlen[i]);
+                const path_ptr: [*]const u8 = @ptrCast(temp_pzlob.zlo_pathv[i]);
+                try all_results.appendPath(path_ptr[0..temp_pzlob.zlo_pathlen[i]]);
             }
-            // Don't free the paths yet, we're transferring ownership
-            // Free the pathv array and pathlen array, but not the paths themselves
-            if (temp_pzlob.zlo_flags & ZLOB_FLAGS_OWNS_STRINGS != 0) {
-                allocator.free(@as([*]const [*c]u8, @ptrCast(temp_pzlob.zlo_pathv))[0 .. temp_pzlob.zlo_pathc + 1]);
-                allocator.free(@as([*]const usize, @ptrCast(temp_pzlob.zlo_pathlen))[0..temp_pzlob.zlo_pathc]);
-            }
+            globfreeInternal(allocator, &temp_pzlob);
         }
     }
 
     if (all_results.len() == 0) {
         if (flags.nocheck) {
-            const pat_copy = try allocator.allocSentinel(u8, pattern.len, 0);
-            @memcpy(pat_copy[0..pattern.len], pattern);
-            const path: [*c]u8 = @ptrCast(pat_copy.ptr);
-
-            const pathv_buf = try allocator.alloc([*c]u8, 2);
-            const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-            result[0] = path;
-            result[1] = null;
-
-            const pathlen_buf = try allocator.alloc(usize, 1);
-            pathlen_buf[0] = pattern.len;
-
-            pzlob.zlo_pathc = 1;
-            pzlob.zlo_pathv = result;
-            pzlob.zlo_pathlen = pathlen_buf.ptr;
-            pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
+            try emitSingleResult(allocator, pzlob, pattern, false);
             return;
         }
         return null;
@@ -1137,21 +1158,12 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
 
     const count = all_results.len();
 
-    // Transfer ownership directly from ResultsList - avoids allocation and copy
-    const pathv_buf = try all_results.toOwnedPathv();
-    const pathlen_buf = try all_results.toOwnedLengths();
-
-    const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
+    try all_results.emit(0, pzlob);
 
     // Sort using pre-computed lengths - no strlen() calls!
     if (!flags.nosort) {
-        sorting.sortPaths(@ptrCast(result), pathlen_buf.ptr, count);
+        sorting.sortPaths(@ptrCast(pzlob.zlo_pathv), pzlob.zlo_pathlen, count);
     }
-
-    pzlob.zlo_pathc = count;
-    pzlob.zlo_pathv = result;
-    pzlob.zlo_pathlen = pathlen_buf.ptr;
-    pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
     return;
 }
 
@@ -1496,9 +1508,7 @@ fn globWithBracedComponents(
         // No wildcard components - just verify path exists and add it
         const root = base_dir orelse std.Io.Dir.cwd();
         _ = root.statFile(io, start_dir, .{}) catch return null;
-        const path_copy = try allocator.allocSentinel(u8, start_dir.len, 0);
-        @memcpy(path_copy[0..start_dir.len], start_dir);
-        try all_results.append(@ptrCast(path_copy.ptr), start_dir.len);
+        try all_results.appendPath(start_dir);
         return finalizeResults(allocator, &all_results, flags, pzlob);
     }
 
@@ -1524,9 +1534,8 @@ fn globWithBracedComponents(
         fs_provider,
         struct {
             fn onComplete(alloc: std.mem.Allocator, path: []const u8, results: *ResultsList, _: bool) !void {
-                const path_copy = try alloc.allocSentinel(u8, path.len, 0);
-                @memcpy(path_copy[0..path.len], path);
-                try results.append(@ptrCast(path_copy.ptr), path.len);
+                _ = alloc;
+                try results.appendPath(path);
             }
         }.onComplete,
     );
@@ -1543,17 +1552,23 @@ const BracedComponentMatcher = struct {
     text: []const u8,
     alternatives: ?[]const []const u8,
     is_last: bool,
+    /// Precomputed once per matcher, since matchesWithFlags runs per entry.
+    ctx: PatternContext,
+    /// text contains extglob syntax (flag-independent; gate with the flag)
+    has_extglob: bool,
 
     fn fromBracedComponent(comp: *const brace_optimizer.BracedComponent) BracedComponentMatcher {
-        return .{
-            .text = comp.text,
-            .alternatives = comp.alternatives,
-            .is_last = comp.is_last,
-        };
+        return fromTextAndAlts(comp.text, comp.alternatives, comp.is_last);
     }
 
     fn fromTextAndAlts(text: []const u8, alts: ?[]const []const u8, is_last: bool) BracedComponentMatcher {
-        return .{ .text = text, .alternatives = alts, .is_last = is_last };
+        return .{
+            .text = text,
+            .alternatives = alts,
+            .is_last = is_last,
+            .ctx = PatternContext.init(text),
+            .has_extglob = fnmatch_impl.containsExtglob(text),
+        };
     }
 
     /// Check if name matches this component
@@ -1566,12 +1581,10 @@ const BracedComponentMatcher = struct {
         if (self.alternatives) |alts| {
             return matchWithAlternativesExtglob(name, alts, enable_extglob);
         }
-        // Check for extglob pattern
-        if (enable_extglob and fnmatch_impl.containsExtglob(self.text)) {
+        if (enable_extglob and self.has_extglob) {
             return fnmatch_impl.matchExtglob(self.text, name);
         }
-        const ctx = PatternContext.init(self.text);
-        return fnmatch_impl.fnmatchWithContext(&ctx, name, .{});
+        return fnmatch_impl.fnmatchWithContext(&self.ctx, name, .{});
     }
 
     /// Check if any pattern/alternative starts with dot
@@ -1617,14 +1630,15 @@ fn walkBracedComponents(
     };
 
     // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
-    var iter = walker.DirIterator.openHandled(io, current_dir, base_dir, hidden_config, fs_provider, .{
+    var iter: walker.DirIterator = undefined;
+    const opened = walker.DirIterator.openHandledInto(&iter, io, current_dir, base_dir, hidden_config, fs_provider, .{
         .err_callback = errfunc,
         .abort_on_error = flags.err,
     }) catch return error.Aborted;
-    if (iter == null) return;
-    defer iter.?.close();
+    if (!opened) return;
+    defer iter.close();
 
-    while (iter.?.next()) |entry| {
+    while (iter.next()) |entry| {
         // Note: Hidden file filtering is now done at iterator level
         if (!is_final and entry.kind != .directory) continue;
 
@@ -1690,14 +1704,15 @@ fn globRecursiveWithBracedPrefix(
     };
 
     // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
-    var iter = walker.DirIterator.openHandled(io, current_dir, base_dir, hidden_config, fs_provider, .{
+    var iter: walker.DirIterator = undefined;
+    const opened = walker.DirIterator.openHandledInto(&iter, io, current_dir, base_dir, hidden_config, fs_provider, .{
         .err_callback = errfunc,
         .abort_on_error = flags.err,
     }) catch return error.Aborted;
-    if (iter == null) return;
-    defer iter.?.close();
+    if (!opened) return;
+    defer iter.close();
 
-    while (iter.?.next()) |entry| {
+    while (iter.next()) |entry| {
         // Note: Hidden file filtering is now done at iterator level
         if (entry.kind != .directory) continue;
 
@@ -1729,74 +1744,41 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
     const offs = if (flags.dooffs) pzlob.zlo_offs else 0;
     const new_count = results.len();
 
-    // ZLOB_APPEND - merge with existing results
+    // ZLOB_APPEND - merge with existing results. The emit format keeps all
+    // owned strings in one buffer, so import the old set's bytes then the new
+    // ones and release the old result set wholesale.
     if (flags.append and pzlob.zlo_pathv != null and pzlob.zlo_pathc > 0) {
         const old_count = pzlob.zlo_pathc;
-        const total_count = old_count + new_count;
 
-        const pathv_buf = allocator.alloc([*c]u8, offs + total_count + 1) catch return error.OutOfMemory;
-        const pathlen_buf = allocator.alloc(usize, total_count) catch return error.OutOfMemory;
+        var combined = try ResultsList.initWithCapacity(allocator, old_count + new_count);
+        defer combined.deinit();
 
-        @memset(pathv_buf[0..offs], null);
+        for (0..old_count) |i| {
+            const path_ptr: [*]const u8 = @ptrCast(pzlob.zlo_pathv[offs + i]);
+            try combined.appendPath(path_ptr[0..pzlob.zlo_pathlen[i]]);
+        }
+        for (0..new_count) |i| {
+            try combined.appendPath(results.getPath(i));
+        }
 
-        const old_pathv = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[offs..][0..old_count];
-        @memcpy(pathv_buf[offs..][0..old_count], old_pathv);
-        @memcpy(pathlen_buf[0..old_count], pzlob.zlo_pathlen[0..old_count]);
-        @memcpy(pathv_buf[offs + old_count ..][0..new_count], results.pathSlice());
-        @memcpy(pathlen_buf[old_count..][0..new_count], results.lengthSlice());
+        // Frees the old arrays and, when owned, the old byte buffer.
+        // Leaves zlo_offs alone for the emit() below.
+        globfreeInternal(allocator, pzlob);
 
-        pathv_buf[offs + total_count] = null;
-        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-
-        // Free old arrays
-        const old_pathv_slice = @as([*][*c]u8, @ptrCast(pzlob.zlo_pathv))[0 .. offs + old_count + 1];
-        allocator.free(old_pathv_slice);
-        const old_pathlen_slice = pzlob.zlo_pathlen[0..old_count];
-        allocator.free(old_pathlen_slice);
-
-        pzlob.zlo_pathc = total_count;
-        pzlob.zlo_pathv = result;
-        pzlob.zlo_pathlen = pathlen_buf.ptr;
-        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
+        try combined.emit(offs, pzlob);
 
         if (!flags.nosort and new_count > 0) {
-            sorting.sortPaths(@ptrCast(result + offs + old_count), pathlen_buf.ptr + old_count, new_count);
+            sorting.sortPaths(@ptrCast(pzlob.zlo_pathv + offs + old_count), pzlob.zlo_pathlen + old_count, new_count);
         }
-    } else if (offs == 0) {
-        // Fast path: no offset slots needed, transfer ownership directly from ResultsList
-        // This avoids allocating new buffers and copying data (just shrinks to exact size)
-        const pathv_buf = results.toOwnedPathv() catch return error.OutOfMemory;
-        const pathlen_buf = results.toOwnedLengths() catch return error.OutOfMemory;
-
-        pzlob.zlo_pathc = new_count;
-        pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
-        pzlob.zlo_pathlen = pathlen_buf.ptr;
-        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
-
-        if (!flags.nosort) {
-            sorting.sortPaths(@ptrCast(pzlob.zlo_pathv), pathlen_buf.ptr, new_count);
-        }
-    } else {
-        // ZLOB_DOOFFS: need offset slots at the beginning, must allocate fresh buffers
-        const pathv_buf = allocator.alloc([*c]u8, offs + new_count + 1) catch return error.OutOfMemory;
-        const pathlen_buf = allocator.alloc(usize, new_count) catch return error.OutOfMemory;
-
-        @memset(pathv_buf[0..offs], null);
-        @memcpy(pathv_buf[offs..][0..new_count], results.pathSlice());
-        @memcpy(pathlen_buf, results.lengthSlice());
-
-        pathv_buf[offs + new_count] = null;
-        const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-
-        pzlob.zlo_pathc = new_count;
-        pzlob.zlo_pathv = result;
-        pzlob.zlo_pathlen = pathlen_buf.ptr;
-        pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
-
-        if (!flags.nosort) {
-            sorting.sortPaths(@ptrCast(result + offs), pathlen_buf.ptr, new_count);
-        }
+        return;
     }
+
+    try results.emit(offs, pzlob);
+
+    if (!flags.nosort) {
+        sorting.sortPaths(@ptrCast(pzlob.zlo_pathv + offs), pzlob.zlo_pathlen, new_count);
+    }
+    return;
 }
 
 fn globRecursiveWalk(
@@ -1815,6 +1797,9 @@ fn globRecursiveWalk(
 
     const pattern_ctx = PatternContext.init(rec_pattern.file_pattern);
     const enable_extglob = flags.extglob;
+    // Loop-invariant, so keep it out of the per-entry match chain below.
+    const file_pattern_is_extglob = enable_extglob and fnmatch_impl.containsExtglob(rec_pattern.file_pattern);
+    const file_alt_extglob_mask: u64 = if (enable_extglob) altExtglobMask(rec_pattern.file_alternatives) else 0;
 
     var dir_component_contexts: [32]PatternContext = undefined;
     if (has_dir_components) {
@@ -1898,13 +1883,13 @@ fn globRecursiveWalk(
 
         const matches = if (rec_pattern.file_pattern_contexts) |contexts| blk: {
             if (enable_extglob and rec_pattern.file_alternatives != null) {
-                break :blk matchWithAlternativesPrecomputedExtglob(entry.basename, rec_pattern.file_alternatives.?, contexts, true);
+                break :blk matchWithAlternativesPrecomputedExtglob(entry.basename, rec_pattern.file_alternatives.?, contexts, file_alt_extglob_mask);
             }
             const multi_suffix_ptr = if (rec_pattern.multi_suffix_matcher) |*ms| ms else null;
             break :blk matchWithAlternativesPrecomputed(entry.basename, contexts, multi_suffix_ptr);
         } else if (rec_pattern.file_alternatives) |alts|
             matchWithAlternativesExtglob(entry.basename, alts, enable_extglob)
-        else if (enable_extglob and fnmatch_impl.containsExtglob(rec_pattern.file_pattern)) blk: {
+        else if (file_pattern_is_extglob) blk: {
             break :blk fnmatch_impl.matchExtglob(rec_pattern.file_pattern, entry.basename);
         } else if (pattern_ctx.single_suffix_matcher) |sufxi_matcher|
             sufxi_matcher.matchSuffix(entry.basename)
@@ -1914,12 +1899,12 @@ fn globRecursiveWalk(
         if (matches) {
             if (info.directories_only and !is_dir) continue;
 
-            // Build full path
+            // Build full path directly in the results' shared byte buffer
             const needs_mark = flags.mark and is_dir;
             const base_path_len = if (use_dirname) start_dir.len + 1 + entry.path.len else entry.path.len;
             const alloc_len = if (needs_mark) base_path_len + 1 else base_path_len;
 
-            const path_buf = allocator.allocSentinel(u8, alloc_len, 0) catch return error.OutOfMemory;
+            const path_buf = results.addPath(alloc_len) catch return error.OutOfMemory;
 
             if (use_dirname) {
                 @memcpy(path_buf[0..start_dir.len], start_dir);
@@ -1929,12 +1914,9 @@ fn globRecursiveWalk(
                 @memcpy(path_buf[0..entry.path.len], entry.path);
             }
 
-            const final_len = if (needs_mark) blk: {
+            if (needs_mark) {
                 path_buf[base_path_len] = '/';
-                break :blk base_path_len + 1;
-            } else base_path_len;
-
-            results.append(@ptrCast(path_buf.ptr), final_len) catch return error.OutOfMemory;
+            }
         }
     }
 }
@@ -2000,9 +1982,6 @@ fn matchDirComponents(
     return true;
 }
 
-pub const PathBuildResult = utils.PathBuildResult;
-const buildFullPathWithMark = utils.buildFullPathWithMark;
-
 fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8, dirname: []const u8, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, directories_only: bool, gitignore_filter: ?*GitIgnore, brace_parsed: ?*const brace_optimizer.BracedPattern, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
     // If we have brace alternatives for the filename pattern, use them for matching
     // e.g., "*.{toml,lock}" -> alternatives = ["*.toml", "*.lock"]
@@ -2031,6 +2010,9 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
     const pattern_ctx = PatternContext.init(pattern);
     const use_dirname = dirname.len > 0 and !mem.eql(u8, dirname, ".");
     const enable_extglob = flags.extglob;
+    // Loop-invariant, so keep it out of the per-entry match chain below.
+    const pattern_is_extglob = enable_extglob and fnmatch_impl.containsExtglob(pattern);
+    const alt_extglob_mask: u64 = if (enable_extglob) altExtglobMask(file_pattern_alts) else 0;
 
     var names = ResultsList.initWithCapacity(allocator, 256) catch ResultsList.init(allocator);
     defer names.deinit();
@@ -2043,22 +2025,23 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
     );
 
     // Use walker's DirIterator with FsProvider for ALTDIRFUNC support
-    var iter = walker.DirIterator.openHandled(io, dirname, base_dir, hidden_config, fs_provider, .{
+    var iter: walker.DirIterator = undefined;
+    const opened = walker.DirIterator.openHandledInto(&iter, io, dirname, base_dir, hidden_config, fs_provider, .{
         .err_callback = errfunc,
         .abort_on_error = flags.err,
     }) catch return error.Aborted;
-    if (iter == null) return null;
-    defer iter.?.close();
+    if (!opened) return null;
+    defer iter.close();
 
-    while (iter.?.next()) |entry| {
+    while (iter.next()) |entry| {
         const name = entry.name;
         // Note: Hidden file and dot entry filtering is now done at iterator level
 
         const matches = if (file_alternatives) |alts| blk: {
             // Check if we should use extglob matching
             if (enable_extglob and file_pattern_alts != null) {
-                for (file_pattern_alts.?, alts) |raw_pat, alt_ctx| {
-                    if (fnmatch_impl.containsExtglob(raw_pat)) {
+                for (file_pattern_alts.?, alts, 0..) |raw_pat, alt_ctx, alt_i| {
+                    if (altIsExtglob(alt_extglob_mask, alt_i, raw_pat)) {
                         if (fnmatch_impl.matchExtglob(raw_pat, name)) break :blk true;
                     } else if (alt_ctx.single_suffix_matcher) |batched_suffix_match| {
                         if (batched_suffix_match.matchSuffix(name)) break :blk true;
@@ -2076,7 +2059,7 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
                 }
             }
             break :blk false;
-        } else if (enable_extglob and fnmatch_impl.containsExtglob(pattern)) blk: {
+        } else if (pattern_is_extglob) blk: {
             break :blk fnmatch_impl.matchExtglob(pattern, name);
         } else if (pattern_ctx.single_suffix_matcher) |batched_suffix_match|
             batched_suffix_match.matchSuffix(name)
@@ -2087,40 +2070,37 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
             const is_dir = entry.kind == .directory;
             if (directories_only and !is_dir) continue;
 
-            // Use optimized path builder that pre-allocates for trailing slash
-            const path_result = buildFullPathWithMark(allocator, dirname, name, use_dirname, is_dir, flags) catch return error.OutOfMemory;
+            // Build the path directly in the results' shared byte buffer,
+            // pre-sized for an optional trailing '/' mark
+            const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
+            const needs_mark = flags.mark and is_dir;
+            const alloc_len = if (needs_mark) base_len + 1 else base_len;
+
+            const dst = names.addPath(alloc_len) catch return error.OutOfMemory;
+            if (use_dirname) {
+                @memcpy(dst[0..dirname.len], dirname);
+                dst[dirname.len] = '/';
+                @memcpy(dst[dirname.len + 1 ..][0..name.len], name);
+            } else {
+                @memcpy(dst[0..name.len], name);
+            }
+            if (needs_mark) {
+                dst[base_len] = '/';
+            }
 
             if (gitignore_filter) |gi| {
-                const base_len = if (use_dirname) dirname.len + 1 + name.len else name.len;
-                const relative_path = if (use_dirname) path_result.buf[0..base_len] else name;
+                const relative_path = if (use_dirname) dst[0..base_len] else name;
                 if (gi.isIgnored(relative_path, is_dir)) {
-                    allocator.free(path_result.buf);
+                    names.discardLast();
                     continue;
                 }
             }
-
-            names.append(path_result.ptr, path_result.len) catch return error.OutOfMemory;
         }
     }
 
     if (names.len() == 0) {
         if (flags.nocheck) {
-            const pat_copy = allocator.allocSentinel(u8, pattern.len, 0) catch return error.OutOfMemory;
-            @memcpy(pat_copy[0..pattern.len], pattern);
-            const path: [*c]u8 = @ptrCast(pat_copy.ptr);
-
-            const pathv_buf = allocator.alloc([*c]u8, 2) catch return error.OutOfMemory;
-            const result: [*c][*c]u8 = @ptrCast(pathv_buf.ptr);
-            result[0] = path;
-            result[1] = null;
-
-            const pathlen_buf = allocator.alloc(usize, 1) catch return error.OutOfMemory;
-            pathlen_buf[0] = pattern.len;
-
-            pzlob.zlo_pathc = 1;
-            pzlob.zlo_pathv = result;
-            pzlob.zlo_pathlen = pathlen_buf.ptr;
-            pzlob.zlo_flags = ZLOB_FLAGS_OWNS_STRINGS;
+            emitSingleResult(allocator, pzlob, pattern, false) catch return error.OutOfMemory;
             return;
         }
         return null;
@@ -2239,22 +2219,21 @@ pub fn globfreeInternal(allocator: std.mem.Allocator, pzlob: *zlob_t) void {
         const owns_strings = (pzlob.zlo_flags & ZLOB_FLAGS_OWNS_STRINGS) != 0;
 
         if (owns_strings) {
-            var i: usize = 0;
-            while (i < pzlob.zlo_pathc) : (i += 1) {
-                if (pathv[offs + i]) |path| {
-                    const path_len = pzlob.zlo_pathlen[i];
-                    const path_slice = @as([*]u8, @ptrCast(path))[0 .. path_len + 1];
-                    allocator.free(path_slice);
-                }
+            // Owned strings share one buffer, whose base and capacity sit in
+            // the two slots past the visible lengths. See ResultsList.emit.
+            const base_addr = pzlob.zlo_pathlen[pzlob.zlo_pathc];
+            const buf_cap = pzlob.zlo_pathlen[pzlob.zlo_pathc + 1];
+            if (buf_cap > 0) {
+                allocator.free(@as([*]u8, @ptrFromInt(base_addr))[0..buf_cap]);
             }
         }
         // Always free the pathv array including offset slots
         const pathv_slice = @as([*][*c]u8, @ptrCast(pathv))[0 .. offs + pzlob.zlo_pathc + 1];
         allocator.free(pathv_slice);
 
-        // Always free the pathlen array
-        const pathlen_slice = pzlob.zlo_pathlen[0..pzlob.zlo_pathc];
-        allocator.free(pathlen_slice);
+        // Free the pathlen array; owned results carry the two extra slots.
+        const pathlen_extra: usize = if (owns_strings) 2 else 0;
+        allocator.free(pzlob.zlo_pathlen[0 .. pzlob.zlo_pathc + pathlen_extra]);
     }
     pzlob.zlo_pathv = null;
     pzlob.zlo_pathc = 0;

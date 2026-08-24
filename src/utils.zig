@@ -139,52 +139,6 @@ pub fn buildPathInBuffer(buf: []u8, dir: []const u8, name: []const u8) []const u
     return buf[0..len];
 }
 
-pub const PathBuildResult = struct {
-    ptr: [*c]u8,
-    len: usize,
-    buf: []u8,
-};
-
-/// Optimized path builder that pre-allocates space for trailing slash if ZLOB_MARK is set.
-pub inline fn buildFullPathWithMark(
-    allocator: Allocator,
-    dirname: []const u8,
-    name: []const u8,
-    use_dirname: bool,
-    is_dir: bool,
-    flags: ZlobFlags,
-) !PathBuildResult {
-    const base_len = if (use_dirname)
-        dirname.len + 1 + name.len
-    else
-        name.len;
-
-    const needs_mark = flags.mark and is_dir;
-    const alloc_len = if (needs_mark) base_len + 1 else base_len;
-
-    const path_buf_slice = try allocator.allocSentinel(u8, alloc_len, 0);
-
-    if (use_dirname) {
-        @memcpy(path_buf_slice[0..dirname.len], dirname);
-        path_buf_slice[dirname.len] = '/';
-        @memcpy(path_buf_slice[dirname.len + 1 ..][0..name.len], name);
-    } else {
-        @memcpy(path_buf_slice[0..name.len], name);
-    }
-
-    const final_len = if (needs_mark) blk: {
-        path_buf_slice[base_len] = '/';
-        path_buf_slice[base_len + 1] = 0;
-        break :blk base_len + 1;
-    } else base_len;
-
-    return .{
-        .ptr = @ptrCast(path_buf_slice.ptr),
-        .len = final_len,
-        .buf = path_buf_slice,
-    };
-}
-
 /// Expand tilde (~) in patterns to home directory.
 /// Returns null if ZLOB_TILDE_CHECK is set and expansion fails.
 pub fn expandTilde(allocator: Allocator, pattern: [:0]const u8, flags: ZlobFlags) !?[:0]const u8 {
