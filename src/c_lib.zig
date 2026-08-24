@@ -182,7 +182,9 @@ fn finalizeNoMatch(pattern: []const u8, nocheck: bool, pzlob: *zlob_t) c_int {
 
     // Emit in the shared format so zlobfree treats this like any other
     // OWNS_STRINGS result.
-    zlob_impl.emitSingleResult(allocator, pzlob, pattern, false) catch return zlob_flags.ZLOB_NOSPACE;
+    // Reserves no leading slots: the match-paths API does not support
+    // ZLOB_DOOFFS, and finalizeSharedSliceResult likewise zeroes zlo_offs.
+    zlob_impl.ResultsList.emitSingle(allocator, pzlob, 0, pattern, false) catch return zlob_flags.ZLOB_NOSPACE;
     pzlob.zlo_offs = 0;
     return 0;
 }

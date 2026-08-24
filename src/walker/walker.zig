@@ -5,6 +5,7 @@ const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const worker = @import("worker.zig");
 const scan = @import("scan.zig");
+const scan_linux = @import("scan_linux.zig");
 const compiled_pattern = @import("../compiled_pattern.zig");
 const ignore_rules_mod = @import("ignore_rules.zig");
 
@@ -197,13 +198,7 @@ fn walkImpl(
             return error.OutOfMemory;
     }
     defer if (compiled) |*c| c.deinit();
-
-    // Extra-ignore root: caller-supplied patterns turned into a synthetic
-    // .gitignore. `chainIgnored` checks it FIRST (deepest), so `!negation`
-    // rules override the project's discovered .gitignore — same precedence a
-    // deeper nested .gitignore would have. The walker holds one ref; the
-    // IgnoreRules surface holds another so post-walk `isIgnored` matches the
-    // same source set the walk used.
+    // custom ignore rules are treated as an extra ignore node in the very root of the tree
     const extra_root = try buildExtraIgnoreRoot(allocator, options.extra_ignore);
     defer if (extra_root) |root_node| root_node.release(allocator);
     if (extra_root) |x| ignore_rules.setExtra(x);
@@ -223,7 +218,7 @@ fn walkImpl(
         else
             &.{},
         .extra_ignore_root = extra_root,
-        .statx_mask = scan.linuxStatxMask(options.meta),
+        .statx_mask = scan_linux.statxMask(options.meta),
         .ignore_rules = ignore_rules,
     };
 

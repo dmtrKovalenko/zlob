@@ -10,6 +10,7 @@ const std = @import("std");
 const testing = std.testing;
 const zlob = @import("zlob");
 const zlob_flags = @import("zlob_flags");
+const c_lib = @import("c_lib");
 const fnmatch = zlob.fnmatch;
 const test_utils = @import("test_utils");
 const testMatchPathsOnly = test_utils.testMatchPathsOnly;
@@ -160,4 +161,28 @@ test "matchPaths - pattern ending with slash" {
 
     // Should match directory entries ending with /
     try testing.expectEqual(@as(usize, 2), result.len());
+}
+
+test "wildcard pattern with more components than the inline budget" {
+    // globWithWildcardDirsOptimized collects components into a 64-entry stack
+    // array. Anything deeper has to spill to the heap rather than run off the
+    // end of it.
+    var buf: [4096]u8 = undefined;
+    var n: usize = 0;
+    for (0..100) |_| {
+        @memcpy(buf[n..][0..3], "a*/");
+        n += 3;
+    }
+    @memcpy(buf[n..][0..3], "x.c");
+    n += 3;
+    buf[n] = 0;
+    const pattern: [:0]const u8 = buf[0..n :0];
+
+    var pzlob: zlob.zlob_t = std.mem.zeroes(zlob.zlob_t);
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_RECOMMENDED, null, &pzlob);
+    defer c_lib.zlobfree(&pzlob);
+
+    // Nothing on disk is 101 directories deep; the point is that it neither
+    // corrupts the stack nor mis-reports the outcome.
+    try testing.expectEqual(zlob_flags.ZLOB_NOMATCH, result);
 }

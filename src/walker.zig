@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const dirent64 = @import("dirent");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -14,6 +15,8 @@ const errno = struct {
     const LOOP: c_int = 40;
     const NAMETOOLONG: c_int = 36;
     const NOMEM: c_int = 12;
+    const MFILE: c_int = 24;
+    const NFILE: c_int = 23;
     const INVAL: c_int = 22;
     const IO: c_int = 5;
 };
@@ -229,23 +232,10 @@ fn statAtFollow(dir_fd: std.posix.fd_t, name_z: [*:0]const u8) ?ResolvedSym {
     return .{ .is_dir = isDirMode(st.mode), .key = keyFromCStat(st) };
 }
 
-/// Length of the NUL-terminated name in a dirent record, scanned a word at a
-/// time. Returns area_len if no NUL is present.
-/// SAFETY: reads in 8-byte words, so every caller must pass the kernel 8 fewer
-/// bytes than its buffer actually holds.
-inline fn direntNameLen(area_ptr: [*]const u8, area_len: usize) usize {
-    const lo: u64 = 0x0101010101010101;
-    const hi: u64 = 0x8080808080808080;
-    var k: usize = 0;
-    while (k < area_len) : (k += 8) {
-        const w = mem.readInt(u64, area_ptr[k..][0..8], .little);
-        const zero_mask = (w -% lo) & ~w & hi;
-        if (zero_mask != 0) {
-            return @min(k + (@ctz(zero_mask) >> 3), area_len);
-        }
-    }
-    return area_len;
-}
+/// Length of the NUL-terminated name in a dirent record. Shared with the
+/// parallel walker's scanner; see `walker/dirent.zig` for the SWAR scan and its
+/// 8-byte over-read contract.
+const direntNameLen = dirent64.nameLen;
 
 inline fn shouldSkipEntry(name: []const u8, hidden: HiddenConfig) bool {
     if (name.len == 0) return true;
@@ -478,18 +468,18 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         const base = self.getdents_offset;
         // Too few bytes left for a dirent header. Consume the remainder: the
         // caller loops until the offset reaches the length.
-        if (base + 19 > self.getdents_len) {
+        if (base + dirent64.NAME_OFFSET > self.getdents_len) {
             @branchHint(.unlikely);
             self.getdents_offset = self.getdents_len;
             return null;
         }
 
-        const reclen = mem.readInt(u16, self.getdents_buffer[base + 16 ..][0..2], .little);
-        const d_type = self.getdents_buffer[base + 18];
+        const reclen = mem.readInt(u16, self.getdents_buffer[base + dirent64.RECLEN_OFFSET ..][0..2], .little);
+        const d_type = self.getdents_buffer[base + dirent64.TYPE_OFFSET];
 
         // Guard against malformed (FUSE) records: a zero reclen would spin
         // forever, and a short one underflows the name area below.
-        if (reclen < 19 or base + reclen > self.getdents_len) {
+        if (reclen < dirent64.NAME_OFFSET or base + reclen > self.getdents_len) {
             @branchHint(.unlikely);
             self.getdents_offset = self.getdents_len;
             return null;
@@ -497,11 +487,15 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         self.getdents_offset += reclen;
 
         // Knowing the terminator was found lets us borrow the name as a C
-        // string for openat/fstatat below instead of copying it out.
-        const name_start = base + 19;
+        // string for openat/fstatat below instead of copying it out
+        const name_start = base + dirent64.NAME_OFFSET;
         const name_area = self.getdents_buffer[name_start .. base + reclen];
         const name_len = direntNameLen(name_area.ptr, name_area.len);
-        const name_terminated = name_len < name_area.len;
+        // unrealistic path if kernel is broken and path doesn't have NUL
+        if (name_len == name_area.len) {
+            @branchHint(.unlikely);
+            return null;
+        }
         const name = name_area[0..name_len];
 
         // Unified filtering for ".", "..", and hidden files
@@ -540,7 +534,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             else
                 true;
 
-            if (should_descend and name_terminated) {
+            if (should_descend) {
                 const name_z = name_area[0..name.len :0];
 
                 // For symlink entries under follow mode: pre-flight
@@ -959,6 +953,8 @@ pub const SingleDirIterator = struct {
             .LOOP => error.SymLinkLoop,
             .NAMETOOLONG => error.NameTooLong,
             .NOMEM => error.SystemResources,
+            .MFILE => error.ProcessFdQuotaExceeded,
+            .NFILE => error.SystemFdQuotaExceeded,
             .BADF => error.InvalidHandle,
             .INVAL => error.InvalidArgument,
             else => error.AccessDenied,
@@ -987,22 +983,22 @@ pub const SingleDirIterator = struct {
             // Try to get next entry from buffer
             while (self.offset < self.len) {
                 const base = self.offset;
-                if (base + 19 > self.len) break;
+                if (base + dirent64.NAME_OFFSET > self.len) break;
 
-                const reclen = mem.readInt(u16, self.buffer[base + 16 ..][0..2], .little);
-                const d_type = self.buffer[base + 18];
+                const reclen = mem.readInt(u16, self.buffer[base + dirent64.RECLEN_OFFSET ..][0..2], .little);
+                const d_type = self.buffer[base + dirent64.TYPE_OFFSET];
 
                 // Guard against malformed (FUSE) records: a zero reclen would
                 // spin forever, a short one underflows the name area below.
-                if (reclen < 19 or base + reclen > self.len) {
+                if (reclen < dirent64.NAME_OFFSET or base + reclen > self.len) {
                     @branchHint(.unlikely);
                     self.offset = self.len;
                     break;
                 }
                 self.offset += reclen;
 
-                // The name starts at offset 19, NUL-terminated in the record.
-                const name_area = self.buffer[base + 19 .. base + reclen];
+                // The name follows the header, NUL-terminated in the record.
+                const name_area = self.buffer[base + dirent64.NAME_OFFSET .. base + reclen];
                 const name = name_area[0..direntNameLen(name_area.ptr, name_area.len)];
 
                 // Unified filtering for ".", "..", and hidden files
@@ -1414,6 +1410,8 @@ fn zigErrorToPosix(err: anyerror) c_int {
         error.SymLinkLoop => errno.LOOP,
         error.NameTooLong => errno.NAMETOOLONG,
         error.SystemResources => errno.NOMEM,
+        error.ProcessFdQuotaExceeded => errno.MFILE,
+        error.SystemFdQuotaExceeded => errno.NFILE,
         error.InvalidHandle, error.InvalidArgument => errno.INVAL,
         else => errno.IO,
     };
@@ -1458,30 +1456,50 @@ test "walker basic" {
     try std.testing.expect(count > 0);
 }
 
+// direntNameLen lives in walker/dirent.zig, which is a module root and so
+// cannot host its own tests. They run from here instead.
+//
+// The bodies sit behind a comptime branch, not `error.SkipZigTest`: dirent.zig
+// refuses to compile off Linux, and a skipped test body would still be
+// semantically analyzed. Only the taken branch of a comptime-known `if` is.
 test "direntNameLen finds the terminator across word boundaries" {
-    // Names are laid out as the kernel writes them: NUL-terminated, then
-    // padded to the record length.
-    var area: [64]u8 = undefined;
-    for ([_]usize{ 0, 1, 7, 8, 9, 15, 16, 31 }) |name_len| {
-        @memset(&area, 'a');
-        area[name_len] = 0;
-        @memset(area[name_len + 1 ..], 0);
-        try std.testing.expectEqual(name_len, direntNameLen(&area, area.len));
+    if (comptime builtin.os.tag == .linux) {
+        // Names are laid out as the kernel writes them: NUL-terminated, then
+        // padded to the record length.
+        var area: [64]u8 = undefined;
+        for ([_]usize{ 0, 1, 7, 8, 9, 15, 16, 31 }) |name_len| {
+            @memset(&area, 'a');
+            area[name_len] = 0;
+            @memset(area[name_len + 1 ..], 0);
+            try std.testing.expectEqual(name_len, direntNameLen(&area, area.len));
+        }
     }
 }
 
 test "direntNameLen clamps when the area has no terminator" {
-    // A malformed record without a NUL must report the area length rather
-    // than running past it.
-    var area: [24]u8 = @splat('a');
-    try std.testing.expectEqual(area.len, direntNameLen(&area, area.len));
+    if (comptime builtin.os.tag == .linux) {
+        // A malformed record without a NUL must report the area length rather
+        // than running past it.
+        var area: [24]u8 = @splat('a');
+        try std.testing.expectEqual(area.len, direntNameLen(&area, area.len));
 
-    // Unterminated area whose length is not a multiple of the word size:
-    // the final word read spans past area_len, so the result must clamp.
-    var padded: [32]u8 = @splat('a');
-    @memset(padded[21..], 0);
-    try std.testing.expectEqual(@as(usize, 21), direntNameLen(&padded, 21));
-    try std.testing.expectEqual(@as(usize, 13), direntNameLen(&padded, 13));
+        // Unterminated area whose length is not a multiple of the word size:
+        // the final word read spans past area_len, so the result must clamp.
+        var padded: [32]u8 = @splat('a');
+        @memset(padded[21..], 0);
+        try std.testing.expectEqual(@as(usize, 21), direntNameLen(&padded, 21));
+        try std.testing.expectEqual(@as(usize, 13), direntNameLen(&padded, 13));
+    }
+}
+
+test "direntNameLen does not mistake high bytes for a terminator" {
+    if (comptime builtin.os.tag == .linux) {
+        // Bytes >= 0x80 (UTF-8 continuations) already have the high bit set,
+        // which is what the `& ~word` step exists to reject.
+        var area: [32]u8 = @splat(0xC3);
+        @memset(area[9..], 0);
+        try std.testing.expectEqual(@as(usize, 9), direntNameLen(&area, area.len));
+    }
 }
 
 test "EntryKind is std.Io.File.Kind" {

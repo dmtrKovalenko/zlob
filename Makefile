@@ -6,11 +6,16 @@ LIBNAME = libzlob.so
 
 ZIG = zig
 CC ?= gcc
-CFLAGS = -Wall -Wextra -O2
+CFLAGS = -Wall -Wextra -O3
 CARGO ?= cargo
 CLANG_FORMAT ?= clang-format
+CLANG_FORMAT_VERSION = 22.1.5
 
 C_FORMAT_FILES = include/zlob.h test/test_c_api.c test/test_nolibc_threads.c
+
+# Every Zig path either target touches. build.zig(.zon) were previously
+# formatted by neither.
+ZIG_FORMAT_PATHS = src/ test/ bench/ build.zig build.zig.zon
 
 # Detect OS for library extension
 UNAME_S := $(shell uname -s)
@@ -25,7 +30,7 @@ else
     LIBEXT = dll
 endif
 
-.PHONY: all build install uninstall test clean cli install-cli uninstall-cli dev dev-test test-libc test-nolibc-threads format format-check help
+.PHONY: all build install uninstall test clean cli install-cli uninstall-cli dev dev-test test-libc test-nolibc-threads format format-check print-clang-format-version help
 
 all: build
 
@@ -180,15 +185,18 @@ test-libc: build
 	@echo "========================================"
 	./test/test_libc_comparison.sh
 
+print-clang-format-version:
+	@echo $(CLANG_FORMAT_VERSION)
+
 format:
-	zig fmt src/ test/ bench/
+	zig fmt $(ZIG_FORMAT_PATHS)
 	$(CLANG_FORMAT) -i $(C_FORMAT_FILES)
 	cd rust && cargo fmt --all
 
 format-check:
-	zig fmt --check src/ test/ bench/
+	zig fmt --check $(ZIG_FORMAT_PATHS)
 	$(CLANG_FORMAT) --dry-run --Werror $(C_FORMAT_FILES)
-	cd rust && cargo fmt --check
+	cd rust && cargo fmt --all --check
 
 help:
 	@echo "zlob - faster and more correct glob library, 100% POSIX compatible"

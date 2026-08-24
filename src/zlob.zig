@@ -176,7 +176,7 @@ fn globLiteralPath(allocator: Allocator, path: []const u8, flags: ZlobFlags, pzl
     }
 
     const needs_slash = flags.mark and is_dir;
-    try emitSingleResult(allocator, pzlob, return_path, needs_slash);
+    try ResultsList.emitSingle(allocator, pzlob, dooffsSlots(flags, pzlob), return_path, needs_slash);
 
     return true;
 }
@@ -327,15 +327,8 @@ pub const ResultsList = struct {
         return self.bytes.items[self.offsetsPtr()[i]..][0..self.lengthsPtr()[i]];
     }
 
-    /// Emit the collected results into `pzlob`:
-    ///   pathv:   [offs nulls][count pointers][null]         (offs+count+1 slots)
-    ///   pathlen: [count lengths][bytes base][bytes capacity] (count+2 slots)
-    /// Ownership of the byte buffer moves into the zlob_t, and the two slots
-    /// past the visible lengths let globfreeInternal release the whole result
-    /// set in three frees. They are invisible to C callers, which only ever
-    /// see zlo_pathlen as a pointer.
-    /// On error the list is unchanged and still safe to deinit.
-    pub fn emit(self: *ResultsList, offs: usize, pzlob: *zlob_t) Allocator.Error!void {
+    /// Emit the collected results into `pzlob`
+    fn emit(self: *ResultsList, offs: usize, pzlob: *zlob_t) Allocator.Error!void {
         const count = self.count;
         const pathv_buf = try self.allocator.alloc([*c]u8, offs + count + 1);
         errdefer self.allocator.free(pathv_buf);
@@ -361,19 +354,26 @@ pub const ResultsList = struct {
         // The byte buffer now belongs to pzlob; deinit must not free it.
         self.bytes = .empty;
     }
+
+    /// `offs` is the ZLOB_DOOFFS reserved-slot count, threaded through so a
+    /// lone result reserves them just like a full result set does.
+    pub fn emitSingle(allocator: Allocator, pzlob: *zlob_t, offs: usize, path: []const u8, append_slash: bool) Allocator.Error!void {
+        var list = ResultsList.init(allocator);
+        defer list.deinit(); // we move the ownership in the last line of list.emit
+        const total = path.len + @intFromBool(append_slash);
+        const dst = try list.addPath(total);
+        @memcpy(dst[0..path.len], path);
+
+        if (append_slash) dst[path.len] = '/';
+        try list.emit(offs, pzlob); // moves list into pzlob
+    }
 };
 
-/// Emit a lone result path (NOCHECK pattern echo, literal path hit) in the
-/// format ResultsList.emit produces, so globfreeInternal can treat every
-/// OWNS_STRINGS zlob_t the same way.
-pub fn emitSingleResult(allocator: Allocator, pzlob: *zlob_t, path: []const u8, append_slash: bool) Allocator.Error!void {
-    var list = ResultsList.init(allocator);
-    defer list.deinit();
-    const total = path.len + @intFromBool(append_slash);
-    const dst = try list.addPath(total);
-    @memcpy(dst[0..path.len], path);
-    if (append_slash) dst[path.len] = '/';
-    try list.emit(0, pzlob);
+/// Leading pathv slots reserved by ZLOB_DOOFFS. Every path that fills a
+/// zlob_t must honour this: callers index results from pathv[offs], and
+/// globfreeInternal sizes its free off zlo_offs no matter which path ran.
+inline fn dooffsSlots(flags: ZlobFlags, pzlob: *const zlob_t) usize {
+    return if (flags.dooffs) pzlob.zlo_offs else 0;
 }
 
 const PatternInfo = struct {
@@ -587,24 +587,46 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     // The main recursive and filtered paths handle gitignore
     _ = gitignore_filter;
 
-    var components: [64]WildcardComponent = undefined;
-    var component_count: usize = 0;
-
     const effective_pattern = info.wildcard_suffix;
 
-    var start: usize = 0;
-    for (effective_pattern, 0..) |ch, idx| {
-        if (isSep(ch)) {
-            if (idx > start) {
-                components[component_count] = WildcardComponent.init(effective_pattern[start..idx], flags);
-                component_count += 1;
+    // Count first, so a pattern with more components than the inline budget
+    // spills to the heap instead of running off the end of the array.
+    var component_count: usize = 0;
+    {
+        var start: usize = 0;
+        for (effective_pattern, 0..) |ch, idx| {
+            if (isSep(ch)) {
+                if (idx > start) component_count += 1;
+                start = idx + 1;
             }
-            start = idx + 1;
         }
+        if (start < effective_pattern.len) component_count += 1;
     }
-    if (start < effective_pattern.len) {
-        components[component_count] = WildcardComponent.init(effective_pattern[start..], flags);
-        component_count += 1;
+
+    var components_buf: [64]WildcardComponent = undefined;
+    const spilled = component_count > components_buf.len;
+    const components: []WildcardComponent = if (spilled)
+        try allocator.alloc(WildcardComponent, component_count)
+    else
+        components_buf[0..component_count];
+    defer if (spilled) allocator.free(components);
+
+    {
+        var out: usize = 0;
+        var start: usize = 0;
+        for (effective_pattern, 0..) |ch, idx| {
+            if (isSep(ch)) {
+                if (idx > start) {
+                    components[out] = WildcardComponent.init(effective_pattern[start..idx], flags);
+                    out += 1;
+                }
+                start = idx + 1;
+            }
+        }
+        if (start < effective_pattern.len) {
+            components[out] = WildcardComponent.init(effective_pattern[start..], flags);
+            out += 1;
+        }
     }
 
     const estimated_capacity: usize = if (info.has_recursive)
@@ -621,11 +643,11 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
     else
         ".";
 
-    try expandWildcardComponents(allocator, start_dir, components[0..component_count], 0, &result_paths, directories_only, flags, errfunc, io, base_dir, fs_provider, base_dir, start_dir);
+    try expandWildcardComponents(allocator, start_dir, components, 0, &result_paths, directories_only, flags, errfunc, io, base_dir, fs_provider, base_dir, start_dir);
 
     if (result_paths.len() == 0) {
         if (flags.nocheck) {
-            emitSingleResult(allocator, pzlob, pattern, false) catch return error.OutOfMemory;
+            ResultsList.emitSingle(allocator, pzlob, dooffsSlots(flags, pzlob), pattern, false) catch return error.OutOfMemory;
             return;
         }
         return null;
@@ -812,7 +834,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
             const is_dir = if (stat) |s| s.kind == .directory else false;
             if (gi.isIgnored(effective_pattern, is_dir)) {
                 if (flags.nocheck) {
-                    return returnPatternAsResult(allocator, effective_pattern, pzlob);
+                    return returnPatternAsResult(allocator, effective_pattern, flags, pzlob);
                 }
                 return null;
             }
@@ -823,7 +845,7 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
         if (found) return;
 
         if (flags.nocheck) {
-            return returnPatternAsResult(allocator, effective_pattern, pzlob);
+            return returnPatternAsResult(allocator, effective_pattern, flags, pzlob);
         }
 
         return null;
@@ -972,8 +994,8 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     return globInSingleDirWithFnmatch(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, io, base_dir, fs_provider);
 }
 
-fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, pzlob: *zlob_t) !?void {
-    try emitSingleResult(allocator, pzlob, pattern, false);
+fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, pzlob: *zlob_t) !?void {
+    try ResultsList.emitSingle(allocator, pzlob, dooffsSlots(flags, pzlob), pattern, false);
     return;
 }
 
@@ -1102,7 +1124,7 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
     // return the pattern itself as the sole result (like NOCHECK but only
     // when there are no wildcards). See FreeBSD glob.c err_nomatch().
     if (result == null and gf.nomagic and !has_magic) {
-        return returnPatternAsResult(allocator, pattern_slice, pzlob);
+        return returnPatternAsResult(allocator, pattern_slice, gf, pzlob);
     }
 
     return result;
@@ -1150,7 +1172,7 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
 
     if (all_results.len() == 0) {
         if (flags.nocheck) {
-            try emitSingleResult(allocator, pzlob, pattern, false);
+            try ResultsList.emitSingle(allocator, pzlob, dooffsSlots(flags, pzlob), pattern, false);
             return;
         }
         return null;
@@ -1741,7 +1763,7 @@ fn globRecursiveWithBracedPrefix(
 }
 
 fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: ZlobFlags, pzlob: *zlob_t) !?void {
-    const offs = if (flags.dooffs) pzlob.zlo_offs else 0;
+    const offs = dooffsSlots(flags, pzlob);
     const new_count = results.len();
 
     // ZLOB_APPEND - merge with existing results. The emit format keeps all
@@ -2100,7 +2122,7 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
 
     if (names.len() == 0) {
         if (flags.nocheck) {
-            emitSingleResult(allocator, pzlob, pattern, false) catch return error.OutOfMemory;
+            ResultsList.emitSingle(allocator, pzlob, dooffsSlots(flags, pzlob), pattern, false) catch return error.OutOfMemory;
             return;
         }
         return null;

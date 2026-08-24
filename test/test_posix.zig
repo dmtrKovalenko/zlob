@@ -292,6 +292,43 @@ test "ZLOB_DOOFFS - works with ZLOB_APPEND" {
     try testing.expect(pzlob.zlo_pathv[1] == null);
 }
 
+// ZLOB_DOOFFS must apply to every result-producing path, not just the ones
+// that go through finalizeResults. POSIX (and glibc) reserve the slots for the
+// ZLOB_NOCHECK pattern echo too, and globfree sizes its free off zlo_offs
+// regardless of which path filled the struct.
+test "ZLOB_DOOFFS - reserves offset slots for the ZLOB_NOCHECK echo" {
+    const allocator = testing.allocator;
+    const pattern = try allocator.dupeZ(u8, "zzz_no_such_file_anywhere_*.nope");
+    defer allocator.free(pattern);
+
+    var pzlob: glob.zlob_t = undefined;
+    pzlob.zlo_offs = 3;
+
+    const result = c_lib.zlob(
+        pattern.ptr,
+        zlob_flags.ZLOB_DOOFFS | zlob_flags.ZLOB_NOCHECK,
+        null,
+        &pzlob,
+    );
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(0, result);
+    try testing.expectEqual(@as(usize, 1), pzlob.zlo_pathc);
+
+    // The reserved slots must be present and NULL...
+    try testing.expect(pzlob.zlo_pathv[0] == null);
+    try testing.expect(pzlob.zlo_pathv[1] == null);
+    try testing.expect(pzlob.zlo_pathv[2] == null);
+
+    // ...and the echoed pattern must sit at pathv[offs], where callers look.
+    const echoed = pzlob.zlo_pathv[pzlob.zlo_offs];
+    try testing.expect(echoed != null);
+    try testing.expectEqualStrings(pattern, std.mem.sliceTo(echoed, 0));
+
+    // NULL terminator directly after the single result.
+    try testing.expect(pzlob.zlo_pathv[pzlob.zlo_offs + 1] == null);
+}
+
 // ============================================================================
 // ZLOB_PERIOD - Allow leading '.' to match metacharacters
 // ============================================================================

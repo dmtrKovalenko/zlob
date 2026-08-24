@@ -1,10 +1,4 @@
-//! Path-construction tests for the single-threaded walker (`src/walker.zig`).
-//!
-//! Both backends build entry paths in one shared 4 KiB buffer that sibling
-//! directories overwrite as the walk proceeds, so every pushed directory has
-//! to stash its own path until it is popped. These tests pin that behaviour
-//! for paths long enough to have caught the old fixed 256-byte stash.
-
+// vibe coded based on the path report from fff which was caused by non-libc target
 const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;

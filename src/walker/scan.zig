@@ -15,19 +15,18 @@ const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
 const worker = @import("worker.zig");
-const darwin = @import("scan_darwin.zig");
-const win = @import("scan_windows.zig");
 
-const mem = std.mem;
+const linux = @import("scan_linux.zig");
+const darwin = @import("scan_darwin.zig");
+const winows = @import("scan_windows.zig");
+
 const posix = std.posix;
-const linux = std.os.linux;
 const backend = types.backend;
 const is_posix_backend = types.is_posix_backend;
 const Handle = types.Handle;
 const EntryKind = types.EntryKind;
 const Metadata = types.Metadata;
 const MetaMask = types.MetaMask;
-const RawEntry = types.RawEntry;
 const SharedWorkerState = worker.SharedWorkerState;
 const Worker = worker.Worker;
 const closeFd = types.closeFd;
@@ -37,7 +36,7 @@ const NAME_BUF = types.NAME_BUF_Z_LENGTH;
 
 pub fn scanDir(sh: *SharedWorkerState, w: *Worker, handle: Handle) WalkError!void {
     if (backend == .linux_getdents) {
-        return scanLinux(sh, w, handle);
+        return linux.scanDir(sh, w, handle);
     } else if (backend == .darwin_bulk) {
         return scanDarwin(sh, w, handle);
     } else if (backend == .windows_ntdll) {
@@ -48,223 +47,12 @@ pub fn scanDir(sh: *SharedWorkerState, w: *Worker, handle: Handle) WalkError!voi
 }
 
 // ---------------------------------------------------------------------------
-// Scratch accumulation
-// ---------------------------------------------------------------------------
-
-inline fn noteIgnoreFile(w: *Worker, name: []const u8) void {
-    if (name.len == 10 and mem.eql(u8, name, ".gitignore")) {
-        w.saw_gitignore = true;
-    } else if (name.len == 7 and mem.eql(u8, name, ".ignore")) {
-        w.saw_ignore = true;
-    }
-}
-
-inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: RawEntry) WalkError!void {
-    const name = raw.name;
-    if (name.len == 0) {
-        @branchHint(.unlikely);
-        return;
-    }
-    if (name[0] == '.') {
-        @branchHint(.unlikely);
-        if (name.len == 1 or (name.len == 2 and name[1] == '.')) return;
-        noteIgnoreFile(w, name);
-    }
-    const off: u32 = @intCast(w.names.items.len);
-    try w.names.appendSlice(sh.allocator, name);
-    try w.entries.append(sh.allocator, .{
-        .name_off = off,
-        .name_len = @intCast(name.len),
-        .kind = raw.kind,
-    });
-    // Metadata rides in the parallel list only when the caller asked for it;
-    // processDir indexes it by entry position.
-    if (sh.options.meta.any()) {
-        try w.metas.append(sh.allocator, raw.meta);
-    }
-}
-
-inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []const u8, kind: EntryKind) WalkError!void {
-    if (name.len == 0) {
-        @branchHint(.unlikely);
-        return;
-    }
-    if (name[0] == '.') {
-        @branchHint(.unlikely);
-        if (name.len == 1 or (name.len == 2 and name[1] == '.')) return;
-        noteIgnoreFile(w, name);
-    }
-    const off: u32 = @intCast(w.names.items.len);
-    try w.names.appendSlice(sh.allocator, name);
-    try w.entries.append(sh.allocator, .{
-        .name_off = off,
-        .name_len = @intCast(name.len),
-        .kind = kind,
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Linux: getdents64
-// ---------------------------------------------------------------------------
-
-fn scanLinux(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!void {
-    if (builtin.os.tag != .linux) unreachable;
-    const DT_UNKNOWN: u8 = 0;
-    const DT_DIR: u8 = 4;
-    const DT_REG: u8 = 8;
-    const DT_LNK: u8 = 10;
-    const S_IFMT: u32 = 0o170000;
-    const want_stat = sh.options.meta.any();
-    const only_inode = sh.options.meta.toInt() == (MetaMask{ .inode = true }).toInt();
-
-    while (true) {
-        // Short by 8 so the word-at-a-time name scan below stays in bounds.
-        const rc = linux.getdents64(fd, w.io_buf.ptr, w.io_buf.len - 8);
-        const n: isize = @bitCast(rc);
-        if (n < 0) {
-            return switch (linux.errno(rc)) {
-                .ACCES => error.PermissionDenied,
-                else => error.ReadFailed,
-            };
-        }
-        if (n == 0) return;
-        const len: usize = @intCast(n);
-
-        var off: usize = 0;
-        while (off + 19 <= len) {
-            const base = off;
-            const d_ino = mem.readInt(u64, w.io_buf[base..][0..8], .little);
-            const reclen = mem.readInt(u16, w.io_buf[base + 16 ..][0..2], .little);
-            const d_type = w.io_buf[base + 18];
-            // A zero reclen would loop forever; only a malformed (FUSE) fs can
-            // produce one.
-            if (reclen == 0) return error.ReadFailed;
-            off += reclen;
-
-            const name_ptr: [*:0]const u8 = @ptrCast(w.io_buf.ptr + base + 19);
-            // The name is NUL-terminated within the record; scan a word at a
-            // time. Vectorized scans do not amortize at these lengths.
-            const name_area = w.io_buf[base + 19 .. base + reclen];
-            const name_len = blk: {
-                const lo: u64 = 0x0101010101010101;
-                const hi: u64 = 0x8080808080808080;
-                var k: usize = 0;
-                while (k < name_area.len) : (k += 8) {
-                    const word = mem.readInt(u64, name_area.ptr[k..][0..8], .little);
-                    const zero_mask = (word -% lo) & ~word & hi;
-                    if (zero_mask != 0) break :blk @min(k + (@ctz(zero_mask) >> 3), name_area.len);
-                }
-                break :blk name_area.len;
-            };
-            const name = name_area[0..name_len];
-            if (name.len == 0) continue;
-            if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
-
-            var kind: EntryKind = switch (d_type) {
-                DT_REG => .file,
-                DT_DIR => .directory,
-                DT_LNK => .sym_link,
-                else => .unknown,
-            };
-
-            var meta = Metadata{};
-            if (want_stat or d_type == DT_UNKNOWN) {
-                if (only_inode and d_type != DT_UNKNOWN) {
-                    meta.inode = d_ino;
-                    meta.valid.inode = true;
-                } else {
-                    var stx: linux.Statx = undefined;
-                    var mask = sh.statx_mask;
-                    if (d_type == DT_UNKNOWN) mask.TYPE = true;
-                    const src = linux.statx(fd, name_ptr, linux.AT.SYMLINK_NOFOLLOW, mask, &stx);
-                    if (linux.errno(src) == .SUCCESS) {
-                        fillMetaFromStatx(&meta, &stx, sh.options.meta);
-                        if (d_type == DT_UNKNOWN and stx.mask.TYPE) {
-                            kind = switch (@as(u32, stx.mode) & S_IFMT) {
-                                0o040000 => .directory,
-                                0o100000 => .file,
-                                0o120000 => .sym_link,
-                                else => .unknown,
-                            };
-                        }
-                    }
-                }
-            }
-
-            try appendScratch(sh, w, .{ .name = name, .kind = kind, .meta = meta });
-        }
-    }
-}
-
-pub fn linuxStatxMask(want: MetaMask) if (builtin.os.tag == .linux) linux.STATX else void {
-    if (builtin.os.tag != .linux) return {};
-    return .{
-        .SIZE = want.size,
-        .MTIME = want.mtime,
-        .ATIME = want.atime,
-        .CTIME = want.ctime,
-        .BTIME = want.btime,
-        .INO = want.inode,
-        .NLINK = want.nlink,
-        .MODE = want.mode,
-        .UID = want.uid,
-        .GID = want.gid,
-    };
-}
-
-fn fillMetaFromStatx(meta: *Metadata, stx: *const linux.Statx, want: MetaMask) void {
-    if (builtin.os.tag != .linux) unreachable;
-    if (want.size and stx.mask.SIZE) {
-        meta.size = stx.size;
-        meta.valid.size = true;
-    }
-    if (want.mtime and stx.mask.MTIME) {
-        meta.mtime_ns = stx.mtime.sec *% std.time.ns_per_s +% stx.mtime.nsec;
-        meta.valid.mtime = true;
-    }
-    if (want.atime and stx.mask.ATIME) {
-        meta.atime_ns = stx.atime.sec *% std.time.ns_per_s +% stx.atime.nsec;
-        meta.valid.atime = true;
-    }
-    if (want.ctime and stx.mask.CTIME) {
-        meta.ctime_ns = stx.ctime.sec *% std.time.ns_per_s +% stx.ctime.nsec;
-        meta.valid.ctime = true;
-    }
-    if (want.btime and stx.mask.BTIME) {
-        meta.btime_ns = stx.btime.sec *% std.time.ns_per_s +% stx.btime.nsec;
-        meta.valid.btime = true;
-    }
-    if (want.inode and stx.mask.INO) {
-        meta.inode = stx.ino;
-        meta.valid.inode = true;
-    }
-    if (want.nlink and stx.mask.NLINK) {
-        meta.nlink = stx.nlink;
-        meta.valid.nlink = true;
-    }
-    if (want.mode and stx.mask.MODE) {
-        meta.mode = @as(u32, stx.mode) & 0o7777;
-        meta.valid.mode = true;
-    }
-    if (want.uid and stx.mask.UID) {
-        meta.uid = stx.uid;
-        meta.valid.uid = true;
-    }
-    if (want.gid and stx.mask.GID) {
-        meta.gid = stx.gid;
-        meta.valid.gid = true;
-    }
-}
-
-// ---------------------------------------------------------------------------
 // macOS: getattrlistbulk (with metadata) / getdirentries64 (without)
 // ---------------------------------------------------------------------------
 
 fn scanDarwin(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!void {
     if (comptime !darwin.supported) unreachable;
-    // No-metadata walks only need names + kind. getattrlistbulk would make the
-    // kernel assemble attribute records we never read (~25% slower per dir than
-    // getdirentries64 on APFS), so route around it.
+    // if we don't need meta use getdirentries64 backend
     if (!sh.options.meta.any()) {
         return scanDarwinNoMeta(sh, w, fd);
     }
@@ -276,7 +64,7 @@ fn scanDarwin(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!void
             error.ReadFailed => return error.ReadFailed,
         };
         const entry = raw orelse return;
-        try appendScratch(sh, w, entry);
+        try worker.appendScratch(sh, w, entry);
     }
 }
 
@@ -290,7 +78,7 @@ fn scanDarwinNoMeta(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkErro
         if (kind == .unknown) {
             kind = statKind(fd, entry.name) orelse .unknown;
         }
-        try appendScratchNoMeta(sh, w, entry.name, kind);
+        try worker.appendScratchNoMeta(sh, w, entry.name, kind);
     }
 }
 
@@ -334,7 +122,7 @@ fn scanPosixFallback(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkErr
                 }
             }
         }
-        try appendScratch(sh, w, .{ .name = name, .kind = kind, .meta = meta });
+        try worker.appendScratch(sh, w, .{ .name = name, .kind = kind, .meta = meta });
     }
 }
 
@@ -410,15 +198,15 @@ fn fillMetaFromCStat(meta: *Metadata, st: *const std.c.Stat, want: MetaMask) voi
 // ---------------------------------------------------------------------------
 
 fn scanWindows(sh: *SharedWorkerState, w: *Worker, handle: std.os.windows.HANDLE) WalkError!void {
-    if (comptime !win.supported) unreachable;
-    var scanner = win.Scanner.init(handle, w.io_buf, sh.options.meta);
+    if (comptime !winows.supported) unreachable;
+    var scanner = winows.Scanner.init(handle, w.io_buf, sh.options.meta);
     while (true) {
         const raw = scanner.next() catch |err| switch (err) {
             error.PermissionDenied => return error.PermissionDenied,
             error.ReadFailed => return error.ReadFailed,
         };
         const entry = raw orelse return;
-        try appendScratch(sh, w, entry);
+        try worker.appendScratch(sh, w, entry);
     }
 }
 
@@ -453,7 +241,7 @@ fn scanStdFs(sh: *SharedWorkerState, w: *Worker, handle: Handle) WalkError!void 
                     fillMetaFromIoStat(&meta, &st, sh.options.meta);
                 } else |_| {}
             }
-            try appendScratch(sh, w, .{ .name = name, .kind = entry.kind, .meta = meta });
+            try worker.appendScratch(sh, w, .{ .name = name, .kind = entry.kind, .meta = meta });
         }
     }
 }
