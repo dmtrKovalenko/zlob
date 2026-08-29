@@ -569,6 +569,13 @@ impl<'a> WalkEntry<'a> {
         &self.path_bytes()[self.raw.relative_offset as usize..]
     }
 
+    /// Path relative to the walk root, decoded as UTF-8 with invalid
+    /// sequences replaced by U+FFFD. Doesn't allocate if string is valid UT-F8
+    #[inline]
+    pub fn relative_path_lossy(&self) -> std::borrow::Cow<'a, str> {
+        String::from_utf8_lossy(self.relative_path_bytes())
+    }
+
     /// If the item is kind of `WalkEntryKind::File` returns it's filename, otherwise None
     #[inline]
     pub fn basename(&self) -> Option<&'a str> {
@@ -580,12 +587,29 @@ impl<'a> WalkEntry<'a> {
     }
 
     /// Byte offset where the basename begins inside [`Self::relative_path_bytes`].
+    ///
+    /// This indexes the *raw bytes*. Do not use it to slice a lossily
+    /// decoded `String` — replacement characters shift byte positions and
+    /// the slice panics off a char boundary; use
+    /// [`Self::basename_offset_in_relative_lossy`] there instead.
     #[inline]
     pub fn basename_offset_in_relative(&self) -> u16 {
         (self
             .raw
             .basename_offset
             .saturating_sub(self.raw.relative_offset)) as u16
+    }
+
+    /// Byte offset where the basename begins inside
+    /// [`Self::relative_path_lossy`]. But supports lossy fallbacks for non utf-8 strings.
+    pub fn basename_offset_in_relative_lossy(&self) -> usize {
+        let raw = self.basename_offset_in_relative() as usize;
+        let dirs = &self.relative_path_bytes()[..raw];
+        if std::str::from_utf8(dirs).is_ok() {
+            return raw;
+        }
+
+        String::from_utf8_lossy(dirs).len()
     }
 
     /// Depth below the root — direct children of the root are at depth 1.

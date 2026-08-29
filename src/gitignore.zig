@@ -30,6 +30,10 @@ pub const Pattern = struct {
     suffix_len: u8,
     /// Pre-computed u32 of suffix for SIMD-style matching (suffixes <= 4 bytes)
     suffix_u32: u32,
+    /// Little-endian packing of suffixes of 5..8 bytes: comparing it against
+    /// `tail_u64 >> 8*(8-len)` checks all suffix bytes in one shot instead of
+    /// a memcmp (`.mod.c`, `.patch`, `.dt.yaml`-style suffixes).
+    suffix_u64: u64,
     /// Index in original pattern list (for negation ordering)
     index: u16,
     /// Pre-split components for anchored or recursive wildcard matching.
@@ -523,10 +527,16 @@ pub const GitIgnore = struct {
         // Pre-compute suffix values for fast matching
         var suffix_len: u8 = 0;
         var suffix_u32: u32 = 0;
+        var suffix_u64: u64 = 0;
         if (suffix) |s| {
             suffix_len = @intCast(s.len);
             if (s.len <= 4) {
                 @memcpy(@as([*]u8, @ptrCast(&suffix_u32))[0..s.len], s);
+            }
+            if (s.len <= 8) {
+                // Explicitly little-endian so the shift trick in
+                // matchSuffixFast keeps the suffix bytes on any host.
+                suffix_u64 = mem.readVarInt(u64, s, .little);
             }
         }
 
@@ -542,6 +552,7 @@ pub const GitIgnore = struct {
             .suffix = suffix,
             .suffix_len = suffix_len,
             .suffix_u32 = suffix_u32,
+            .suffix_u64 = suffix_u64,
             .index = index,
         };
     }
@@ -565,14 +576,13 @@ pub const GitIgnore = struct {
 
     /// Match specific inode path to a pattern
     pub fn checkInode(self: *const Self, normalized_path: []const u8, basename: []const u8, is_dir: bool) ?bool {
-        // Pre-split path segments once for ** wildcard patterns. Reused across
-        // all patterns in the loop below avoids N redundant path splits per
-        // entry. The 2 KB stack buffer is only touched when ** patterns exist.
+        // Path segments for anchored wildcard patterns, split lazily on the
+        // first gate-passing pattern that needs them and then reused. Typical
+        // entries reject every wildcard pattern at the gate, so the split
+        // (and its 2 KB stack buffer) never runs at all.
         var path_seg_buf: [compiled_pattern.MAX_PATH_COMPONENTS][]const u8 = undefined;
-        const path_segs: ?[][]const u8 = if (self.has_double_star_wildcards)
-            compiled_pattern.splitPathComponentsNormalized(normalized_path, &path_seg_buf)
-        else
-            null;
+        var path_segs: ?[][]const u8 = null;
+        var segs_ready = false;
 
         // Fast path: if no negations exist, we can use optimized lookups
         if (!self.has_negations) {
@@ -610,6 +620,12 @@ pub const GitIgnore = struct {
             const base_last: i16 = if (basename.len > 0) basename[basename.len - 1] else -1;
             for (self.wildcard_gates, 0..) |gate, i| {
                 if (gate.rejects(path_last, base_last, is_dir)) continue;
+                // Anchored patterns (rc_on_basename == false) match via
+                // segments — split the path on first need, then reuse.
+                if (!gate.rc_on_basename and !segs_ready) {
+                    segs_ready = true;
+                    path_segs = compiled_pattern.splitPathComponentsNormalized(normalized_path, &path_seg_buf);
+                }
                 if (matchPatternFast(&self.wildcard_patterns[i], normalized_path, basename, path_segs, is_dir)) {
                     return true;
                 }
@@ -656,6 +672,10 @@ pub const GitIgnore = struct {
         const base_last: i16 = if (basename.len > 0) basename[basename.len - 1] else -1;
         for (self.wildcard_gates, 0..) |gate, i| {
             if (gate.rejects(path_last, base_last, is_dir)) continue;
+            if (!gate.rc_on_basename and !segs_ready) {
+                segs_ready = true;
+                path_segs = compiled_pattern.splitPathComponentsNormalized(normalized_path, &path_seg_buf);
+            }
             const pattern = &self.wildcard_patterns[i];
             if (matchPatternFast(pattern, normalized_path, basename, path_segs, is_dir)) {
                 recordMatch(&best_index, &ignored, pattern.index, pattern.negated);
@@ -784,6 +804,16 @@ pub const GitIgnore = struct {
                 const tail_ptr = basename.ptr + basename.len - 4;
                 const tail: u32 = @as(*align(1) const u32, @ptrCast(tail_ptr)).*;
                 break :blk tail == pattern.suffix_u32;
+            },
+            5...8 => blk: {
+                // The little-endian u64 tail load puts the basename's last
+                // byte in the top byte, so shifting out the extra low bytes
+                // leaves exactly the last suffix_len bytes for one compare.
+                if (basename.len < 8) break :blk mem.endsWith(u8, basename, pattern.suffix.?);
+                const tail_ptr = basename.ptr + basename.len - 8;
+                const tail: u64 = mem.readInt(u64, tail_ptr[0..8], .little);
+                const shift: u6 = @intCast(8 * (8 - @as(u32, suffix_len)));
+                break :blk (tail >> shift) == pattern.suffix_u64;
             },
             else => mem.endsWith(u8, basename, pattern.suffix.?),
         };
