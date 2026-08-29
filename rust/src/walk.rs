@@ -576,7 +576,6 @@ impl<'a> WalkEntry<'a> {
         String::from_utf8_lossy(self.relative_path_bytes())
     }
 
-
     /// If the item is kind of `WalkEntryKind::File` returns it's filename, otherwise None
     #[inline]
     pub fn basename(&self) -> Option<&'a str> {
