@@ -27,6 +27,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install clang-format
+        run: pipx install "clang-format==$(make print-clang-format-version)"
+
       - name: Check format
         run: make format-check
 

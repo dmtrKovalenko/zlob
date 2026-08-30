@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const dirent64 = @import("dirent");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -14,6 +15,8 @@ const errno = struct {
     const LOOP: c_int = 40;
     const NAMETOOLONG: c_int = 36;
     const NOMEM: c_int = 12;
+    const MFILE: c_int = 24;
+    const NFILE: c_int = 23;
     const INVAL: c_int = 22;
     const IO: c_int = 5;
 };
@@ -77,12 +80,6 @@ pub const HiddenConfig = struct {
 
     /// Include all entries (for ZLOB_PERIOD flag or patterns starting with '.')
     pub const include_all: HiddenConfig = .{
-        .include_dot_entries = true,
-        .include_hidden = true,
-    };
-
-    /// Include "." and ".." only (for patterns like ".*" that start with '.')
-    pub const dots_and_hidden: HiddenConfig = .{
         .include_dot_entries = true,
         .include_hidden = true,
     };
@@ -235,6 +232,11 @@ fn statAtFollow(dir_fd: std.posix.fd_t, name_z: [*:0]const u8) ?ResolvedSym {
     return .{ .is_dir = isDirMode(st.mode), .key = keyFromCStat(st) };
 }
 
+/// Length of the NUL-terminated name in a dirent record. Shared with the
+/// parallel walker's scanner; see `walker/dirent.zig` for the SWAR scan and its
+/// 8-byte over-read contract.
+const direntNameLen = dirent64.nameLen;
+
 inline fn shouldSkipEntry(name: []const u8, hidden: HiddenConfig) bool {
     if (name.len == 0) return true;
 
@@ -288,6 +290,11 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
     // reallocation. Grows as needed for pathological cases (huge flat dirs).
     dir_stack: std.ArrayList(DirEntry),
 
+    // Saved paths of the directories on dir_stack, since siblings overwrite
+    // path_buffer before we pop. dir_stack is strict LIFO, so the popped entry
+    // always owns this buffer's tail and releasing it is a shrink.
+    path_stack: std.ArrayList(u8),
+
     // Cycle-detection set for follow_symlinks. Populated lazily — only when
     // a symlink-to-dir is descended into. Empty (and free) when follow_symlinks
     // is disabled.
@@ -315,18 +322,18 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
     const DirEntry = struct {
         fd: posix.fd_t,
         depth: u16,
-        path_len: u16, // Path length when this dir was pushed
-        // Store the actual path content to restore when we pop this directory
-        // This is needed because sibling directories overwrite each other in path_buffer
-        path_content: [256]u8,
+        // Where this dir's path lives in path_stack.
+        path_len: u16,
+        path_off: u32,
     };
 
     pub fn init(allocator: Allocator, io: Io, start_path: []const u8, config: WalkerConfig) !RecursiveGetdents64Walker {
         _ = io; // Linux getdents64 backend uses raw syscalls; accepted for API parity with StdFsWalker.
 
         // Use smaller buffer for single-directory iteration (max_depth=0)
-        // since we won't be recursing and don't need as much buffering
-        const buffer_size = if (config.max_depth == 0) 8192 else config.getdents_buffer_size;
+        // since we won't be recursing and don't need as much buffering.
+        // Floored so the 8 bytes reserved for direntNameLen stay meaningful.
+        const buffer_size = @max(if (config.max_depth == 0) 8192 else config.getdents_buffer_size, 512);
         const buffer = try allocator.alignedAlloc(u8, .@"8", buffer_size);
         errdefer allocator.free(buffer);
 
@@ -361,6 +368,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             .allocator = allocator,
             .config = config,
             .dir_stack = dir_stack,
+            .path_stack = std.ArrayList(u8).empty,
             .visited = visited,
             .current_fd = start_fd,
             .current_depth = 0,
@@ -404,6 +412,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         }
 
         self.dir_stack.deinit(self.allocator);
+        self.path_stack.deinit(self.allocator);
         self.visited.deinit(self.allocator);
 
         if (self.getdents_buffer.len > 0) {
@@ -422,8 +431,9 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                 }
             }
 
-            // buffer free - read more from current directory
-            const bytes_read = linux.getdents64(self.current_fd, self.getdents_buffer.ptr, self.getdents_buffer.len);
+            // buffer free - read more from current directory.
+            // Short by 8: see direntNameLen.
+            const bytes_read = linux.getdents64(self.current_fd, self.getdents_buffer.ptr, self.getdents_buffer.len - 8);
 
             if (@as(isize, @bitCast(bytes_read)) < 0 or bytes_read == 0) {
                 // Current directory exhausted or error - close it and pop next from stack
@@ -437,9 +447,12 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                 self.current_fd = next_dir.fd;
                 self.current_depth = next_dir.depth;
                 self.path_len = next_dir.path_len;
-                // Restore the path content that was saved when this directory was pushed
-                const copy_len = @min(next_dir.path_len, 256);
-                @memcpy(self.path_buffer[0..copy_len], next_dir.path_content[0..copy_len]);
+                // Restore this dir's saved path, then release its bytes.
+                @memcpy(
+                    self.path_buffer[0..next_dir.path_len],
+                    self.path_stack.items[next_dir.path_off..][0..next_dir.path_len],
+                );
+                self.path_stack.shrinkRetainingCapacity(next_dir.path_off);
 
                 self.getdents_offset = 0;
                 self.getdents_len = 0;
@@ -453,20 +466,37 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
     fn parseNextEntry(self: *RecursiveGetdents64Walker) ?Entry {
         const base = self.getdents_offset;
-        if (base + 19 > self.getdents_len) return null;
+        // Too few bytes left for a dirent header. Consume the remainder: the
+        // caller loops until the offset reaches the length.
+        if (base + dirent64.NAME_OFFSET > self.getdents_len) {
+            @branchHint(.unlikely);
+            self.getdents_offset = self.getdents_len;
+            return null;
+        }
 
-        const reclen = mem.readInt(u16, self.getdents_buffer[base + 16 ..][0..2], .little);
-        const d_type = self.getdents_buffer[base + 18];
+        const reclen = mem.readInt(u16, self.getdents_buffer[base + dirent64.RECLEN_OFFSET ..][0..2], .little);
+        const d_type = self.getdents_buffer[base + dirent64.TYPE_OFFSET];
 
-        const name_start = base + 19;
-        var name_len: usize = 0;
-        while (name_start + name_len < base + reclen and
-            self.getdents_buffer[name_start + name_len] != 0) : (name_len += 1)
-        {}
-
+        // Guard against malformed (FUSE) records: a zero reclen would spin
+        // forever, and a short one underflows the name area below.
+        if (reclen < dirent64.NAME_OFFSET or base + reclen > self.getdents_len) {
+            @branchHint(.unlikely);
+            self.getdents_offset = self.getdents_len;
+            return null;
+        }
         self.getdents_offset += reclen;
 
-        const name = self.getdents_buffer[name_start..][0..name_len];
+        // Knowing the terminator was found lets us borrow the name as a C
+        // string for openat/fstatat below instead of copying it out
+        const name_start = base + dirent64.NAME_OFFSET;
+        const name_area = self.getdents_buffer[name_start .. base + reclen];
+        const name_len = direntNameLen(name_area.ptr, name_area.len);
+        // unrealistic path if kernel is broken and path doesn't have NUL
+        if (name_len == name_area.len) {
+            @branchHint(.unlikely);
+            return null;
+        }
+        const name = name_area[0..name_len];
 
         // Unified filtering for ".", "..", and hidden files
         if (shouldSkipEntry(name, self.config.hidden)) return null;
@@ -505,9 +535,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                 true;
 
             if (should_descend) {
-                var name_z: [256]u8 = undefined;
-                @memcpy(name_z[0..name.len], name);
-                name_z[name.len] = 0;
+                const name_z = name_area[0..name.len :0];
 
                 // For symlink entries under follow mode: pre-flight
                 // fstatat(FOLLOW) to confirm dir + cycle BEFORE openat.
@@ -515,14 +543,16 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                 // big win on symlink-heavy trees (node_modules, bazel-out).
                 const skip_descend: bool = blk: {
                     if (kind != .sym_link) break :blk false;
-                    const res = statAtFollow(self.current_fd, name_z[0..name.len :0]) orelse break :blk true;
+                    const res = statAtFollow(self.current_fd, name_z) orelse break :blk true;
                     if (!res.is_dir) break :blk true;
                     const gop = self.visited.getOrPut(self.allocator, res.key) catch break :blk true;
                     break :blk gop.found_existing;
                 };
 
                 if (!skip_descend) {
-                    if (posix.openat(self.current_fd, name_z[0..name.len :0], .{
+                    // openatZ, not openat: the slice overload would re-copy
+                    // and rescan the name via toPosixPath.
+                    if (posix.openatZ(self.current_fd, name_z.ptr, .{
                         .ACCMODE = .RDONLY,
                         .DIRECTORY = true,
                         .CLOEXEC = true,
@@ -543,17 +573,20 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                         } else {
                             // Push to stack - processed after current dir is exhausted.
                             // Save path content; sibling dirs overwrite path_buffer.
-                            var entry: DirEntry = .{
-                                .fd = subdir_fd,
-                                .depth = self.current_depth + 1,
-                                .path_len = @intCast(self.path_len),
-                                .path_content = undefined,
-                            };
-                            const copy_len = @min(self.path_len, 256);
-                            @memcpy(entry.path_content[0..copy_len], self.path_buffer[0..copy_len]);
-                            self.dir_stack.append(self.allocator, entry) catch {
+                            const path_off = self.path_stack.items.len;
+                            if (self.path_stack.appendSlice(self.allocator, self.path_buffer[0..self.path_len])) {
+                                self.dir_stack.append(self.allocator, .{
+                                    .fd = subdir_fd,
+                                    .depth = self.current_depth + 1,
+                                    .path_len = @intCast(self.path_len),
+                                    .path_off = @intCast(path_off),
+                                }) catch {
+                                    self.path_stack.shrinkRetainingCapacity(path_off);
+                                    _ = linux.close(subdir_fd);
+                                };
+                            } else |_| {
                                 _ = linux.close(subdir_fd);
-                            };
+                            }
                         }
                     } else |_| {}
                 }
@@ -581,6 +614,9 @@ const StdFsWalker = struct {
 
     // Stack of directories to process (LIFO order)
     dir_stack: std.ArrayList(StackEntry),
+
+    // Saved paths of the directories on dir_stack, as in the getdents64 backend.
+    path_stack: std.ArrayList(u8),
 
     // (dev, ino) bookkeeping for follow_symlinks cycle detection.
     // Empty when follow_symlinks is disabled.
@@ -614,11 +650,9 @@ const StdFsWalker = struct {
     const StackEntry = struct {
         dir: std.Io.Dir,
         depth: usize,
-        path_len: usize,
-        // Heap-allocated path prefix to restore when popping
-        // This is needed because the path_buffer is shared and may be
-        // overwritten by sibling directory processing before we pop
-        path_prefix: []u8,
+        // Where this dir's path lives in path_stack.
+        path_len: u32,
+        path_off: u32,
     };
 
     pub fn init(allocator: Allocator, io: Io, start_path: []const u8, config: WalkerConfig) !StdFsWalker {
@@ -648,6 +682,7 @@ const StdFsWalker = struct {
             .io = io,
             .config = config,
             .dir_stack = dir_stack,
+            .path_stack = std.ArrayList(u8).empty,
             .visited = visited,
             .current_dir = dir,
             .reader = .{
@@ -694,14 +729,12 @@ const StdFsWalker = struct {
             dir.close(io);
         }
 
-        // Close any remaining stacked directories and free path prefixes
+        // Close any remaining stacked directories
         for (self.dir_stack.items) |*entry| {
             entry.dir.close(io);
-            if (entry.path_prefix.len > 0) {
-                self.allocator.free(entry.path_prefix);
-            }
         }
         self.dir_stack.deinit(self.allocator);
+        self.path_stack.deinit(self.allocator);
         self.visited.deinit(self.allocator);
     }
 
@@ -783,21 +816,20 @@ const StdFsWalker = struct {
                             if (cycle) {
                                 sub.close(io);
                             } else {
-                                const path_copy = self.allocator.alloc(u8, self.path_len) catch {
+                                const path_off = self.path_stack.items.len;
+                                if (self.path_stack.appendSlice(self.allocator, self.path_buffer[0..self.path_len])) {
+                                    self.dir_stack.append(self.allocator, .{
+                                        .dir = sub,
+                                        .depth = self.current_depth + 1,
+                                        .path_len = @intCast(self.path_len),
+                                        .path_off = @intCast(path_off),
+                                    }) catch {
+                                        self.path_stack.shrinkRetainingCapacity(path_off);
+                                        sub.close(io);
+                                    };
+                                } else |_| {
                                     sub.close(io);
-                                    continue;
-                                };
-                                @memcpy(path_copy, self.path_buffer[0..self.path_len]);
-
-                                self.dir_stack.append(self.allocator, .{
-                                    .dir = sub,
-                                    .depth = self.current_depth + 1,
-                                    .path_len = self.path_len,
-                                    .path_prefix = path_copy,
-                                }) catch {
-                                    self.allocator.free(path_copy);
-                                    sub.close(io);
-                                };
+                                }
                             }
                         } else |_| {}
                     }
@@ -857,11 +889,13 @@ const StdFsWalker = struct {
             self.batch_index = 0;
             self.batch_len = 0;
             self.current_depth = next_entry.depth;
-            // Restore the path prefix from when we pushed this directory
-            @memcpy(self.path_buffer[0..next_entry.path_len], next_entry.path_prefix);
+            // Restore this dir's saved path, then release its bytes.
+            @memcpy(
+                self.path_buffer[0..next_entry.path_len],
+                self.path_stack.items[next_entry.path_off..][0..next_entry.path_len],
+            );
             self.path_len = next_entry.path_len;
-            // Free the path prefix allocation
-            self.allocator.free(next_entry.path_prefix);
+            self.path_stack.shrinkRetainingCapacity(next_entry.path_off);
         }
     }
 };
@@ -891,9 +925,11 @@ pub const SingleDirIterator = struct {
     /// Open a directory for single-level iteration using raw syscalls.
     /// If base_dir is provided, opens path relative to it; otherwise relative to cwd.
     /// hidden_config controls filtering of ".", "..", and hidden files.
-    pub fn open(path: []const u8, base_dir: ?std.Io.Dir, hidden_config: HiddenConfig) !SingleDirIterator {
+    /// Open just the directory fd, so callers embedding this iterator can
+    /// construct it in place rather than moving it out of an error union.
+    pub fn openDirFd(path: []const u8, base_dir: ?std.Io.Dir) !i32 {
         if (!is_linux) {
-            @compileError("SingleDirIterator.open requires Linux");
+            @compileError("SingleDirIterator.openDirFd requires Linux");
         }
 
         // Build null-terminated path on stack
@@ -905,20 +941,29 @@ pub const SingleDirIterator = struct {
         const flags = linux.O{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
 
         // Use raw syscall for maximum performance
-        const fd: i32 = if (base_dir) |bd| blk: {
-            const rc = linux.openat(bd.handle, &path_z, flags, 0);
-            const signed: isize = @bitCast(rc);
-            if (signed < 0) return error.AccessDenied;
-            break :blk @intCast(rc);
-        } else blk: {
-            const rc = linux.openat(linux.AT.FDCWD, &path_z, flags, 0);
-            const signed: isize = @bitCast(rc);
-            if (signed < 0) return error.AccessDenied;
-            break :blk @intCast(rc);
+        const dir_fd = if (base_dir) |bd| bd.handle else linux.AT.FDCWD;
+        const rc = linux.openat(dir_fd, &path_z, flags, 0);
+        // Map onto the same error set std.Io.Dir.openDir produces so
+        // openHandled reports an accurate errno through ErrCallbackFn.
+        return switch (linux.errno(rc)) {
+            .SUCCESS => @intCast(rc),
+            .NOENT => error.FileNotFound,
+            .NOTDIR => error.NotDir,
+            .ACCES => error.AccessDenied,
+            .LOOP => error.SymLinkLoop,
+            .NAMETOOLONG => error.NameTooLong,
+            .NOMEM => error.SystemResources,
+            .MFILE => error.ProcessFdQuotaExceeded,
+            .NFILE => error.SystemFdQuotaExceeded,
+            .BADF => error.InvalidHandle,
+            .INVAL => error.InvalidArgument,
+            else => error.AccessDenied,
         };
+    }
 
+    pub fn open(path: []const u8, base_dir: ?std.Io.Dir, hidden_config: HiddenConfig) !SingleDirIterator {
         return SingleDirIterator{
-            .fd = fd,
+            .fd = try openDirFd(path, base_dir),
             .buffer = undefined,
             .offset = 0,
             .len = 0,
@@ -938,19 +983,23 @@ pub const SingleDirIterator = struct {
             // Try to get next entry from buffer
             while (self.offset < self.len) {
                 const base = self.offset;
-                if (base + 19 > self.len) break;
+                if (base + dirent64.NAME_OFFSET > self.len) break;
 
-                const reclen = @as(u16, self.buffer[base + 16]) | (@as(u16, self.buffer[base + 17]) << 8);
-                const d_type = self.buffer[base + 18];
+                const reclen = mem.readInt(u16, self.buffer[base + dirent64.RECLEN_OFFSET ..][0..2], .little);
+                const d_type = self.buffer[base + dirent64.TYPE_OFFSET];
 
+                // Guard against malformed (FUSE) records: a zero reclen would
+                // spin forever, a short one underflows the name area below.
+                if (reclen < dirent64.NAME_OFFSET or base + reclen > self.len) {
+                    @branchHint(.unlikely);
+                    self.offset = self.len;
+                    break;
+                }
                 self.offset += reclen;
 
-                // Get name directly - it starts at offset 19 and is null-terminated
-                const name_ptr = self.buffer[base + 19 ..].ptr;
-                var name_len: usize = 0;
-                while (name_ptr[name_len] != 0 and name_len < reclen - 19) : (name_len += 1) {}
-
-                const name = name_ptr[0..name_len];
+                // The name follows the header, NUL-terminated in the record.
+                const name_area = self.buffer[base + dirent64.NAME_OFFSET .. base + reclen];
+                const name = name_area[0..direntNameLen(name_area.ptr, name_area.len)];
 
                 // Unified filtering for ".", "..", and hidden files
                 if (shouldSkipEntry(name, self.hidden)) continue;
@@ -965,8 +1014,8 @@ pub const SingleDirIterator = struct {
                 return IterEntry{ .name = name, .kind = kind };
             }
 
-            // Buffer exhausted - read more
-            const rc = linux.getdents64(self.fd, &self.buffer, self.buffer.len);
+            // Buffer exhausted - read more. Short by 8: see direntNameLen.
+            const rc = linux.getdents64(self.fd, &self.buffer, self.buffer.len - 8);
             const bytes_read: isize = @bitCast(rc);
             if (bytes_read <= 0) {
                 return null;
@@ -974,48 +1023,6 @@ pub const SingleDirIterator = struct {
 
             self.len = @intCast(bytes_read);
             self.offset = 0;
-        }
-    }
-};
-
-pub const StdDirIterator = struct {
-    io: Io,
-    dir: std.Io.Dir,
-    iter: std.Io.Dir.Iterator,
-    hidden: HiddenConfig,
-
-    pub const IterEntry = struct {
-        name: []const u8,
-        kind: EntryKind,
-    };
-
-    pub fn open(io: Io, path: []const u8, base_dir: ?std.Io.Dir, hidden_config: HiddenConfig) !StdDirIterator {
-        const root = base_dir orelse std.Io.Dir.cwd();
-        var dir = try root.openDir(io, path, .{ .iterate = true });
-        return StdDirIterator{
-            .io = io,
-            .dir = dir,
-            .iter = dir.iterate(),
-            .hidden = hidden_config,
-        };
-    }
-
-    pub fn close(self: *StdDirIterator) void {
-        self.dir.close(self.io);
-    }
-
-    pub fn next(self: *StdDirIterator) ?IterEntry {
-        while (true) {
-            const entry = self.iter.next(self.io) catch return null;
-            if (entry) |e| {
-                // Unified filtering for ".", "..", and hidden files
-                if (shouldSkipEntry(e.name, self.hidden)) continue;
-                return IterEntry{
-                    .name = e.name,
-                    .kind = e.kind,
-                };
-            }
-            return null;
         }
     }
 };
@@ -1046,9 +1053,17 @@ pub const DirIterator = struct {
         }
     };
 
+    const is_linux = builtin.os.tag == .linux;
+    // Empty payload off Linux, where this variant is never constructed.
+    const GetdentsIter = if (is_linux) SingleDirIterator else struct {};
+
     io: Io,
-    /// Internal state - either real fs, std_fs (for Windows), or ALTDIRFUNC mode
+    /// Internal state - getdents64 (Linux), C readdir (other POSIX),
+    /// std.Io (Windows/no-libc fallback), or ALTDIRFUNC callbacks.
     mode: union(enum) {
+        /// Raw getdents64 syscalls (Linux only). Avoids opendir's per-directory
+        /// buffer malloc and the per-entry readdir call.
+        getdents: GetdentsIter,
         /// Real filesystem using C's opendir/readdir (POSIX only)
         real_fs: struct {
             dir: ?*c.DIR,
@@ -1126,7 +1141,11 @@ pub const DirIterator = struct {
     /// If base_dir is provided, opens path relative to it; otherwise relative to cwd.
     /// hidden_config controls filtering of ".", "..", and hidden files.
     /// fs allows using ALTDIRFUNC callbacks for virtual filesystem support.
-    pub fn openWithProvider(io: Io, path: []const u8, base_dir: ?std.Io.Dir, hidden_config: HiddenConfig, fs: AltFs) !DirIterator {
+    /// Open a directory for iteration, constructing the iterator in place.
+    /// `out` is only initialized on success. Constructing in place matters:
+    /// the getdents mode embeds an 8 KiB buffer, and returning it by value
+    /// through an error union makes the compiler copy that buffer per open.
+    pub fn openWithProviderInto(out: *DirIterator, io: Io, path: []const u8, base_dir: ?std.Io.Dir, hidden_config: HiddenConfig, fs: AltFs) !void {
         if (path.len >= 4096) return error.NameTooLong;
 
         if (fs.isAltDirFunc()) {
@@ -1138,7 +1157,7 @@ pub const DirIterator = struct {
             const handle = fs.opendir.?(&path_z);
             if (handle == null) return error.FileNotFound;
 
-            return DirIterator{
+            out.* = .{
                 .io = io,
                 .mode = .{ .alt_dirfunc = .{
                     .handle = handle,
@@ -1147,6 +1166,26 @@ pub const DirIterator = struct {
                 } },
                 .hidden = hidden_config,
             };
+            return;
+        }
+
+        // Linux: raw getdents64, no libc required. Handles base_dir natively
+        // via openat. `.buffer = undefined` keeps the 8 KiB scratch area
+        // untouched here.
+        if (is_linux) {
+            const fd = try SingleDirIterator.openDirFd(path, base_dir);
+            out.* = .{
+                .io = io,
+                .mode = .{ .getdents = .{
+                    .fd = fd,
+                    .buffer = undefined,
+                    .offset = 0,
+                    .len = 0,
+                    .hidden = hidden_config,
+                } },
+                .hidden = hidden_config,
+            };
+            return;
         }
 
         // When base_dir is set (need relative opens) or on Windows or when libc
@@ -1154,7 +1193,7 @@ pub const DirIterator = struct {
         if (base_dir != null or builtin.os.tag == .windows or !has_libc) {
             const root = base_dir orelse std.Io.Dir.cwd();
             var dir = try root.openDir(io, path, .{ .iterate = true });
-            return DirIterator{
+            out.* = .{
                 .io = io,
                 .mode = .{ .std_fs = .{
                     .dir = dir,
@@ -1162,6 +1201,7 @@ pub const DirIterator = struct {
                 } },
                 .hidden = hidden_config,
             };
+            return;
         }
 
         // Real filesystem: use C's optimized opendir/readdir
@@ -1169,20 +1209,24 @@ pub const DirIterator = struct {
         @memcpy(path_z[0..path.len], path);
         path_z[path.len] = 0;
 
-        const dir = if (base_dir) |_|
-            c.opendir(&path_z)
-        else
-            c.opendir(&path_z);
-
+        const dir = c.opendir(&path_z);
         if (dir == null) {
             return error.AccessDenied;
         }
 
-        return DirIterator{
+        out.* = .{
             .io = io,
             .mode = .{ .real_fs = .{ .dir = dir } },
             .hidden = hidden_config,
         };
+    }
+
+    /// By-value variant of openWithProviderInto. Prefer the Into form in hot
+    /// paths: this one copies the iterator, getdents buffer included.
+    pub fn openWithProvider(io: Io, path: []const u8, base_dir: ?std.Io.Dir, hidden_config: HiddenConfig, fs: AltFs) !DirIterator {
+        var it: DirIterator = undefined;
+        try openWithProviderInto(&it, io, path, base_dir, hidden_config, fs);
+        return it;
     }
 
     /// Open a directory for single-level iteration (backward compatible).
@@ -1196,11 +1240,57 @@ pub const DirIterator = struct {
     pub const OpenErrorConfig = struct {
         err_callback: ?ErrCallbackFn = null,
         abort_on_error: bool = false,
+        /// Path to report to err_callback instead of the opened one, for
+        /// fd-relative opens that should still report a full path.
+        report_path: ?[]const u8 = null,
     };
+
+    /// This directory as an openat() base for its children, when the platform
+    /// exposes a real fd. Saves the kernel re-resolving the path prefix.
+    pub fn relativeBase(self: *const DirIterator) ?std.Io.Dir {
+        if (comptime is_linux) {
+            return switch (self.mode) {
+                .getdents => |*g| .{ .handle = g.fd },
+                else => null,
+            };
+        }
+        return null;
+    }
 
     /// Open a directory with error callback handling.
     /// On failure, invokes err_callback (if set) and returns null instead of an error.
     /// Returns error.Aborted only when the callback requests abort or abort_on_error is set.
+    /// Open a directory with error callback handling, constructing the
+    /// iterator in place (see openWithProviderInto). Returns true when `out`
+    /// was initialized, false when the directory should be skipped, and
+    /// error.Aborted when the callback or abort_on_error demands it.
+    pub fn openHandledInto(
+        out: *DirIterator,
+        io: Io,
+        path: []const u8,
+        base_dir: ?std.Io.Dir,
+        hidden_config: HiddenConfig,
+        fs: AltFs,
+        err_config: OpenErrorConfig,
+    ) error{Aborted}!bool {
+        openWithProviderInto(out, io, path, base_dir, hidden_config, fs) catch |err| {
+            if (err_config.err_callback) |cb| {
+                const report = err_config.report_path orelse path;
+                var path_z: [4096:0]u8 = undefined;
+                const len = @min(report.len, 4095);
+                @memcpy(path_z[0..len], report[0..len]);
+                path_z[len] = 0;
+                if (cb(&path_z, zigErrorToPosix(err)) != 0) {
+                    return error.Aborted;
+                }
+            }
+            if (err_config.abort_on_error) return error.Aborted;
+            return false;
+        };
+        return true;
+    }
+
+    /// By-value variant of openHandledInto, kept for API compatibility.
     pub fn openHandled(
         io: Io,
         path: []const u8,
@@ -1209,23 +1299,16 @@ pub const DirIterator = struct {
         fs: AltFs,
         err_config: OpenErrorConfig,
     ) error{Aborted}!?DirIterator {
-        return openWithProvider(io, path, base_dir, hidden_config, fs) catch |err| {
-            if (err_config.err_callback) |cb| {
-                var path_z: [4096:0]u8 = undefined;
-                const len = @min(path.len, 4095);
-                @memcpy(path_z[0..len], path[0..len]);
-                path_z[len] = 0;
-                if (cb(&path_z, zigErrorToPosix(err)) != 0) {
-                    return error.Aborted;
-                }
-            }
-            if (err_config.abort_on_error) return error.Aborted;
-            return null;
-        };
+        var it: DirIterator = undefined;
+        if (!try openHandledInto(&it, io, path, base_dir, hidden_config, fs, err_config)) return null;
+        return it;
     }
 
     pub fn close(self: *DirIterator) void {
         switch (self.mode) {
+            .getdents => |*g| {
+                if (comptime is_linux) g.close();
+            },
             .real_fs => |*fs_mode| {
                 if (has_libc) {
                     if (fs_mode.dir) |d| {
@@ -1246,6 +1329,17 @@ pub const DirIterator = struct {
 
     pub fn next(self: *DirIterator) ?IterEntry {
         switch (self.mode) {
+            .getdents => |*g| {
+                if (comptime is_linux) {
+                    // SingleDirIterator applies the same hidden-config
+                    // filtering, and its names stay valid until the next
+                    // next() call, matching readdir's contract.
+                    if (g.next()) |entry| {
+                        return IterEntry{ .name = entry.name, .kind = entry.kind };
+                    }
+                }
+                return null;
+            },
             .real_fs => |fs_mode| {
                 if (!has_libc) return null;
 
@@ -1316,6 +1410,8 @@ fn zigErrorToPosix(err: anyerror) c_int {
         error.SymLinkLoop => errno.LOOP,
         error.NameTooLong => errno.NAMETOOLONG,
         error.SystemResources => errno.NOMEM,
+        error.ProcessFdQuotaExceeded => errno.MFILE,
+        error.SystemFdQuotaExceeded => errno.NFILE,
         error.InvalidHandle, error.InvalidArgument => errno.INVAL,
         else => errno.IO,
     };
@@ -1346,8 +1442,9 @@ pub const AltFs = struct {
 
 test "walker basic" {
     const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var walker = try DefaultWalker.init(allocator, ".", .{ .hidden = HiddenConfig.posix_default });
+    var walker = try DefaultWalker.init(allocator, io, ".", .{ .hidden = HiddenConfig.posix_default });
     defer walker.deinit();
 
     var count: usize = 0;
@@ -1357,6 +1454,52 @@ test "walker basic" {
     }
 
     try std.testing.expect(count > 0);
+}
+
+// direntNameLen lives in walker/dirent.zig, which is a module root and so
+// cannot host its own tests. They run from here instead.
+//
+// The bodies sit behind a comptime branch, not `error.SkipZigTest`: dirent.zig
+// refuses to compile off Linux, and a skipped test body would still be
+// semantically analyzed. Only the taken branch of a comptime-known `if` is.
+test "direntNameLen finds the terminator across word boundaries" {
+    if (comptime builtin.os.tag == .linux) {
+        // Names are laid out as the kernel writes them: NUL-terminated, then
+        // padded to the record length.
+        var area: [64]u8 = undefined;
+        for ([_]usize{ 0, 1, 7, 8, 9, 15, 16, 31 }) |name_len| {
+            @memset(&area, 'a');
+            area[name_len] = 0;
+            @memset(area[name_len + 1 ..], 0);
+            try std.testing.expectEqual(name_len, direntNameLen(&area, area.len));
+        }
+    }
+}
+
+test "direntNameLen clamps when the area has no terminator" {
+    if (comptime builtin.os.tag == .linux) {
+        // A malformed record without a NUL must report the area length rather
+        // than running past it.
+        var area: [24]u8 = @splat('a');
+        try std.testing.expectEqual(area.len, direntNameLen(&area, area.len));
+
+        // Unterminated area whose length is not a multiple of the word size:
+        // the final word read spans past area_len, so the result must clamp.
+        var padded: [32]u8 = @splat('a');
+        @memset(padded[21..], 0);
+        try std.testing.expectEqual(@as(usize, 21), direntNameLen(&padded, 21));
+        try std.testing.expectEqual(@as(usize, 13), direntNameLen(&padded, 13));
+    }
+}
+
+test "direntNameLen does not mistake high bytes for a terminator" {
+    if (comptime builtin.os.tag == .linux) {
+        // Bytes >= 0x80 (UTF-8 continuations) already have the high bit set,
+        // which is what the `& ~word` step exists to reject.
+        var area: [32]u8 = @splat(0xC3);
+        @memset(area[9..], 0);
+        try std.testing.expectEqual(@as(usize, 9), direntNameLen(&area, area.len));
+    }
 }
 
 test "EntryKind is std.Io.File.Kind" {
@@ -1471,8 +1614,4 @@ test "HiddenConfig presets match expected values" {
     // hidden_only
     try std.testing.expect(HiddenConfig.hidden_only.include_dot_entries == false);
     try std.testing.expect(HiddenConfig.hidden_only.include_hidden == true);
-
-    // dots_and_hidden (same as include_all)
-    try std.testing.expect(HiddenConfig.dots_and_hidden.include_dot_entries == true);
-    try std.testing.expect(HiddenConfig.dots_and_hidden.include_hidden == true);
 }

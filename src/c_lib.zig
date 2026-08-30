@@ -180,31 +180,12 @@ fn finalizeSharedSliceResult(matches: []const []const u8, pzlob: *zlob_t) c_int 
 fn finalizeNoMatch(pattern: []const u8, nocheck: bool, pzlob: *zlob_t) c_int {
     if (!nocheck) return zlob_flags.ZLOB_NOMATCH;
 
-    const pathv_buf = allocator.alloc([*c]u8, 2) catch return zlob_flags.ZLOB_NOSPACE;
-    errdefer allocator.free(pathv_buf);
-    const pathlen_buf = allocator.alloc(usize, 1) catch {
-        allocator.free(pathv_buf);
-        return zlob_flags.ZLOB_NOSPACE;
-    };
-    errdefer allocator.free(pathlen_buf);
-
-    // NUL-terminated owned copy so C callers can treat it as a C string.
-    const owned = allocator.allocSentinel(u8, pattern.len, 0) catch {
-        allocator.free(pathv_buf);
-        allocator.free(pathlen_buf);
-        return zlob_flags.ZLOB_NOSPACE;
-    };
-    @memcpy(owned[0..pattern.len], pattern);
-
-    pathv_buf[0] = @ptrCast(owned.ptr);
-    pathv_buf[1] = null;
-    pathlen_buf[0] = pattern.len;
-
-    pzlob.zlo_pathc = 1;
-    pzlob.zlo_pathv = @ptrCast(pathv_buf.ptr);
+    // Emit in the shared format so zlobfree treats this like any other
+    // OWNS_STRINGS result.
+    // Reserves no leading slots: the match-paths API does not support
+    // ZLOB_DOOFFS, and finalizeSharedSliceResult likewise zeroes zlo_offs.
+    zlob_impl.ResultsList.emitSingle(allocator, pzlob, 0, pattern, false) catch return zlob_flags.ZLOB_NOSPACE;
     pzlob.zlo_offs = 0;
-    pzlob.zlo_pathlen = pathlen_buf.ptr;
-    pzlob.zlo_flags = zlob_flags.ZLOB_FLAGS_OWNS_STRINGS;
     return 0;
 }
 

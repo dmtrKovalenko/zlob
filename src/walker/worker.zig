@@ -238,6 +238,62 @@ fn workerThreadMain(ctx: *anyopaque) void {
     workerLoop(w.sh, w);
 }
 
+// ---------------------------------------------------------------------------
+// Scratch accumulation
+// ---------------------------------------------------------------------------
+
+inline fn noteIgnoreFile(w: *Worker, name: []const u8) void {
+    if (name.len == 10 and mem.eql(u8, name, ".gitignore")) {
+        w.saw_gitignore = true;
+    } else if (name.len == 7 and mem.eql(u8, name, ".ignore")) {
+        w.saw_ignore = true;
+    }
+}
+
+pub inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: types.RawEntry) WalkError!void {
+    const name = raw.name;
+    if (name.len == 0) {
+        @branchHint(.unlikely);
+        return;
+    }
+    if (name[0] == '.') {
+        @branchHint(.unlikely);
+        if (name.len == 1 or (name.len == 2 and name[1] == '.')) return;
+        noteIgnoreFile(w, name);
+    }
+    const off: u32 = @intCast(w.names.items.len);
+    try w.names.appendSlice(sh.allocator, name);
+    try w.entries.append(sh.allocator, .{
+        .name_off = off,
+        .name_len = @intCast(name.len),
+        .kind = raw.kind,
+    });
+    // Metadata rides in the parallel list only when the caller asked for it;
+    // processDir indexes it by entry position.
+    if (sh.options.meta.any()) {
+        try w.metas.append(sh.allocator, raw.meta);
+    }
+}
+
+pub inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []const u8, kind: EntryKind) WalkError!void {
+    if (name.len == 0) {
+        @branchHint(.unlikely);
+        return;
+    }
+    if (name[0] == '.') {
+        @branchHint(.unlikely);
+        if (name.len == 1 or (name.len == 2 and name[1] == '.')) return;
+        noteIgnoreFile(w, name);
+    }
+    const off: u32 = @intCast(w.names.items.len);
+    try w.names.appendSlice(sh.allocator, name);
+    try w.entries.append(sh.allocator, .{
+        .name_off = off,
+        .name_len = @intCast(name.len),
+        .kind = kind,
+    });
+}
+
 pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
     // Lazy spawning is driven only by worker 0 (the calling thread): once it
     // has uncovered more than a couple of pending directories there is enough

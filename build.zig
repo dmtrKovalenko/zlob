@@ -81,11 +81,23 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
+    // Shared dirent-record helpers. Its own module because both walker.zig
+    // (module "walker") and walker/scan.zig (reached by path from zlob.zig)
+    // need it, and Zig requires every file to belong to exactly one module.
+    const dirent_mod = b.addModule("dirent", .{
+        .root_source_file = srcPath(b, src_dir, "walker/dirent.zig"),
+        .target = target,
+        .link_libc = use_libc,
+    });
+
     // Walker module (platform-optimized directory walker)
     const walker_mod = b.addModule("walker", .{
         .root_source_file = srcPath(b, src_dir, "walker.zig"),
         .target = target,
         .link_libc = use_libc,
+        .imports = &.{
+            .{ .name = "dirent", .module = dirent_mod },
+        },
     });
 
     // Flags module (canonical source of all ZLOB_* constants)
@@ -104,6 +116,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "walker", .module = walker_mod },
             .{ .name = "zlob_flags", .module = flags_mod },
+            .{ .name = "dirent", .module = dirent_mod },
         },
     });
     // Add include path for C header imports (flags.zig uses @cImport)
@@ -269,7 +282,9 @@ pub fn build(b: *std.Build) void {
         "test/test_edge_cases.zig",
         "test/test_absolute_paths.zig",
         "test/test_walk.zig",
+        "test/test_walker_paths.zig",
         // files with inline tests
+        "src/walker.zig",
         "src/brace_optimizer.zig",
         "src/gitignore.zig",
         "src/fnmatch.zig",
@@ -289,6 +304,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "test_utils", .module = test_utils_mod },
                 .{ .name = "walker", .module = walker_mod },
                 .{ .name = "zlob_flags", .module = flags_mod },
+                .{ .name = "dirent", .module = dirent_mod },
             },
         });
         // Add include path for C header imports (flags.zig uses @cImport)
