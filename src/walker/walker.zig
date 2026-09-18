@@ -371,6 +371,7 @@ fn buildExtraIgnoreRoot(allocator: Allocator, doc: ?[]const u8) WalkError!?*work
         .gi = gi,
         .relative_offset = 0,
         .refs = .init(1),
+        .chain_last = gi.any_last,
     };
     return node;
 }

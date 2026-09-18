@@ -80,6 +80,7 @@ pub const IgnoreNode = struct {
     /// directory start.
     relative_offset: u32,
     refs: std.atomic.Value(u32),
+    chain_last: gitignore_mod.LastByteFilter = .{},
 
     pub fn retain(self: *IgnoreNode) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -702,7 +703,18 @@ fn openRoot(sh: *SharedWorkerState, root: []const u8) anyerror!Handle {
 /// already known not to be ignored. Wrapping this chain in a stack adapter just
 /// to reach the shared loop cost more scaffolding than the loop itself, so it
 /// walks the parent links directly and skips empty documents on the way.
+/// One bit test against the union last-byte filter of the whole chain (the
+/// node's own document, every ancestor and the synthetic root): if no rule
+/// anywhere in scope can end a match on this byte, the 2.4 KB GitIgnore nodes
+/// are never touched. Deliberately not `inline`: nested in the inline
+/// `chainIgnored` it miscompiled in Debug on the self-hosted backend.
+fn chainMayIgnore(start: ?*IgnoreNode, extra: ?*IgnoreNode, last: u8) bool {
+    const f: *const gitignore_mod.LastByteFilter = if (start) |n| &n.chain_last else if (extra) |x| &x.chain_last else return false;
+    return f.mayContainByte(last);
+}
+
 inline fn chainIgnored(start: ?*IgnoreNode, extra: ?*IgnoreNode, rel: []const u8, basename: []const u8, is_dir: bool) bool {
+    if (!chainMayIgnore(start, extra, basename[basename.len - 1])) return false;
     if (extra) |x| {
         if (!x.gi.is_empty) {
             if (x.gi.checkInode(rel, basename, is_dir)) |verdict| return verdict;
@@ -762,7 +774,9 @@ fn loadIgnoreNode(
         .gi = gi,
         .relative_offset = @intCast(if (task.rel.len > 0) task.rel.len + 1 else 0),
         .refs = .init(1),
+        .chain_last = gi.any_last,
     };
+    if (task.ignore) |parent| node.chain_last.merge(parent.chain_last) else if (sh.extra_ignore_root) |x| node.chain_last.merge(x.chain_last);
     return node;
 }
 
