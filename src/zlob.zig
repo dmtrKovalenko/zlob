@@ -205,10 +205,20 @@ pub const DT_DIR = std.c.DT.DIR;
 /// Falls back to heap-allocated arrays when the inline capacity is exceeded.
 pub const ResultsList = struct {
     const INLINE_CAP = 32;
+    /// Bytes reserved per expected result by initWithCapacity: a typical
+    /// repo-relative path plus its NUL. Reserving up front turns the byte
+    /// buffer's many small reallocs (each a copy + fresh page faults) into
+    /// one or two doublings.
+    const BYTES_PER_RESULT = 48;
+    /// Smallest byte-buffer growth step once the reserve is exhausted.
+    const MIN_BYTES_GROWTH = 4096;
 
-    /// Heap-allocated record buffers (null when using inline)
-    heap_offsets: ?[*]usize = null,
-    heap_lengths: ?[*]usize = null,
+    /// Heap-allocated record buffers (null when using inline). Offsets and
+    /// lengths are u32: paths are far shorter, and the byte buffer is
+    /// capped at 4 GiB (addPath fails past it), so this halves the record
+    /// traffic per result.
+    heap_offsets: ?[*]u32 = null,
+    heap_lengths: ?[*]u32 = null,
 
     count: usize = 0,
     capacity: usize = INLINE_CAP,
@@ -219,29 +229,34 @@ pub const ResultsList = struct {
     bytes: std.ArrayList(u8) = .empty,
     // Inline record buffers for small result sets - avoids heap allocation
     // for the records of <=32 results
-    inline_offsets: [INLINE_CAP]usize = undefined,
-    inline_lengths: [INLINE_CAP]usize = undefined,
+    inline_offsets: [INLINE_CAP]u32 = undefined,
+    inline_lengths: [INLINE_CAP]u32 = undefined,
 
     /// Initialize with inline (stack) record capacity.
     pub fn init(allocator: Allocator) ResultsList {
         return .{ .allocator = allocator };
     }
 
-    /// Initialize with pre-allocated record capacity.
+    /// Initialize with pre-allocated record capacity, plus BYTES_PER_RESULT
+    /// bytes of path storage per record.
     /// If requested capacity <= INLINE_CAP, uses the inline buffer (no heap alloc).
     /// Otherwise allocates on the heap.
     pub fn initWithCapacity(allocator: Allocator, capacity: usize) Allocator.Error!ResultsList {
         if (capacity <= INLINE_CAP) {
             return init(allocator);
         }
-        const ho = try allocator.alloc(usize, capacity);
+        const ho = try allocator.alloc(u32, capacity);
         errdefer allocator.free(ho);
-        const hl = try allocator.alloc(usize, capacity);
+        const hl = try allocator.alloc(u32, capacity);
+        errdefer allocator.free(hl);
+        var bytes: std.ArrayList(u8) = .empty;
+        try bytes.ensureTotalCapacityPrecise(allocator, capacity * BYTES_PER_RESULT);
         return .{
             .heap_offsets = ho.ptr,
             .heap_lengths = hl.ptr,
             .capacity = capacity,
             .allocator = allocator,
+            .bytes = bytes,
         };
     }
 
@@ -250,13 +265,13 @@ pub const ResultsList = struct {
     }
 
     /// Get pointer to current offsets storage
-    inline fn offsetsPtr(self: *ResultsList) [*]usize {
-        return self.heap_offsets orelse @as([*]usize, @ptrCast(&self.inline_offsets));
+    inline fn offsetsPtr(self: *ResultsList) [*]u32 {
+        return self.heap_offsets orelse @as([*]u32, @ptrCast(&self.inline_offsets));
     }
 
     /// Get pointer to current lengths storage
-    inline fn lengthsPtr(self: *ResultsList) [*]usize {
-        return self.heap_lengths orelse @as([*]usize, @ptrCast(&self.inline_lengths));
+    inline fn lengthsPtr(self: *ResultsList) [*]u32 {
+        return self.heap_lengths orelse @as([*]u32, @ptrCast(&self.inline_lengths));
     }
 
     pub fn deinit(self: *ResultsList) void {
@@ -271,9 +286,9 @@ pub const ResultsList = struct {
     /// inline to heap if needed.
     fn grow(self: *ResultsList, min_capacity: usize) Allocator.Error!void {
         const new_cap = @max(min_capacity, self.capacity * 2);
-        const new_offsets = try self.allocator.alloc(usize, new_cap);
+        const new_offsets = try self.allocator.alloc(u32, new_cap);
         errdefer self.allocator.free(new_offsets);
-        const new_lengths = try self.allocator.alloc(usize, new_cap);
+        const new_lengths = try self.allocator.alloc(u32, new_cap);
         // Copy existing data
         if (self.count > 0) {
             @memcpy(new_offsets[0..self.count], self.offsetsPtr()[0..self.count]);
@@ -296,11 +311,20 @@ pub const ResultsList = struct {
             try self.grow(self.capacity + 1);
         }
         const off = self.bytes.items.len;
-        try self.bytes.ensureUnusedCapacity(self.allocator, path_len + 1);
-        self.bytes.items.len += path_len + 1;
+        const needed = off + path_len + 1;
+        // u32 records: the byte buffer cannot address past 4 GiB.
+        if (needed > std.math.maxInt(u32)) return error.OutOfMemory;
+        if (needed > self.bytes.capacity) {
+            // Geometric growth with a floor, so a list that outgrows its
+            // reserve reallocates a handful of times, not once per few
+            // hundred results.
+            const new_cap = @max(needed, @max(self.bytes.capacity * 2, MIN_BYTES_GROWTH));
+            try self.bytes.ensureTotalCapacityPrecise(self.allocator, new_cap);
+        }
+        self.bytes.items.len = needed;
         self.bytes.items[off + path_len] = 0;
-        self.offsetsPtr()[self.count] = off;
-        self.lengthsPtr()[self.count] = path_len;
+        self.offsetsPtr()[self.count] = @intCast(off);
+        self.lengthsPtr()[self.count] = @intCast(path_len);
         self.count += 1;
         return self.bytes.items[off..][0..path_len];
     }
@@ -1912,6 +1936,41 @@ fn globRecursiveWalk(
 
     // Determine if we need to prepend start_dir to paths
     const use_dirname = start_dir.len > 0 and !mem.eql(u8, start_dir, ".");
+
+    // Fast path for the common "**/<file pattern>" shape: no dir_components
+    // to check against the parent path, no gitignore, files only. The walker
+    // offers each basename straight out of its dirent buffer and only a match
+    // gets a path assembled, directly in the results' byte buffer. Everything
+    // else goes through the generic next() loop below.
+    if (!has_dir_components and rec_pattern.gitignore_filter == null and !info.directories_only) {
+        const prefix: []const u8 = if (use_dirname) start_dir else "";
+        const plain_suffix = rec_pattern.file_pattern_contexts == null and
+            rec_pattern.file_alternatives == null and
+            !file_pattern_is_extglob and
+            pattern_ctx.single_suffix_matcher != null;
+        if (plain_suffix) {
+            // "*.c" and friends: the whole predicate inlines to a tail compare.
+            var sink = RecursiveSuffixSink{
+                .results = results,
+                .prefix = prefix,
+                .matcher = pattern_ctx.single_suffix_matcher.?,
+            };
+            try dir_walker.walkInto(&sink);
+        } else {
+            var sink = RecursiveMatchSink{
+                .results = results,
+                .prefix = prefix,
+                .rec_pattern = rec_pattern,
+                .pattern_ctx = &pattern_ctx,
+                .enable_extglob = enable_extglob,
+                .file_pattern_is_extglob = file_pattern_is_extglob,
+                .file_alt_extglob_mask = file_alt_extglob_mask,
+            };
+            try dir_walker.walkInto(&sink);
+        }
+        return;
+    }
+
     while (dir_walker.next() catch null) |entry| {
         const is_dir = entry.kind == .directory;
         if (is_dir and !info.directories_only) continue;
@@ -1936,20 +1995,14 @@ fn globRecursiveWalk(
             }
         }
 
-        const matches = if (rec_pattern.file_pattern_contexts) |contexts| blk: {
-            if (enable_extglob and rec_pattern.file_alternatives != null) {
-                break :blk matchWithAlternativesPrecomputedExtglob(entry.basename, rec_pattern.file_alternatives.?, contexts, file_alt_extglob_mask);
-            }
-            const multi_suffix_ptr = if (rec_pattern.multi_suffix_matcher) |*ms| ms else null;
-            break :blk matchWithAlternativesPrecomputed(entry.basename, contexts, multi_suffix_ptr);
-        } else if (rec_pattern.file_alternatives) |alts|
-            matchWithAlternativesExtglob(entry.basename, alts, enable_extglob)
-        else if (file_pattern_is_extglob) blk: {
-            break :blk fnmatch_impl.matchExtglob(rec_pattern.file_pattern, entry.basename);
-        } else if (pattern_ctx.single_suffix_matcher) |sufxi_matcher|
-            sufxi_matcher.matchSuffix(entry.basename)
-        else
-            fnmatch_impl.fnmatchWithContext(&pattern_ctx, entry.basename, .{});
+        const matches = matchRecursiveBasename(
+            entry.basename,
+            rec_pattern,
+            &pattern_ctx,
+            enable_extglob,
+            file_pattern_is_extglob,
+            file_alt_extglob_mask,
+        );
 
         if (matches) {
             if (info.directories_only and !is_dir) continue;
@@ -1975,6 +2028,94 @@ fn globRecursiveWalk(
         }
     }
 }
+
+/// The file-pattern chain of globRecursiveWalk, shared by its generic loop
+/// and RecursiveMatchSink so the two cannot drift apart.
+inline fn matchRecursiveBasename(
+    name: []const u8,
+    rec_pattern: *const RecursivePattern,
+    pattern_ctx: *const PatternContext,
+    enable_extglob: bool,
+    file_pattern_is_extglob: bool,
+    file_alt_extglob_mask: u64,
+) bool {
+    if (rec_pattern.file_pattern_contexts) |contexts| {
+        if (enable_extglob and rec_pattern.file_alternatives != null) {
+            return matchWithAlternativesPrecomputedExtglob(name, rec_pattern.file_alternatives.?, contexts, file_alt_extglob_mask);
+        }
+        const multi_suffix_ptr = if (rec_pattern.multi_suffix_matcher) |*ms| ms else null;
+        return matchWithAlternativesPrecomputed(name, contexts, multi_suffix_ptr);
+    }
+    if (rec_pattern.file_alternatives) |alts| {
+        return matchWithAlternativesExtglob(name, alts, enable_extglob);
+    }
+    if (file_pattern_is_extglob) {
+        return fnmatch_impl.matchExtglob(rec_pattern.file_pattern, name);
+    }
+    if (pattern_ctx.single_suffix_matcher) |*sufxi_matcher| {
+        return sufxi_matcher.matchSuffix(name);
+    }
+    return fnmatch_impl.fnmatchWithContext(pattern_ctx, name, .{});
+}
+
+/// Write "<prefix>/<dir_rel>/<name>" (omitting empty parts) into `results`.
+/// The walker's sink contract hands us the parent path and the basename
+/// separately, so the full path is assembled once, in its final place.
+inline fn emitRecursiveMatch(results: *ResultsList, prefix: []const u8, dir_rel: []const u8, name: []const u8) Allocator.Error!void {
+    const prefix_part = prefix.len + @intFromBool(prefix.len > 0);
+    const dir_part = dir_rel.len + @intFromBool(dir_rel.len > 0);
+    const dst = try results.addPath(prefix_part + dir_part + name.len);
+    if (prefix.len > 0) {
+        @memcpy(dst[0..prefix.len], prefix);
+        dst[prefix.len] = '/';
+    }
+    if (dir_rel.len > 0) {
+        @memcpy(dst[prefix_part..][0..dir_rel.len], dir_rel);
+        dst[prefix_part + dir_rel.len] = '/';
+    }
+    @memcpy(dst[prefix_part + dir_part ..][0..name.len], name);
+}
+
+/// walkInto sink for "**/*.ext": the predicate is one tail compare.
+const RecursiveSuffixSink = struct {
+    results: *ResultsList,
+    prefix: []const u8,
+    matcher: suffix_match.SingleSuffixMatcher,
+
+    pub inline fn wantFile(self: *const RecursiveSuffixSink, name: []const u8, _: walker.EntryKind) bool {
+        return self.matcher.matchSuffix(name);
+    }
+
+    pub inline fn emitFile(self: *RecursiveSuffixSink, dir_rel: []const u8, name: []const u8) Allocator.Error!void {
+        return emitRecursiveMatch(self.results, self.prefix, dir_rel, name);
+    }
+};
+
+/// walkInto sink for every other file pattern of a "**/<pattern>" glob.
+const RecursiveMatchSink = struct {
+    results: *ResultsList,
+    prefix: []const u8,
+    rec_pattern: *const RecursivePattern,
+    pattern_ctx: *const PatternContext,
+    enable_extglob: bool,
+    file_pattern_is_extglob: bool,
+    file_alt_extglob_mask: u64,
+
+    pub inline fn wantFile(self: *const RecursiveMatchSink, name: []const u8, _: walker.EntryKind) bool {
+        return matchRecursiveBasename(
+            name,
+            self.rec_pattern,
+            self.pattern_ctx,
+            self.enable_extglob,
+            self.file_pattern_is_extglob,
+            self.file_alt_extglob_mask,
+        );
+    }
+
+    pub inline fn emitFile(self: *RecursiveMatchSink, dir_rel: []const u8, name: []const u8) Allocator.Error!void {
+        return emitRecursiveMatch(self.results, self.prefix, dir_rel, name);
+    }
+};
 
 fn matchDirComponents(
     path: []const u8,

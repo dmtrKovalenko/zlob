@@ -462,7 +462,56 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                     return entry;
                 }
             }
+            if (!self.refill()) return null;
+        }
+    }
 
+    /// Drive the whole walk through `sink` without materialising an `Entry`
+    /// per file. Non-directory entries are first offered by basename only,
+    /// `sink.wantFile(name, kind)`, straight from the getdents buffer; only
+    /// on a match is `sink.emitFile(dir_rel, name)` called, with the parent
+    /// directory's path relative to the start dir (no trailing '/', empty at
+    /// the root). Directories are descended into exactly as in `next()` but
+    /// never reported. Errors from emitFile abort the walk.
+    pub fn walkInto(self: *RecursiveGetdents64Walker, sink: anytype) !void {
+        if (self.finished) return;
+        // Loop invariants, hoisted so the per-entry path reads no config.
+        const hidden = self.config.hidden;
+        const follow = self.config.follow_symlinks;
+
+        while (true) {
+            while (self.getdents_offset < self.getdents_len) {
+                const raw = self.parseRaw() orelse continue;
+                if (shouldSkipEntry(raw.name, hidden)) continue;
+
+                var kind: EntryKind = switch (raw.d_type) {
+                    DT_REG => .file,
+                    DT_DIR => .directory,
+                    DT_LNK => .sym_link,
+                    else => .unknown,
+                };
+
+                if (kind == .directory or kind == .unknown or (follow and kind == .sym_link)) {
+                    // Only descend candidates get their path assembled.
+                    const path_start = self.path_len;
+                    self.appendNameToPath(raw.name);
+                    kind = self.maybeDescend(raw.name, kind);
+                    self.path_len = path_start;
+                    if (kind == .directory) continue;
+                }
+
+                if (!sink.wantFile(raw.name, kind)) continue;
+                try sink.emitFile(self.path_buffer[0..self.path_len], raw.name);
+            }
+            if (!self.refill()) return;
+        }
+    }
+
+    /// Read the next batch of dirents for the current directory, popping the
+    /// next stacked directory when it is exhausted. Returns false once the
+    /// walk is over.
+    fn refill(self: *RecursiveGetdents64Walker) bool {
+        while (true) {
             // buffer free - read more from current directory.
             // Short by 8: see direntNameLen. When the previous read already
             // proved EOF, skip the call that would only return 0.
@@ -480,7 +529,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                 // Pop next directory from stack
                 const next_dir = self.dir_stack.pop() orelse {
                     self.finished = true;
-                    return null;
+                    return false;
                 };
                 self.current_fd = next_dir.fd;
                 self.current_depth = next_dir.depth;
@@ -500,10 +549,21 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             self.getdents_len = bytes_read;
             self.getdents_offset = 0;
             if (self.trust_short and dirent64.shortReadIsEof(bytes_read, cap)) self.current_eof = true;
+            return true;
         }
     }
 
-    fn parseNextEntry(self: *RecursiveGetdents64Walker) ?Entry {
+    /// A dirent header parsed straight out of the getdents buffer.
+    const RawEntry = struct {
+        /// Borrowed from the getdents buffer. The terminator was verified, so
+        /// the name can be handed to openat/fstatat without copying it out.
+        name: [:0]const u8,
+        d_type: u8,
+    };
+
+    /// Parse the dirent at getdents_offset and advance past it. Returns null
+    /// for a malformed record, after consuming the rest of the buffer.
+    inline fn parseRaw(self: *RecursiveGetdents64Walker) ?RawEntry {
         const base = self.getdents_offset;
         // Too few bytes left for a dirent header. Consume the remainder: the
         // caller loops until the offset reaches the length.
@@ -525,8 +585,6 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         }
         self.getdents_offset += reclen;
 
-        // Knowing the terminator was found lets us borrow the name as a C
-        // string for openat/fstatat below instead of copying it out
         const name_start = base + dirent64.NAME_OFFSET;
         const name_area = self.getdents_buffer[name_start .. base + reclen];
         const name_len = direntNameLen(name_area.ptr, name_area.len);
@@ -535,12 +593,118 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             @branchHint(.unlikely);
             return null;
         }
-        const name = name_area[0..name_len];
+        return .{ .name = name_area[0..name_len :0], .d_type = d_type };
+    }
+
+    /// Append "/name" (or "name" at the root) to path_buffer.
+    inline fn appendNameToPath(self: *RecursiveGetdents64Walker, name: []const u8) void {
+        if (self.path_len > 0) {
+            self.path_buffer[self.path_len] = '/';
+            self.path_len += 1;
+        }
+        @memcpy(self.path_buffer[self.path_len..][0..name.len], name);
+        self.path_len += name.len;
+    }
+
+    /// Decide whether to descend into this entry and, if so, open it and push
+    /// it on the stack. Expects path_buffer[0..path_len] to hold the entry's
+    /// relative path. Returns the resolved kind: a DT_UNKNOWN entry whose
+    /// probe open succeeded comes back as .directory.
+    /// - .directory: always considered (subject to dir_filter)
+    /// - .sym_link: only when follow_symlinks is set, and only after we
+    ///   confirm via fstatat that it resolves to a directory.
+    /// - .unknown: DT_UNKNOWN (XFS ftype=0, FUSE, some NFS/overlay/9p).
+    ///   Probe with openat(O_DIRECTORY) directly: a file answers ENOTDIR,
+    ///   cheaper than a statx pre-flight, and a directory is then already
+    ///   open. Never taken on filesystems that report d_type.
+    fn maybeDescend(self: *RecursiveGetdents64Walker, name_z: [:0]const u8, kind_in: EntryKind) EntryKind {
+        var kind = kind_in;
+        const may_descend = kind == .directory or kind == .unknown or
+            (self.config.follow_symlinks and kind == .sym_link);
+        if (!may_descend or self.current_depth >= self.config.max_depth) return kind;
+
+        const relative_path = self.path_buffer[0..self.path_len];
+
+        // Check dir_filter before deciding to descend
+        const should_descend = if (self.config.dir_filter) |filter|
+            filter.filterDir(relative_path, name_z)
+        else
+            true;
+        if (!should_descend) return kind;
+
+        // For symlink entries under follow mode: pre-flight
+        // fstatat(FOLLOW) to confirm dir + cycle BEFORE openat.
+        // Skips wasted open+close for non-dir targets and cycles —
+        // big win on symlink-heavy trees (node_modules, bazel-out).
+        const skip_descend: bool = blk: {
+            if (kind != .sym_link) break :blk false;
+            const res = statAtFollow(self.current_fd, name_z) orelse break :blk true;
+            if (!res.is_dir) break :blk true;
+            // Off the start dir's device: that filesystem was never
+            // checked, so stop trusting short reads from here on.
+            if (res.key.dev != self.root_dev) self.trust_short = false;
+            const gop = self.visited.getOrPut(self.allocator, res.key) catch break :blk true;
+            break :blk gop.found_existing;
+        };
+        if (skip_descend) return kind;
+
+        // openatZ, not openat: the slice overload would re-copy
+        // and rescan the name via toPosixPath.
+        // An .unknown entry may be a symlink; without follow mode
+        // NOFOLLOW makes such a probe fail (ELOOP) instead of
+        // descending through it.
+        const subdir_fd = posix.openatZ(self.current_fd, name_z.ptr, .{
+            .ACCMODE = .RDONLY,
+            .DIRECTORY = true,
+            .CLOEXEC = true,
+            .NOFOLLOW = kind == .unknown and !self.config.follow_symlinks,
+        }, 0) catch return kind;
+        // The probe succeeded: an .unknown entry is a directory.
+        if (kind == .unknown) kind = .directory;
+
+        // Real-directory cycle bookkeeping under follow mode.
+        // Symlinks already recorded via pre-flight above.
+        var cycle = false;
+        if (self.config.follow_symlinks and kind == .directory) {
+            if (statFd(subdir_fd)) |key| {
+                if (self.visited.getOrPut(self.allocator, key)) |gop| {
+                    if (gop.found_existing) cycle = true;
+                } else |_| {}
+            }
+        }
+
+        if (cycle) {
+            _ = linux.close(subdir_fd);
+            return kind;
+        }
+
+        // Push to stack - processed after current dir is exhausted.
+        // Save path content; sibling dirs overwrite path_buffer.
+        const path_off = self.path_stack.items.len;
+        if (self.path_stack.appendSlice(self.allocator, relative_path)) {
+            self.dir_stack.append(self.allocator, .{
+                .fd = subdir_fd,
+                .depth = self.current_depth + 1,
+                .path_len = @intCast(self.path_len),
+                .path_off = @intCast(path_off),
+            }) catch {
+                self.path_stack.shrinkRetainingCapacity(path_off);
+                _ = linux.close(subdir_fd);
+            };
+        } else |_| {
+            _ = linux.close(subdir_fd);
+        }
+        return kind;
+    }
+
+    fn parseNextEntry(self: *RecursiveGetdents64Walker) ?Entry {
+        const raw = self.parseRaw() orelse return null;
+        const name = raw.name;
 
         // Unified filtering for ".", "..", and hidden files
         if (shouldSkipEntry(name, self.config.hidden)) return null;
 
-        var kind: EntryKind = switch (d_type) {
+        var kind: EntryKind = switch (raw.d_type) {
             DT_REG => .file,
             DT_DIR => .directory,
             DT_LNK => .sym_link,
@@ -549,105 +713,14 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
         // Build path for this entry
         const path_start = self.path_len;
-        if (self.path_len > 0) {
-            self.path_buffer[self.path_len] = '/';
-            self.path_len += 1;
-        }
-        const name_in_path_start = self.path_len;
-        @memcpy(self.path_buffer[self.path_len..][0..name.len], name);
-        self.path_len += name.len;
+        self.appendNameToPath(name);
+        const name_in_path_start = self.path_len - name.len;
 
-        const relative_path = self.path_buffer[0..self.path_len];
-
-        // Decide whether to descend into this entry.
-        // - .directory: always considered (subject to dir_filter)
-        // - .sym_link: only when follow_symlinks is set, and only after we
-        //   confirm via fstatat that it resolves to a directory.
-        // - .unknown: DT_UNKNOWN (XFS ftype=0, FUSE, some NFS/overlay/9p).
-        //   Probe with openat(O_DIRECTORY) directly: a file answers ENOTDIR,
-        //   cheaper than a statx pre-flight, and a directory is then already
-        //   open. Never taken on filesystems that report d_type.
-        const may_descend = kind == .directory or kind == .unknown or
-            (self.config.follow_symlinks and kind == .sym_link);
-
-        if (may_descend and self.current_depth < self.config.max_depth) {
-            // Check dir_filter before deciding to descend
-            const should_descend = if (self.config.dir_filter) |filter|
-                filter.filterDir(relative_path, name)
-            else
-                true;
-
-            if (should_descend) {
-                const name_z = name_area[0..name.len :0];
-
-                // For symlink entries under follow mode: pre-flight
-                // fstatat(FOLLOW) to confirm dir + cycle BEFORE openat.
-                // Skips wasted open+close for non-dir targets and cycles —
-                // big win on symlink-heavy trees (node_modules, bazel-out).
-                const skip_descend: bool = blk: {
-                    if (kind != .sym_link) break :blk false;
-                    const res = statAtFollow(self.current_fd, name_z) orelse break :blk true;
-                    if (!res.is_dir) break :blk true;
-                    // Off the start dir's device: that filesystem was never
-                    // checked, so stop trusting short reads from here on.
-                    if (res.key.dev != self.root_dev) self.trust_short = false;
-                    const gop = self.visited.getOrPut(self.allocator, res.key) catch break :blk true;
-                    break :blk gop.found_existing;
-                };
-
-                if (!skip_descend) {
-                    // openatZ, not openat: the slice overload would re-copy
-                    // and rescan the name via toPosixPath.
-                    // An .unknown entry may be a symlink; without follow mode
-                    // NOFOLLOW makes such a probe fail (ELOOP) instead of
-                    // descending through it.
-                    if (posix.openatZ(self.current_fd, name_z.ptr, .{
-                        .ACCMODE = .RDONLY,
-                        .DIRECTORY = true,
-                        .CLOEXEC = true,
-                        .NOFOLLOW = kind == .unknown and !self.config.follow_symlinks,
-                    }, 0)) |subdir_fd| {
-                        // The probe succeeded: an .unknown entry is a directory.
-                        if (kind == .unknown) kind = .directory;
-                        // Real-directory cycle bookkeeping under follow mode.
-                        // Symlinks already recorded via pre-flight above.
-                        var cycle = false;
-                        if (self.config.follow_symlinks and kind == .directory) {
-                            if (statFd(subdir_fd)) |key| {
-                                if (self.visited.getOrPut(self.allocator, key)) |gop| {
-                                    if (gop.found_existing) cycle = true;
-                                } else |_| {}
-                            }
-                        }
-
-                        if (cycle) {
-                            _ = linux.close(subdir_fd);
-                        } else {
-                            // Push to stack - processed after current dir is exhausted.
-                            // Save path content; sibling dirs overwrite path_buffer.
-                            const path_off = self.path_stack.items.len;
-                            if (self.path_stack.appendSlice(self.allocator, self.path_buffer[0..self.path_len])) {
-                                self.dir_stack.append(self.allocator, .{
-                                    .fd = subdir_fd,
-                                    .depth = self.current_depth + 1,
-                                    .path_len = @intCast(self.path_len),
-                                    .path_off = @intCast(path_off),
-                                }) catch {
-                                    self.path_stack.shrinkRetainingCapacity(path_off);
-                                    _ = linux.close(subdir_fd);
-                                };
-                            } else |_| {
-                                _ = linux.close(subdir_fd);
-                            }
-                        }
-                    } else |_| {}
-                }
-            }
-        }
+        kind = self.maybeDescend(name, kind);
 
         // Build result entry
         self.current_entry = .{
-            .path = relative_path,
+            .path = self.path_buffer[0..self.path_len],
             .basename = self.path_buffer[name_in_path_start..][0..name.len],
             .kind = kind,
         };
@@ -788,6 +861,21 @@ const StdFsWalker = struct {
         self.dir_stack.deinit(self.allocator);
         self.path_stack.deinit(self.allocator);
         self.visited.deinit(self.allocator);
+    }
+
+    /// Portable counterpart of the getdents backend's walkInto: same sink
+    /// contract, driven by next(). Errors from next() end the walk, matching
+    /// the `next() catch null` loops this replaces.
+    pub fn walkInto(self: *StdFsWalker, sink: anytype) !void {
+        while (self.next() catch null) |entry| {
+            if (entry.kind == .directory) continue;
+            if (!sink.wantFile(entry.basename, entry.kind)) continue;
+            const dir_rel = if (entry.path.len > entry.basename.len)
+                entry.path[0 .. entry.path.len - entry.basename.len - 1]
+            else
+                entry.path[0..0];
+            try sink.emitFile(dir_rel, entry.basename);
+        }
     }
 
     pub fn next(self: *StdFsWalker) !?Entry {
