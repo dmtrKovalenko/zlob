@@ -15,6 +15,7 @@
 //!   bench_walk <root> glob <pattern> [iters]          C-style zlob() glob (single-threaded)
 //!   bench_walk <root> globsort <pattern> [iters]      same without ZLOB_NOSORT (glob sort cost)
 //!   bench_walk <root> walkglob <pattern> [iters] [threads]   parallel walker with Options.pattern
+//!   bench_walk <root> globpar <pattern> [iters] [threads]    zlob() with ZLOB_PARALLEL (threads: 0=default 4)
 //!   bench_walk sizes                                     print @sizeOf hot structs
 //!
 //! Prints one machine-parseable line:
@@ -41,10 +42,10 @@ pub const std_options: std.Options = .{
     .allow_stack_tracing = false,
 };
 
-const Mode = enum { plain, gitignore, meta, serial, sort, follow, ccollect, run, crun, glob, globsort, walkglob, sizes };
+const Mode = enum { plain, gitignore, meta, serial, sort, follow, ccollect, run, crun, glob, globsort, walkglob, globpar, sizes };
 
 fn isGlobMode(m: Mode) bool {
-    return m == .glob or m == .globsort;
+    return m == .glob or m == .globsort or m == .globpar;
 }
 
 fn usage(prog: []const u8) noreturn {
@@ -53,9 +54,10 @@ fn usage(prog: []const u8) noreturn {
         \\       {s} <root> glob <pattern> [iters=5]
         \\       {s} <root> globsort <pattern> [iters=5]
         \\       {s} <root> walkglob <pattern> [iters=5] [threads=0]
+        \\       {s} <root> globpar <pattern> [iters=5] [threads=0]
         \\       {s} sizes
         \\
-    , .{ prog, prog, prog, prog, prog });
+    , .{ prog, prog, prog, prog, prog, prog });
     std.process.exit(2);
 }
 
@@ -109,14 +111,19 @@ pub fn main(init: std.process.Init) !void {
     var eff_threads: u32 = 1;
 
     switch (mode) {
-        .glob, .globsort => {
+        .glob, .globsort, .globpar => {
             try std.process.setCurrentPath(io, root);
             const pat_z = try allocator.dupeZ(u8, pattern);
             defer allocator.free(pat_z);
-            const gflags: c_int = if (mode == .globsort)
+            var gflags: c_int = if (mode == .globsort)
                 zlob_flags.ZLOB_RECOMMENDED & ~@as(c_int, zlob_flags.ZLOB_NOSORT)
             else
                 zlob_flags.ZLOB_RECOMMENDED;
+            if (mode == .globpar) {
+                gflags |= zlob_flags.ZLOB_PARALLEL;
+                if (threads != 0) zlob.setGlobParallelThreads(threads);
+                eff_threads = if (threads != 0) threads else 4;
+            }
             // warmup
             count = runGlob(pat_z, gflags);
             for (times) |*t| {
@@ -154,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
                 .sort => opts.sort = true,
                 .follow => opts.follow_symlinks = true,
                 .ccollect, .run, .crun => {},
-                .glob, .globsort, .sizes => unreachable,
+                .glob, .globsort, .globpar, .sizes => unreachable,
             }
             eff_threads = walk.effectiveThreads(&opts);
 
@@ -187,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_file = std.Io.File.stdout();
     var w = stdout_file.writer(io, &out_buf);
     if (isGlobMode(mode)) {
-        try w.interface.print("RESULT mode={s} root={s} pattern={s} count={d} best_us={d} median_us={d} threads=1 iters={d}\n", .{ @tagName(mode), root, pattern, count, best_us, median_us, iters });
+        try w.interface.print("RESULT mode={s} root={s} pattern={s} count={d} best_us={d} median_us={d} threads={d} iters={d}\n", .{ @tagName(mode), root, pattern, count, best_us, median_us, eff_threads, iters });
     } else if (mode == .walkglob) {
         try w.interface.print("RESULT mode=walkglob root={s} pattern={s} count={d} best_us={d} median_us={d} threads={d} iters={d}\n", .{ root, pattern, count, best_us, median_us, eff_threads, iters });
     } else {

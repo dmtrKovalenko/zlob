@@ -284,6 +284,14 @@ pub fn zlob(pattern: &str, flags: ZlobFlags) -> Result<Option<Zlob>, ZlobError> 
     }
 }
 
+/// Set the worker thread count used by [`ZlobFlags::PARALLEL`] recursive globs.
+///
+/// Default 4; `0` means one worker per CPU (capped). Process-wide, not
+/// per-call. With a single worker the serial walker is used.
+pub fn set_threads(threads: u32) {
+    unsafe { ffi::zlob_set_threads(threads) };
+}
+
 /// Perform glob pattern matching within a specific base directory.
 ///
 /// This function is similar to `zlob()` but operates relative to the specified
