@@ -540,7 +540,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         // Unified filtering for ".", "..", and hidden files
         if (shouldSkipEntry(name, self.config.hidden)) return null;
 
-        const kind: EntryKind = switch (d_type) {
+        var kind: EntryKind = switch (d_type) {
             DT_REG => .file,
             DT_DIR => .directory,
             DT_LNK => .sym_link,
@@ -563,7 +563,11 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         // - .directory: always considered (subject to dir_filter)
         // - .sym_link: only when follow_symlinks is set, and only after we
         //   confirm via fstatat that it resolves to a directory.
-        const may_descend = kind == .directory or
+        // - .unknown: DT_UNKNOWN (XFS ftype=0, FUSE, some NFS/overlay/9p).
+        //   Probe with openat(O_DIRECTORY) directly: a file answers ENOTDIR,
+        //   cheaper than a statx pre-flight, and a directory is then already
+        //   open. Never taken on filesystems that report d_type.
+        const may_descend = kind == .directory or kind == .unknown or
             (self.config.follow_symlinks and kind == .sym_link);
 
         if (may_descend and self.current_depth < self.config.max_depth) {
@@ -594,11 +598,17 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                 if (!skip_descend) {
                     // openatZ, not openat: the slice overload would re-copy
                     // and rescan the name via toPosixPath.
+                    // An .unknown entry may be a symlink; without follow mode
+                    // NOFOLLOW makes such a probe fail (ELOOP) instead of
+                    // descending through it.
                     if (posix.openatZ(self.current_fd, name_z.ptr, .{
                         .ACCMODE = .RDONLY,
                         .DIRECTORY = true,
                         .CLOEXEC = true,
+                        .NOFOLLOW = kind == .unknown and !self.config.follow_symlinks,
                     }, 0)) |subdir_fd| {
+                        // The probe succeeded: an .unknown entry is a directory.
+                        if (kind == .unknown) kind = .directory;
                         // Real-directory cycle bookkeeping under follow mode.
                         // Symlinks already recorded via pre-flight above.
                         var cycle = false;
@@ -805,9 +815,10 @@ const StdFsWalker = struct {
                 self.path_len += entry.name.len;
 
                 const relative_path = self.path_buffer[0..self.path_len];
-                const kind = entry.kind;
+                var kind = entry.kind;
 
-                const may_descend = kind == .directory or
+                // .unknown: probe with openDir like the getdents backend does.
+                const may_descend = kind == .directory or kind == .unknown or
                     (self.config.follow_symlinks and kind == .sym_link);
 
                 if (may_descend and self.current_depth < self.config.max_depth) {
@@ -843,8 +854,12 @@ const StdFsWalker = struct {
                     }
 
                     if (should_descend and !skip_descend) {
-                        if (self.current_dir.?.openDir(io, entry.name, .{ .iterate = true })) |subdir| {
+                        if (self.current_dir.?.openDir(io, entry.name, .{
+                            .iterate = true,
+                            .follow_symlinks = !(kind == .unknown and !self.config.follow_symlinks),
+                        })) |subdir| {
                             var sub = subdir;
+                            if (kind == .unknown) kind = .directory;
                             // Real-directory cycle bookkeeping under follow mode.
                             // Symlinks already recorded via pre-flight above.
                             var cycle = false;
@@ -1305,6 +1320,10 @@ pub const DirIterator = struct {
         /// Path to report to err_callback instead of the opened one, for
         /// fd-relative opens that should still report a full path.
         report_path: ?[]const u8 = null,
+        /// Treat ENOTDIR as "skip" without reporting it. Used when the caller
+        /// probes a DT_UNKNOWN entry by opening it, the same way glibc's
+        /// glob_in_dir ignores ENOTDIR from opendir.
+        ignore_not_dir: bool = false,
     };
 
     /// This directory as an openat() base for its children, when the platform
@@ -1336,6 +1355,7 @@ pub const DirIterator = struct {
         err_config: OpenErrorConfig,
     ) error{Aborted}!bool {
         openWithProviderInto(out, io, path, base_dir, hidden_config, fs) catch |err| {
+            if (err == error.NotDir and err_config.ignore_not_dir) return false;
             if (err_config.err_callback) |cb| {
                 const report = err_config.report_path orelse path;
                 var path_z: [4096:0]u8 = undefined;

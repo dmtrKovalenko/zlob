@@ -724,6 +724,9 @@ fn expandWildcardComponents(
             .err_callback = errfunc,
             .abort_on_error = flags.err,
             .report_path = current_dir,
+            // A parent may have recursed into a DT_UNKNOWN entry that turns
+            // out to be a file; ENOTDIR then just means "no match" (glibc).
+            .ignore_not_dir = true,
         }) catch return error.Aborted;
         if (!opened) return;
         defer iter.close();
@@ -732,7 +735,9 @@ fn expandWildcardComponents(
 
         while (iter.next()) |entry| {
             const name = entry.name;
-            if (!is_final and entry.kind != .directory) continue;
+            // .unknown (DT_UNKNOWN filesystems) may be a directory: recurse and
+            // let the child open decide instead of silently dropping it.
+            if (!is_final and entry.kind != .directory and entry.kind != .unknown) continue;
 
             const matches = if (has_extglob_pattern) blk: {
                 break :blk fnmatch_impl.matchExtglob(component.text, name);
@@ -1682,13 +1687,15 @@ fn walkBracedComponents(
     const opened = walker.DirIterator.openHandledInto(&iter, io, current_dir, base_dir, hidden_config, fs_provider, .{
         .err_callback = errfunc,
         .abort_on_error = flags.err,
+        // See expandWildcardComponents: a DT_UNKNOWN parent entry may be a file.
+        .ignore_not_dir = true,
     }) catch return error.Aborted;
     if (!opened) return;
     defer iter.close();
 
     while (iter.next()) |entry| {
         // Note: Hidden file filtering is now done at iterator level
-        if (!is_final and entry.kind != .directory) continue;
+        if (!is_final and entry.kind != .directory and entry.kind != .unknown) continue;
 
         if (matcher.matchesWithFlags(entry.name, flags.extglob)) {
             if (is_final and directories_only and entry.kind != .directory) continue;
@@ -2077,6 +2084,9 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
     const opened = walker.DirIterator.openHandledInto(&iter, io, dirname, base_dir, hidden_config, fs_provider, .{
         .err_callback = errfunc,
         .abort_on_error = flags.err,
+        // "file/*" is a plain non-match for glibc (ENOTDIR from opendir is
+        // ignored in glob_in_dir), not a read error.
+        .ignore_not_dir = true,
     }) catch return error.Aborted;
     if (!opened) return null;
     defer iter.close();
