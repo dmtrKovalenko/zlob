@@ -2,7 +2,9 @@
 //!
 //! Usage:
 //!   bench_walk <root> <mode> [iters] [threads]     mode: plain | gitignore | meta | serial
-//!   bench_walk <root> glob <pattern> [iters]
+//!   bench_walk <root> glob <pattern> [iters]          C-style zlob() glob (single-threaded)
+//!   bench_walk <root> walkglob <pattern> [iters] [threads]   parallel walker with Options.pattern
+//!   bench_walk sizes                                     print @sizeOf hot structs
 //!
 //! Prints one machine-parseable line:
 //!   RESULT mode=<mode> root=<root> count=<N> best_us=<X> median_us=<Y> threads=<T> iters=<I>
@@ -16,14 +18,16 @@ const c_lib = @import("c_lib");
 const zlob_flags = @import("zlob_flags");
 const walk = zlob.walk;
 
-const Mode = enum { plain, gitignore, meta, serial, glob };
+const Mode = enum { plain, gitignore, meta, serial, glob, walkglob, sizes };
 
 fn usage(prog: []const u8) noreturn {
     std.debug.print(
         \\Usage: {s} <root> <plain|gitignore|meta|serial> [iters=5] [threads=0]
         \\       {s} <root> glob <pattern> [iters=5]
+        \\       {s} <root> walkglob <pattern> [iters=5] [threads=0]
+        \\       {s} sizes
         \\
-    , .{ prog, prog });
+    , .{ prog, prog, prog, prog });
     std.process.exit(2);
 }
 
@@ -45,6 +49,12 @@ pub fn main(init: std.process.Init) !void {
     while (args_iter.next()) |arg| try argv_list.append(allocator, try allocator.dupe(u8, arg));
     const args = argv_list.items;
     const prog = if (args.len > 0) args[0] else "bench_walk";
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "sizes")) {
+        std.debug.print("sizeof Entry={d} Metadata={d} MetaMask={d} Options={d}\n", .{
+            @sizeOf(walk.Entry), @sizeOf(walk.Metadata), @sizeOf(walk.MetaMask), @sizeOf(walk.Options),
+        });
+        return;
+    }
     if (args.len < 3) usage(prog);
 
     const root = args[1];
@@ -53,10 +63,11 @@ pub fn main(init: std.process.Init) !void {
     var iters: usize = 5;
     var threads: u16 = 0;
     var pattern: []const u8 = "";
-    if (mode == .glob) {
+    if (mode == .glob or mode == .walkglob) {
         if (args.len < 4) usage(prog);
         pattern = args[3];
         if (args.len > 4) iters = parseUsize(args[4], prog);
+        if (args.len > 5) threads = @intCast(parseUsize(args[5], prog));
     } else {
         if (args.len > 3) iters = parseUsize(args[3], prog);
         if (args.len > 4) threads = @intCast(parseUsize(args[4], prog));
@@ -104,7 +115,11 @@ pub fn main(init: std.process.Init) !void {
                 },
                 .meta => opts.meta = .{ .size = true, .mtime = true },
                 .serial => opts.threads = 1,
-                .glob => unreachable,
+                .walkglob => {
+                    opts.pattern = pattern;
+                    opts.report_dirs = false;
+                },
+                .glob, .sizes => unreachable,
             }
             eff_threads = walk.effectiveThreads(&opts);
 
@@ -135,6 +150,8 @@ pub fn main(init: std.process.Init) !void {
     var w = stdout_file.writer(io, &out_buf);
     if (mode == .glob) {
         try w.interface.print("RESULT mode=glob root={s} pattern={s} count={d} best_us={d} median_us={d} threads=1 iters={d}\n", .{ root, pattern, count, best_us, median_us, iters });
+    } else if (mode == .walkglob) {
+        try w.interface.print("RESULT mode=walkglob root={s} pattern={s} count={d} best_us={d} median_us={d} threads={d} iters={d}\n", .{ root, pattern, count, best_us, median_us, eff_threads, iters });
     } else {
         try w.interface.print("RESULT mode={s} root={s} count={d} best_us={d} median_us={d} threads={d} iters={d}\n", .{ @tagName(mode), root, count, best_us, median_us, eff_threads, iters });
     }
