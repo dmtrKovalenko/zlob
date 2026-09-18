@@ -81,6 +81,7 @@ pub const IgnoreNode = struct {
     /// where paths relative to this node's directory start.
     relative_offset: u32,
     refs: std.atomic.Value(u32),
+    chain_last: gitignore_mod.LastByteFilter = .{},
 
     pub fn retain(self: *IgnoreNode) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -502,20 +503,22 @@ fn processEntry(
     const basename = full[prefix_len..];
     const relative_path = full[sh.root_prefix_len..];
 
-    // Extra rules are walk-relative and take precedence over discovered rules.
-    const extra_verdict = if (sh.extra_ignore_root) |extra|
-        extra.gi.checkInode(relative_path, basename, is_dir)
-    else
-        null;
-    if (extra_verdict) |ignored| {
-        if (ignored) return;
-    } else {
-        const match_path = if (w.scoped_path) |path| blk: {
-            const start = sh.ignore_rules.scope_prefix.len + prefix_len - sh.root_prefix_len;
-            @memcpy(path[start..][0..basename.len], basename);
-            break :blk path[0 .. start + basename.len];
-        } else relative_path;
-        if (chainVerdict(cur_ignore, match_path, basename, is_dir) == true) return;
+    if (chainMayIgnore(cur_ignore, sh.extra_ignore_root, basename[basename.len - 1])) {
+        // Extra rules are walk-relative and take precedence over discovered rules.
+        const extra_verdict = if (sh.extra_ignore_root) |extra|
+            extra.gi.checkInode(relative_path, basename, is_dir)
+        else
+            null;
+        if (extra_verdict) |ignored| {
+            if (ignored) return;
+        } else {
+            const match_path = if (w.scoped_path) |path| blk: {
+                const start = sh.ignore_rules.scope_prefix.len + prefix_len - sh.root_prefix_len;
+                @memcpy(path[start..][0..basename.len], basename);
+                break :blk path[0 .. start + basename.len];
+            } else relative_path;
+            if (chainVerdict(cur_ignore, match_path, basename, is_dir) == true) return;
+        }
     }
 
     // Cycle key the child task will carry under follow_symlinks. Real
@@ -740,6 +743,16 @@ fn openRoot(sh: *SharedWorkerState, root: []const u8) anyerror!Handle {
 // .gitignore
 // ---------------------------------------------------------------------------
 
+/// One bit test against the union last-byte filter of the whole chain (the
+/// node's own document, every ancestor and the synthetic root): if no rule
+/// anywhere in scope can end a match on this byte, the 2.4 KB GitIgnore nodes
+/// are never touched. Deliberately not `inline`: nested in the
+/// worker's matching path it miscompiled in Debug on the self-hosted backend.
+fn chainMayIgnore(start: ?*IgnoreNode, extra: ?*IgnoreNode, last: u8) bool {
+    const f: *const gitignore_mod.LastByteFilter = if (start) |n| &n.chain_last else if (extra) |x| &x.chain_last else return false;
+    return f.mayContainByte(last);
+}
+
 /// Deepest-first resolution across nested .gitignore files: the first decisive
 /// answer wins, mirroring git.
 ///
@@ -828,7 +841,9 @@ fn parseIgnoreNode(
         .gi = gi,
         .relative_offset = @intCast(offset),
         .refs = .init(1),
+        .chain_last = gi.any_last,
     };
+    if (parent) |p| node.chain_last.merge(p.chain_last) else if (sh.extra_ignore_root) |x| node.chain_last.merge(x.chain_last);
     return node;
 }
 

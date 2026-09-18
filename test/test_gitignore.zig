@@ -77,7 +77,12 @@ test "gitignore parse - double star patterns" {
     defer gi.deinit();
 
     try testing.expectEqual(2, gi.patterns.len);
-    try testing.expect(gi.patterns[0].has_double_star);
+    // `**/logs` means the same as `logs` (match in every directory), so the
+    // parser normalizes it to the cheaper unanchored literal form.
+    try testing.expectEqualStrings("logs", gi.patterns[0].text);
+    try testing.expect(!gi.patterns[0].has_double_star);
+    try testing.expect(gi.patterns[0].is_literal);
+    try testing.expect(!gi.patterns[0].anchored);
     try testing.expect(gi.patterns[1].has_double_star);
 }
 

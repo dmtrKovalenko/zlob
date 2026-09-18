@@ -39,6 +39,15 @@ pub const Pattern = struct {
     /// Pre-split components for anchored or recursive wildcard matching.
     /// Empty for basename-only wildcard patterns.
     segments: [][]const u8 = &.{},
+    /// Literal bytes before the first `*`, `?`, `[` or `\` — a matching
+    /// string must start with them. Empty for literal patterns.
+    literal_prefix: []const u8 = &.{},
+    /// Longest literal run between wildcards of a basename pattern (`.o.` in
+    /// `*.o.*`, `-image` in `vdso*-image*.c`). A matching basename must
+    /// contain it, so `containsSub` rejects most entries before fnmatch.
+    /// Empty when no useful run exists or the pattern has escapes/brackets
+    /// that make the derivation unsafe.
+    required_sub: []const u8 = &.{},
 };
 
 /// String hash map for O(1) literal lookups
@@ -49,9 +58,11 @@ const StringHashMap = std.StringHashMap(PatternMatch);
 /// 2-byte gates (one cache line covers 32 patterns) and touches the full
 /// ~100-byte `Pattern` struct only when a gate passes — for typical entries
 /// every pattern is rejected right here.
-pub const WildcardGate = packed struct(u16) {
+pub const WildcardGate = packed struct(u32) {
     /// Required last char (valid when `has_rc`).
     rc: u8,
+    fc: u8,
+    has_fc: bool,
     has_rc: bool,
     /// `rc` is checked against the basename; otherwise against the full path.
     rc_on_basename: bool,
@@ -59,12 +70,14 @@ pub const WildcardGate = packed struct(u16) {
     rc_on_path: bool,
     /// dir_only basename pattern: skip entirely for non-directories.
     skip_for_file: bool,
-    _pad: u4 = 0,
+    _pad: u11 = 0,
 
     fn init(p: *const Pattern) WildcardGate {
         const basename_only = !p.anchored and !p.has_slash;
         return .{
             .rc = p.required_last_char orelse 0,
+            .fc = if (p.literal_prefix.len > 0) p.literal_prefix[0] else 0,
+            .has_fc = p.literal_prefix.len > 0,
             .has_rc = p.required_last_char != null,
             .rc_on_basename = basename_only,
             .rc_on_path = !p.has_double_star or !p.dir_only,
@@ -74,8 +87,13 @@ pub const WildcardGate = packed struct(u16) {
 
     /// True when the pattern cannot match this entry — mirrors the inline
     /// reject checks previously duplicated in both checkWithBasename loops.
-    inline fn rejects(g: WildcardGate, path_last: i16, basename_last: i16, is_dir: bool) bool {
+    inline fn rejects(g: WildcardGate, path_last: i16, basename_last: i16, path_first: i16, basename_first: i16, is_dir: bool) bool {
         if (g.skip_for_file and !is_dir) return true;
+        if (g.has_fc) {
+            if (g.rc_on_basename) {
+                if (basename_first != g.fc) return true;
+            } else if (path_first != g.fc) return true;
+        }
         if (g.has_rc) {
             if (g.rc_on_basename) {
                 if (basename_last != g.rc) return true;
@@ -99,6 +117,22 @@ pub const LastByteFilter = struct {
     inline fn mayContain(self: *const LastByteFilter, key: []const u8) bool {
         if (key.len == 0) return false;
         const b = key[key.len - 1];
+        return (self.bits[b >> 6] >> @as(u6, @truncate(b))) & 1 != 0;
+    }
+
+    pub inline fn addByte(self: *LastByteFilter, b: u8) void {
+        self.bits[b >> 6] |= @as(u64, 1) << @as(u6, @truncate(b));
+    }
+
+    pub inline fn setAll(self: *LastByteFilter) void {
+        self.bits = .{ ~@as(u64, 0), ~@as(u64, 0), ~@as(u64, 0), ~@as(u64, 0) };
+    }
+
+    pub inline fn merge(self: *LastByteFilter, other: LastByteFilter) void {
+        for (&self.bits, other.bits) |*a, b| a.* |= b;
+    }
+
+    pub inline fn mayContainByte(self: *const LastByteFilter, b: u8) bool {
         return (self.bits[b >> 6] >> @as(u6, @truncate(b))) & 1 != 0;
     }
 
@@ -145,6 +179,18 @@ pub const GitIgnore = struct {
     literal_dirs_last: LastByteFilter,
     literal_files_last: LastByteFilter,
     anchored_paths_last: LastByteFilter,
+    /// Union of the last-byte filters of every category that can produce an
+    /// ignored verdict (literal maps, anchored dirs, suffixes, wildcard rc /
+    /// trailing bracket class). All-ones when any positive wildcard pattern
+    /// has no statically known last byte. Negated patterns are excluded: they
+    /// can only ever flip a verdict to "not ignored", so a chain-level test
+    /// that skips them returns the same answer.
+    any_last: LastByteFilter,
+    /// 512-bit bloom over `(last_byte * 67 + len) & 511` of every key in
+    /// `literal_dirs` and `literal_files`. A wyhash probe only runs when some
+    /// literal key shares the candidate's (last byte, length) — a stricter
+    /// gate than the per-map last-byte filters, in 64 bytes.
+    lit_ll: [8]u64,
     /// Inclusive start offset in suffix_patterns for each suffix last byte.
     suffix_bucket_start: [256]u32,
     /// Exclusive end offset in suffix_patterns for each suffix last byte.
@@ -417,6 +463,38 @@ pub const GitIgnore = struct {
         errdefer allocator.free(wildcard_gates);
         for (wildcard_patterns, wildcard_gates) |*p, *g| g.* = WildcardGate.init(p);
 
+        var lit_ll = [_]u64{0} ** 8;
+        {
+            var it = literal_dirs.keyIterator();
+            while (it.next()) |k| litLlSet(&lit_ll, k.*);
+            var it2 = literal_files.keyIterator();
+            while (it2.next()) |k| litLlSet(&lit_ll, k.*);
+        }
+        var any_last = LastByteFilter{};
+        any_last.merge(LastByteFilter.fromMap(&literal_dirs));
+        any_last.merge(LastByteFilter.fromMap(&literal_files));
+        any_last.merge(LastByteFilter.fromMap(&anchored_literal_paths));
+        for (anchored_literal_dirs) |p| any_last.add(p.text);
+        for (suffix_patterns) |p| {
+            if (!p.negated) any_last.add(p.suffix.?);
+        }
+        for (wildcard_patterns, wildcard_gates) |p, g| {
+            if (p.negated) continue;
+            // Same soundness condition as WildcardGate.rejects: a last-byte
+            // gate is only valid when it is checked on the basename or the
+            // full path is a safe stand-in for it.
+            const gateable = g.rc_on_basename or g.rc_on_path;
+            if (gateable and g.has_rc) {
+                any_last.addByte(g.rc);
+            } else if (gateable and trailingBracketClass(p.text) != null) {
+                // `*.tab.[ch]`, `*.py[cod]`: the last byte is one of a small
+                // set — keep the chain filter selective instead of all-ones.
+                any_last.merge(trailingBracketClass(p.text).?);
+            } else {
+                any_last.setAll();
+            }
+        }
+
         var has_ds_wildcards = false;
         for (wildcard_patterns) |p| {
             if (p.segments.len > 0) {
@@ -432,6 +510,8 @@ pub const GitIgnore = struct {
             .literal_dirs_last = LastByteFilter.fromMap(&literal_dirs),
             .literal_files_last = LastByteFilter.fromMap(&literal_files),
             .anchored_paths_last = LastByteFilter.fromMap(&anchored_literal_paths),
+            .any_last = any_last,
+            .lit_ll = lit_ll,
             .literal_dirs = literal_dirs,
             .literal_files = literal_files,
             .anchored_literal_paths = anchored_literal_paths,
@@ -461,6 +541,90 @@ pub const GitIgnore = struct {
             return c;
         }
         return null;
+    }
+
+    /// Longest literal run of a wildcard basename pattern that starts at or
+    /// after `from` (the end of the literal prefix). Runs are bytes outside
+    /// `*`, `?` and bracket expressions. Returns empty when the pattern has an
+    /// escape or an unterminated `[` (fnmatch then treats the tail
+    /// differently than a byte scan would), which keeps the gate a pure
+    /// necessary condition.
+    fn extractRequiredSub(text: []const u8, from: usize) []const u8 {
+        if (mem.indexOfScalar(u8, text, '\\') != null) return &.{};
+        var best: []const u8 = &.{};
+        var i: usize = from;
+        var run_start: ?usize = null;
+        while (i < text.len) {
+            const c = text[i];
+            if (c == '*' or c == '?' or c == '[') {
+                if (run_start) |s| {
+                    if (i - s > best.len) best = text[s..i];
+                    run_start = null;
+                }
+                if (c == '[') {
+                    const close = bracketEnd(text, i) orelse return &.{};
+                    i = close + 1;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if (run_start == null) run_start = i;
+            i += 1;
+        }
+        if (run_start) |s| {
+            if (text.len - s > best.len) best = text[s..];
+        }
+        return best;
+    }
+
+    /// Index of the `]` closing the bracket expression at `open` (mirrors
+    /// fnmatch's matchBracketBitmap: optional `!`/`^`, a leading `]` is a
+    /// set member). Null if unterminated, or if the set contains a `[:`
+    /// POSIX class opener: fnmatch skips `[:name:]` only for valid names and
+    /// otherwise closes at the next `]`, and reproducing that table here
+    /// buys nothing for real-world ignore files — callers simply drop the gate.
+    fn bracketEnd(text: []const u8, open: usize) ?usize {
+        var pi = open + 1;
+        if (pi < text.len and (text[pi] == '!' or text[pi] == '^')) pi += 1;
+        const start = pi;
+        while (pi < text.len) : (pi += 1) {
+            if (text[pi] == ']' and pi > start) return pi;
+            if (text[pi] == '[' and pi + 1 < text.len and text[pi + 1] == ':') return null;
+        }
+        return null;
+    }
+
+    /// For a pattern ending in a simple bracket set (`*.py[cod]`, `*.tab.[ch]`)
+    /// — no negation, ranges or POSIX classes — the set of possible last bytes.
+    /// Null when the pattern's last byte is not so constrained.
+    fn trailingBracketClass(text: []const u8) ?LastByteFilter {
+        if (text.len < 3 or text[text.len - 1] != ']') return null;
+        if (mem.indexOfScalar(u8, text, '\\') != null) return null;
+        // Walk brackets left to right the way fnmatch does, so `*[a[bc]` is
+        // seen as one set {a,[,b,c} and not as a trailing `[bc]`.
+        var open: usize = 0;
+        var i: usize = 0;
+        while (i < text.len) : (i += 1) {
+            if (text[i] != '[') continue;
+            const close = bracketEnd(text, i) orelse return null;
+            if (close == text.len - 1) {
+                open = i;
+                break;
+            }
+            i = close;
+        } else return null;
+        const body = text[open + 1 .. text.len - 1];
+        if (body.len == 0) return null;
+        if (body[0] == '!' or body[0] == '^') return null;
+        var f = LastByteFilter{};
+        for (body, 0..) |c, k| {
+            // A `-` that is not first or last denotes a range.
+            if (c == '-' and k > 0 and k + 1 < body.len) return null;
+            if (c == '[' or c == ']') return null;
+            f.addByte(c);
+        }
+        return f;
     }
 
     /// Parse a single line - returns pattern with text as slice into line
@@ -499,6 +663,16 @@ pub const GitIgnore = struct {
         // recursion per redundant doublestar.
         if (mem.indexOf(u8, text, "**") != null) {
             text = collapseDoubleStarRuns(text);
+        }
+
+        // `**/foo` matches `foo` in every directory — exactly what the plain
+        // basename pattern `foo` does. Dropping the prefix turns it into an
+        // unanchored (often literal or suffix) pattern that skips the
+        // per-entry path split and segment matcher entirely.
+        if (text.len > 3 and text[0] == '*' and text[1] == '*' and text[2] == '/' and
+            mem.indexOfScalar(u8, text[3..], '/') == null)
+        {
+            text = text[3..];
         }
 
         var anchored = false;
@@ -540,8 +714,22 @@ pub const GitIgnore = struct {
             }
         }
 
+        var literal_prefix: []const u8 = &.{};
+        var required_sub: []const u8 = &.{};
+        if (!is_literal) {
+            var pi: usize = 0;
+            while (pi < text.len and text[pi] != '*' and text[pi] != '?' and text[pi] != '[' and text[pi] != '\\') : (pi += 1) {}
+            literal_prefix = text[0..pi];
+            // Only basename patterns are fnmatch'ed as a whole string; the
+            // prefix is already checked by the gate, so pick the longest run
+            // after it.
+            if (!anchored and suffix == null) required_sub = extractRequiredSub(text, pi);
+        }
+
         return Pattern{
             .text = text,
+            .literal_prefix = literal_prefix,
+            .required_sub = required_sub,
             .negated = negated,
             .dir_only = dir_only,
             .anchored = anchored,
@@ -586,13 +774,14 @@ pub const GitIgnore = struct {
 
         // Fast path: if no negations exist, we can use optimized lookups
         if (!self.has_negations) {
-            if (is_dir and self.literal_dirs_last.mayContain(basename)) {
+            const len_ok = self.litLenOk(basename);
+            if (is_dir and len_ok and self.literal_dirs_last.mayContain(basename)) {
                 if (self.literal_dirs.get(basename)) |_| {
                     return true;
                 }
             }
 
-            if (self.literal_files_last.mayContain(basename)) {
+            if (len_ok and self.literal_files_last.mayContain(basename)) {
                 if (self.literal_files.get(basename)) |match| {
                     if (!match.dir_only or is_dir) {
                         return true;
@@ -618,8 +807,11 @@ pub const GitIgnore = struct {
             // non-matching entry never loads the wide Pattern structs at all.
             const path_last: i16 = if (normalized_path.len > 0) normalized_path[normalized_path.len - 1] else -1;
             const base_last: i16 = if (basename.len > 0) basename[basename.len - 1] else -1;
+            const path_first: i16 = if (normalized_path.len > 0) normalized_path[0] else -1;
+            const base_first: i16 = if (basename.len > 0) basename[0] else -1;
             for (self.wildcard_gates, 0..) |gate, i| {
-                if (gate.rejects(path_last, base_last, is_dir)) continue;
+                if (gate.rejects(path_last, base_last, path_first, base_first, is_dir)) continue;
+                if (gate.has_fc and !mem.startsWith(u8, if (gate.rc_on_basename) basename else normalized_path, self.wildcard_patterns[i].literal_prefix)) continue;
                 // Anchored patterns (rc_on_basename == false) match via
                 // segments — split the path on first need, then reuse.
                 if (!gate.rc_on_basename and !segs_ready) {
@@ -640,13 +832,14 @@ pub const GitIgnore = struct {
         var ignored: ?bool = null;
         var best_index: u16 = 0;
 
-        if (is_dir and self.literal_dirs_last.mayContain(basename)) {
+        const len_ok = self.litLenOk(basename);
+        if (is_dir and len_ok and self.literal_dirs_last.mayContain(basename)) {
             if (self.literal_dirs.get(basename)) |match| {
                 recordMatch(&best_index, &ignored, match.index, match.negated);
             }
         }
 
-        if (self.literal_files_last.mayContain(basename)) {
+        if (len_ok and self.literal_files_last.mayContain(basename)) {
             if (self.literal_files.get(basename)) |match| {
                 if (!match.dir_only or is_dir) {
                     recordMatch(&best_index, &ignored, match.index, match.negated);
@@ -670,8 +863,11 @@ pub const GitIgnore = struct {
 
         const path_last: i16 = if (normalized_path.len > 0) normalized_path[normalized_path.len - 1] else -1;
         const base_last: i16 = if (basename.len > 0) basename[basename.len - 1] else -1;
+        const path_first: i16 = if (normalized_path.len > 0) normalized_path[0] else -1;
+        const base_first: i16 = if (basename.len > 0) basename[0] else -1;
         for (self.wildcard_gates, 0..) |gate, i| {
-            if (gate.rejects(path_last, base_last, is_dir)) continue;
+            if (gate.rejects(path_last, base_last, path_first, base_first, is_dir)) continue;
+            if (gate.has_fc and !mem.startsWith(u8, if (gate.rc_on_basename) basename else normalized_path, self.wildcard_patterns[i].literal_prefix)) continue;
             if (!gate.rc_on_basename and !segs_ready) {
                 segs_ready = true;
                 path_segs = compiled_pattern.splitPathComponentsNormalized(normalized_path, &path_seg_buf);
@@ -683,6 +879,22 @@ pub const GitIgnore = struct {
         }
 
         return ignored;
+    }
+
+    inline fn litLlIndex(key: []const u8) u9 {
+        return @truncate(@as(u32, key[key.len - 1]) * 67 + @as(u32, @truncate(key.len)));
+    }
+
+    fn litLlSet(bits: *[8]u64, key: []const u8) void {
+        const i = litLlIndex(key);
+        bits[i >> 6] |= @as(u64, 1) << @as(u6, @truncate(i));
+    }
+
+    /// True when some literal key has this basename's (last byte, length).
+    fn litLenOk(self: *const Self, basename: []const u8) bool {
+        if (basename.len == 0) return false;
+        const i = litLlIndex(basename);
+        return (self.lit_ll[i >> 6] >> @as(u6, @truncate(i))) & 1 != 0;
     }
 
     /// Compatibility alias for callers using the previous public name.
@@ -841,7 +1053,39 @@ pub const GitIgnore = struct {
         if (pattern.suffix_len > 0) {
             return matchSuffixFast(pattern, basename);
         }
+        // A basename that lacks the pattern's longest literal run can't match;
+        // this rejects almost everything `*.o.*` / `*.c.[012]*.*`-style
+        // patterns would otherwise fnmatch.
+        if (pattern.required_sub.len >= 2 and !containsSub(basename, pattern.required_sub)) return false;
         return glob.fnmatch.fnmatch(text, basename, .{});
+    }
+
+    /// Substring test tuned for short basenames and 2..8-byte needles: a
+    /// byte loop for the needle's first byte, then an inline compare of the
+    /// rest. `std.mem.indexOf` calls a non-inlined `mem.eql` at every
+    /// haystack position and `indexOfScalarPos` is an out-of-line vector
+    /// routine; at basename lengths both cost more than the fnmatch this
+    /// gate is meant to short-cut.
+    inline fn containsSub(hay: []const u8, needle: []const u8) bool {
+        if (hay.len < needle.len) return false;
+        const first = needle[0];
+        const rest = needle[1..];
+        // Only positions that leave room for the whole needle are candidates.
+        const last = hay.len - rest.len;
+        var at: usize = 0;
+        while (at < last) : (at += 1) {
+            if (hay[at] != first) continue;
+            const tail = hay[at + 1 ..][0..rest.len];
+            var same = true;
+            for (rest, tail) |a, b| {
+                if (a != b) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) return true;
+        }
+        return false;
     }
 
     /// Whether a directory can be skipped without traversing it.
