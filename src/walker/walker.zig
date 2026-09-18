@@ -347,7 +347,14 @@ fn walkImpl(
     };
     const parents = ignore_rules.parents;
     if (parents) |node| node.retain();
-    root_task.* = .{ .rel = root_rel, .depth = 0, .ignore = parents, .parent = null };
+    root_task.* = .{
+        .rel = root_rel,
+        .depth = 0,
+        .ignore = parents,
+        .parent = null,
+        .dev = sh.root_key.dev,
+        .ino = sh.root_key.ino,
+    };
     sh.queue.push(allocator, sh.io, 0, root_task) catch |err| {
         worker.freeTask(&sh, root_task);
         return err;

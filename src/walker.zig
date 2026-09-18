@@ -327,11 +327,56 @@ pub fn isOptimizedBackendAvailable() bool {
 /// refusal retries once without it and clears `ok` for the rest of the
 /// process (SingleDirIterator has no walk scope to hang the probe on): a
 /// foreign tree costs one extra open, not one per directory.
+/// Inode number of every btrfs subvolume root as seen from inside it (its
+/// entry in the parent listing carries the subvolume id instead). See
+/// `RecursiveGetdents64Walker.confirmFreshDir`.
+const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
+
+const OpenHow = extern struct { flags: u64, mode: u64, resolve: u64 };
+const RESOLVE_NO_XDEV: u64 = 0x01;
+
+/// openat2(RESOLVE_NO_XDEV): like openat, but fails with EXDEV instead of
+/// crossing a mount point, so a child keyed by its parent's device number is
+/// known to still be on that device when the open succeeds.
+fn rawOpenat2NoXdev(dirfd: std.posix.fd_t, name_z: [*:0]const u8, flags: std.posix.O) usize {
+    if (comptime builtin.os.tag != .linux) unreachable;
+    var how: OpenHow = .{ .flags = @as(u32, @bitCast(flags)), .mode = 0, .resolve = RESOLVE_NO_XDEV };
+    return std.os.linux.syscall4(.openat2, @bitCast(@as(isize, dirfd)), @intFromPtr(name_z), @intFromPtr(&how), @sizeOf(OpenHow));
+}
+
+const Openat2Result = union(enum) { opened: std.posix.fd_t, xdev, unavailable, other };
+
 const noatime = if (builtin.os.tag != .linux) struct {} else struct {
     const linux = std.os.linux;
     const posix = std.posix;
 
     var ok: std.atomic.Value(bool) = .init(true);
+
+    /// `openat2NoXdev` under the same O_NOATIME policy. EPERM is ambiguous
+    /// here: O_NOATIME refused on a foreign directory, or openat2 itself
+    /// filtered by seccomp. With the flag set, a first EPERM retries once
+    /// without it; only an EPERM without the flag (or ENOSYS) reports
+    /// openat2 as unavailable.
+    fn openat2NoXdev(dir_fd: posix.fd_t, path_z: [*:0]const u8, base_flags: posix.O) Openat2Result {
+        var flags = base_flags;
+        var want = ok.load(.monotonic);
+        flags.NOATIME = want;
+        while (true) {
+            const rc = rawOpenat2NoXdev(dir_fd, path_z, flags);
+            switch (linux.errno(rc)) {
+                .SUCCESS => return .{ .opened = @intCast(rc) },
+                .XDEV => return .xdev,
+                .NOSYS => return .unavailable,
+                .PERM => {
+                    if (!want) return .unavailable;
+                    ok.store(false, .monotonic);
+                    want = false;
+                    flags.NOATIME = false;
+                },
+                else => return .other,
+            }
+        }
+    }
 
     /// Raw `openat` returning the syscall result, so callers keep their own
     /// errno mapping.
@@ -392,6 +437,22 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
     // Current directory being processed
     current_fd: posix.fd_t,
     current_depth: u16,
+    // follow_symlinks cycle key of the current directory: `current_dev` is
+    // inherited down the tree from the start dir's fstat (re-derived by one
+    // statx when a mount point or btrfs subvolume is crossed), `current_ino`
+    // is the parent listing's d_ino. Children are keyed as
+    // (current_dev, d_ino) straight from the listing, so real directories
+    // need no stat at all.
+    current_dev: u64,
+    current_ino: u64,
+    // True until the first getdents64 batch of the current directory has been
+    // read; that batch's "." record confirms the inherited key.
+    fresh: bool,
+    // The open could not guarantee it stayed on `current_dev` (mount
+    // crossing, or no openat2): confirmFreshDir must fstat.
+    current_verify: bool,
+    // Set once openat2 fails with ENOSYS (pre-5.6 kernel, seccomp).
+    openat2_unavailable: bool,
 
     // Buffer for getdents64 results
     getdents_buffer: []align(8) u8,
@@ -435,6 +496,10 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         // Where this dir's path lives in path_stack.
         path_len: u16,
         path_off: u32,
+        // Cycle key, see `current_dev` / `current_ino` / `current_verify`.
+        dev: u64,
+        ino: u64,
+        verify_key: bool,
     };
 
     /// One buffered entry of a sorted listing. A directory (or, under
@@ -552,12 +617,12 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         };
 
         var visited: std.AutoHashMapUnmanaged(InodeKey, void) = .empty;
-        var root_dev: u64 = 0;
+        var root_key: InodeKey = .{ .dev = 0, .ino = 0 };
         if (config.follow_symlinks) {
             visited.ensureTotalCapacity(allocator, 256) catch {};
             // Seed with the start dir so a symlink pointing back to it is rejected.
             if (statFd(start_fd)) |key| {
-                root_dev = key.dev;
+                root_key = key;
                 visited.put(allocator, key, {}) catch {};
             }
         }
@@ -567,7 +632,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         return RecursiveGetdents64Walker{
             .trust_short = trust_short,
             .current_eof = false,
-            .root_dev = root_dev,
+            .root_dev = root_key.dev,
             .allocator = allocator,
             .config = config,
             .dir_stack = dir_stack,
@@ -575,6 +640,11 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             .visited = visited,
             .current_fd = start_fd,
             .current_depth = 0,
+            .current_dev = root_key.dev,
+            .current_ino = root_key.ino,
+            .fresh = false,
+            .current_verify = false,
+            .openat2_unavailable = false,
             .getdents_buffer = buffer,
             .getdents_offset = 0,
             .getdents_len = 0,
@@ -677,7 +747,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                     // Only descend candidates get their path assembled.
                     const path_start = self.path_len;
                     self.appendNameToPath(raw.name);
-                    kind = self.maybeDescend(raw.name, kind);
+                    kind = self.maybeDescend(raw.name, kind, raw.d_ino);
                     self.path_len = path_start;
                     if (kind == .directory) continue;
                 }
@@ -706,33 +776,90 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
             if (@as(isize, @bitCast(bytes_read)) < 0 or bytes_read == 0) {
                 // Current directory exhausted or error - close it and pop next from stack
-                _ = linux.close(self.current_fd);
-
-                // Pop next directory from stack
-                const next_dir = self.dir_stack.pop() orelse {
-                    self.finished = true;
-                    return false;
-                };
-                self.current_fd = next_dir.fd;
-                self.current_depth = next_dir.depth;
-                self.path_len = next_dir.path_len;
-                // Restore this dir's saved path, then release its bytes.
-                @memcpy(
-                    self.path_buffer[0..next_dir.path_len],
-                    self.path_stack.items[next_dir.path_off..][0..next_dir.path_len],
-                );
-                self.path_stack.shrinkRetainingCapacity(next_dir.path_off);
-
-                self.getdents_offset = 0;
-                self.getdents_len = 0;
+                if (!self.popNextDir()) return false;
                 continue;
             }
 
             self.getdents_len = bytes_read;
             self.getdents_offset = 0;
+
+            if (self.fresh) {
+                self.fresh = false;
+                if (self.config.follow_symlinks and !self.confirmFreshDir()) {
+                    // Already visited under its real (dev, ino): drop it unread.
+                    if (!self.popNextDir()) return false;
+                    continue;
+                }
+            }
             if (self.trust_short and dirent64.shortReadIsEof(bytes_read, cap)) self.current_eof = true;
             return true;
         }
+    }
+
+    /// Closes the current directory and makes the top of dir_stack current.
+    /// Returns false (and marks the walk finished) when the stack is empty.
+    fn popNextDir(self: *RecursiveGetdents64Walker) bool {
+        _ = linux.close(self.current_fd);
+
+        const next_dir = self.dir_stack.pop() orelse {
+            self.finished = true;
+            return false;
+        };
+        self.current_fd = next_dir.fd;
+        self.current_depth = next_dir.depth;
+        self.current_dev = next_dir.dev;
+        self.current_ino = next_dir.ino;
+        self.current_verify = next_dir.verify_key;
+        self.fresh = true;
+        self.path_len = next_dir.path_len;
+        // Restore this dir's saved path, then release its bytes.
+        @memcpy(
+            self.path_buffer[0..next_dir.path_len],
+            self.path_stack.items[next_dir.path_off..][0..next_dir.path_len],
+        );
+        self.path_stack.shrinkRetainingCapacity(next_dir.path_off);
+
+        self.getdents_offset = 0;
+        self.getdents_len = 0;
+        return true;
+    }
+
+    /// follow_symlinks: the current directory was keyed by its parent's device
+    /// and the parent listing's d_ino. Its own first record, ".", reports the
+    /// inode as this directory's filesystem sees it; when the two agree the key
+    /// is exact. They disagree across a btrfs subvolume boundary (listing:
+    /// subvolume id, ".": 256) and a mount point (listing: covered inode; the
+    /// EXDEV open path also sets `verify_key`), so those pay one fstat to
+    /// learn the real (dev, ino). The directory's own key is already in
+    /// `visited`, so only a *different* real key can mean it was visited
+    /// before; then this returns false.
+    fn confirmFreshDir(self: *RecursiveGetdents64Walker) bool {
+        const buf = self.getdents_buffer[0..self.getdents_len];
+        var dot_ino: u64 = 0;
+        if (buf.len >= dirent64.NAME_OFFSET + 2) {
+            const reclen = mem.readInt(u16, buf[dirent64.RECLEN_OFFSET..][0..2], .little);
+            if (reclen >= dirent64.NAME_OFFSET + 2 and reclen <= buf.len and
+                buf[dirent64.NAME_OFFSET] == '.' and buf[dirent64.NAME_OFFSET + 1] == 0)
+            {
+                dot_ino = mem.readInt(u64, buf[dirent64.INO_OFFSET..][0..8], .little);
+            }
+        }
+        if (!self.current_verify and dot_ino != 0 and dot_ino == self.current_ino and dot_ino != BTRFS_FIRST_FREE_OBJECTID) {
+            @branchHint(.likely);
+            return true;
+        }
+        const key = statFd(self.current_fd) orelse return true;
+        if (key.dev == self.current_dev and key.ino == self.current_ino) return true;
+        // Off the start dir's device: that filesystem was never checked by
+        // the short-read gate, so stop trusting short reads from here on.
+        // This batch was read before the check, but its trust decision is
+        // taken below, after this point.
+        if (key.dev != self.root_dev) self.trust_short = false;
+        const gop = self.visited.getOrPut(self.allocator, key) catch return true;
+        if (gop.found_existing) return false;
+        self.current_dev = key.dev;
+        self.current_ino = key.ino;
+        return true;
     }
 
     /// Sorted mode: emit the next entry in strcmp order of relative paths.
@@ -1054,6 +1181,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         /// the name can be handed to openat/fstatat without copying it out.
         name: [:0]const u8,
         d_type: u8,
+        d_ino: u64,
     };
 
     /// Parse the dirent at getdents_offset and advance past it. Returns null
@@ -1070,6 +1198,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
         const reclen = mem.readInt(u16, self.getdents_buffer[base + dirent64.RECLEN_OFFSET ..][0..2], .little);
         const d_type = self.getdents_buffer[base + dirent64.TYPE_OFFSET];
+        const d_ino = mem.readInt(u64, self.getdents_buffer[base + dirent64.INO_OFFSET ..][0..8], .little);
 
         // Guard against malformed (FUSE) records: a zero reclen would spin
         // forever, and a short one underflows the name area below.
@@ -1088,7 +1217,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             @branchHint(.unlikely);
             return null;
         }
-        return .{ .name = name_area[0..name_len :0], .d_type = d_type };
+        return .{ .name = name_area[0..name_len :0], .d_type = d_type, .d_ino = d_ino };
     }
 
     /// Append "/name" (or "name" at the root) to path_buffer.
@@ -1112,7 +1241,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
     ///   Probe with openat(O_DIRECTORY) directly: a file answers ENOTDIR,
     ///   cheaper than a statx pre-flight, and a directory is then already
     ///   open. Never taken on filesystems that report d_type.
-    fn maybeDescend(self: *RecursiveGetdents64Walker, name_z: [:0]const u8, kind_in: EntryKind) EntryKind {
+    fn maybeDescend(self: *RecursiveGetdents64Walker, name_z: [:0]const u8, kind_in: EntryKind, d_ino: u64) EntryKind {
         var kind = kind_in;
         const may_descend = kind == .directory or kind == .unknown or
             (self.config.follow_symlinks and kind == .sym_link);
@@ -1127,50 +1256,82 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             true;
         if (!should_descend) return kind;
 
-        // For symlink entries under follow mode: pre-flight
-        // fstatat(FOLLOW) to confirm dir + cycle BEFORE openat.
-        // Skips wasted open+close for non-dir targets and cycles —
-        // big win on symlink-heavy trees (node_modules, bazel-out).
+        // Cycle key the child carries under follow mode. A real directory
+        // is keyed by the listing's d_ino under the current device (exact
+        // within one filesystem; a mount or btrfs-subvolume crossing is
+        // re-keyed by confirmFreshDir), so it costs no stat. Symlinks
+        // pre-flight fstatat(FOLLOW) to confirm dir + cycle BEFORE openat,
+        // skipping the wasted open+close for non-dir targets and cycles --
+        // big win on symlink-heavy trees (node_modules, bazel-out). A
+        // DT_UNKNOWN entry is keyed only once its probe open shows it is a
+        // directory (below), since a symlink's d_ino is not its target's.
+        const follow = self.config.follow_symlinks;
+        var child_key: InodeKey = .{ .dev = self.current_dev, .ino = d_ino };
         const skip_descend: bool = blk: {
-            if (kind != .sym_link) break :blk false;
-            const res = statAtFollow(self.current_fd, name_z) orelse break :blk true;
-            if (!res.is_dir) break :blk true;
-            // Off the start dir's device: that filesystem was never
-            // checked, so stop trusting short reads from here on.
-            if (res.key.dev != self.root_dev) self.trust_short = false;
-            const gop = self.visited.getOrPut(self.allocator, res.key) catch break :blk true;
+            if (!follow) break :blk false;
+            if (kind == .sym_link) {
+                const res = statAtFollow(self.current_fd, name_z) orelse break :blk true;
+                if (!res.is_dir) break :blk true;
+                // Off the start dir's device: that filesystem was never
+                // checked, so stop trusting short reads from here on.
+                if (res.key.dev != self.root_dev) self.trust_short = false;
+                child_key = res.key;
+            } else if (kind != .directory) break :blk false;
+            const gop = self.visited.getOrPut(self.allocator, child_key) catch break :blk true;
             break :blk gop.found_existing;
         };
         if (skip_descend) return kind;
 
-        // openatZ, not openat: the slice overload would re-copy
-        // and rescan the name via toPosixPath.
         // An .unknown entry may be a symlink; without follow mode
         // NOFOLLOW makes such a probe fail (ELOOP) instead of
         // descending through it.
-        const subdir_fd = noatime.openatZ(self.current_fd, name_z.ptr, .{
+        const open_flags: posix.O = .{
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
-            .NOFOLLOW = kind == .unknown and !self.config.follow_symlinks,
-        }) catch return kind;
-        // The probe succeeded: an .unknown entry is a directory.
-        if (kind == .unknown) kind = .directory;
-
-        // Real-directory cycle bookkeeping under follow mode.
-        // Symlinks already recorded via pre-flight above.
-        var cycle = false;
-        if (self.config.follow_symlinks and kind == .directory) {
-            if (statFd(subdir_fd)) |key| {
-                if (self.visited.getOrPut(self.allocator, key)) |gop| {
-                    if (gop.found_existing) cycle = true;
-                } else |_| {}
+            .NOFOLLOW = kind == .unknown and !follow,
+        };
+        var opened: ?posix.fd_t = null;
+        var verify_key = false;
+        if (follow and kind == .directory) {
+            if (!self.openat2_unavailable) {
+                // RESOLVE_NO_XDEV: a mount-point crossing fails with EXDEV
+                // and falls through to a plain open whose key
+                // confirmFreshDir must then re-derive.
+                switch (noatime.openat2NoXdev(self.current_fd, name_z.ptr, open_flags)) {
+                    .opened => |fd| opened = fd,
+                    .xdev => verify_key = true,
+                    .unavailable => {
+                        self.openat2_unavailable = true;
+                        verify_key = true;
+                    },
+                    .other => {}, // let openat report the error
+                }
+            } else {
+                verify_key = true;
             }
         }
-
-        if (cycle) {
-            _ = linux.close(subdir_fd);
-            return kind;
+        // openatZ, not openat: the slice overload would re-copy
+        // and rescan the name via toPosixPath.
+        const subdir_fd = opened orelse (noatime.openatZ(self.current_fd, name_z.ptr, open_flags) catch return kind);
+        // The probe succeeded: an .unknown entry is a directory.
+        if (kind == .unknown) {
+            kind = .directory;
+            // Real-directory cycle bookkeeping for the DT_UNKNOWN case
+            // (a d_type-less filesystem: the probe's real key is exact).
+            if (follow) {
+                verify_key = true;
+                if (statFd(subdir_fd)) |key| {
+                    child_key = key;
+                    verify_key = false;
+                    if (self.visited.getOrPut(self.allocator, key)) |gop| {
+                        if (gop.found_existing) {
+                            _ = linux.close(subdir_fd);
+                            return kind;
+                        }
+                    } else |_| {}
+                }
+            }
         }
 
         // Push to stack - processed after current dir is exhausted.
@@ -1182,6 +1343,9 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                 .depth = self.current_depth + 1,
                 .path_len = @intCast(self.path_len),
                 .path_off = @intCast(path_off),
+                .dev = child_key.dev,
+                .ino = child_key.ino,
+                .verify_key = verify_key,
             }) catch {
                 self.path_stack.shrinkRetainingCapacity(path_off);
                 _ = linux.close(subdir_fd);
@@ -1211,7 +1375,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         self.appendNameToPath(name);
         const name_in_path_start = self.path_len - name.len;
 
-        kind = self.maybeDescend(name, kind);
+        kind = self.maybeDescend(name, kind, raw.d_ino);
 
         // Build result entry
         self.current_entry = .{

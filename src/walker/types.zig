@@ -185,6 +185,10 @@ pub const RawEntry = struct {
     meta: Metadata,
     /// Linux can fetch known-type entries' metadata after ignore filtering.
     metadata_deferred: bool = false,
+    /// Inode number as reported by the parent's directory listing (Linux
+    /// `d_ino`), 0 when unknown. Only consumed under `follow_symlinks`, where
+    /// it keys the cycle set without a statx per real directory.
+    ino: u64 = 0,
 };
 
 pub const VisitAction = enum(c_int) {

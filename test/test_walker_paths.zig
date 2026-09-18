@@ -171,3 +171,67 @@ test "backends agree on the entry set" {
     try testing.expectEqual(sets[0].items.len, sets[1].items.len);
     for (sets[0].items, sets[1].items) |a, b| try testing.expectEqualStrings(a, b);
 }
+
+test "getdents64 backend: follow_symlinks breaks ancestor cycles, walks siblings once" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var tree: Tree = .{ .io = undefined };
+    try tree.init("follow_cycles");
+    defer tree.deinit();
+
+    // a/b/f.txt, c/c.txt, c/d/d.txt; a/b/{up -> .., root -> ../.., side -> ../../c}
+    try tree.mkdirs("a/b");
+    try tree.mkdirs("c/d");
+    try tree.touch("a/b/f.txt");
+    try tree.touch("c/c.txt");
+    try tree.touch("c/d/d.txt");
+    var lbuf: [4096]u8 = undefined;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.symLink(tree.io, "..", try std.fmt.bufPrint(&lbuf, "{s}/a/b/up", .{tree.root}), .{});
+    try cwd.symLink(tree.io, "../..", try std.fmt.bufPrint(&lbuf, "{s}/a/b/root", .{tree.root}), .{});
+    try cwd.symLink(tree.io, "../../c", try std.fmt.bufPrint(&lbuf, "{s}/a/b/side", .{tree.root}), .{});
+    // a/b/absout -> <absolute path of>/c: an absolute target is followed too
+    // (and counts as the one visit of c/ when reached first).
+    {
+        var abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var rel_c: [4096]u8 = undefined;
+        const c_rel = try std.fmt.bufPrint(&rel_c, "{s}/c", .{tree.root});
+        const c_abs = abs_buf[0..try cwd.realPathFile(tree.io, c_rel, &abs_buf)];
+        try cwd.symLink(tree.io, c_abs, try std.fmt.bufPrint(&lbuf, "{s}/a/b/absout", .{tree.root}), .{});
+    }
+
+    var w = try walker.WalkerType(.getdents64).init(allocator, tree.io, tree.root, .{
+        .max_depth = 64,
+        .follow_symlinks = true,
+    });
+    defer w.deinit();
+
+    var total: usize = 0;
+    var f_count: usize = 0;
+    var c_leaves: usize = 0;
+    var d_leaves: usize = 0;
+    var saw_up = false;
+    var saw_root = false;
+    var saw_side = false;
+    while (try w.next()) |entry| {
+        total += 1;
+        // A runaway cycle would never end; cap it so a regression fails
+        // instead of hanging.
+        try testing.expect(total < 200);
+        const p = entry.path;
+        try testing.expect(!std.mem.startsWith(u8, p, "a/b/up/"));
+        try testing.expect(!std.mem.startsWith(u8, p, "a/b/root/"));
+        if (std.mem.eql(u8, p, "a/b/up")) saw_up = true;
+        if (std.mem.eql(u8, p, "a/b/root")) saw_root = true;
+        if (std.mem.eql(u8, p, "a/b/side")) saw_side = true;
+        if (std.mem.eql(u8, p, "a/b/f.txt")) f_count += 1;
+        if (std.mem.endsWith(u8, p, "/c.txt")) c_leaves += 1;
+        if (std.mem.endsWith(u8, p, "/d.txt")) d_leaves += 1;
+    }
+    try testing.expect(saw_up and saw_root and saw_side);
+    try testing.expectEqual(@as(usize, 1), f_count);
+    // c/ is entered exactly once, via the real dir or the sibling link.
+    try testing.expectEqual(@as(usize, 1), c_leaves);
+    try testing.expectEqual(@as(usize, 1), d_leaves);
+}
