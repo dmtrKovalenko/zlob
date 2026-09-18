@@ -317,6 +317,50 @@ pub fn isOptimizedBackendAvailable() bool {
     return builtin.os.tag == .linux;
 }
 
+/// Linux only: directory opens ask for O_NOATIME so getdents64 never dirties
+/// directory inodes. On relatime mounts the first walk after 24h otherwise
+/// rewrites every directory's atime inline in getdents64 (btrfs: transaction
+/// join + delayed inode update, ~2-3us per directory) and queues a metadata
+/// writeback per directory. O_NOATIME is refused with EPERM when the caller
+/// neither owns the directory nor has CAP_FOWNER, and EPERM is the only way a
+/// read-only directory open can fail *because of* the flag, so the first
+/// refusal retries once without it and clears `ok` for the rest of the
+/// process (SingleDirIterator has no walk scope to hang the probe on): a
+/// foreign tree costs one extra open, not one per directory.
+const noatime = if (builtin.os.tag != .linux) struct {} else struct {
+    const linux = std.os.linux;
+    const posix = std.posix;
+
+    var ok: std.atomic.Value(bool) = .init(true);
+
+    /// Raw `openat` returning the syscall result, so callers keep their own
+    /// errno mapping.
+    fn openat(dir_fd: i32, path_z: [*:0]const u8, base_flags: linux.O) usize {
+        var flags = base_flags;
+        const want = ok.load(.monotonic);
+        flags.NOATIME = want;
+        const rc = linux.openat(dir_fd, path_z, flags, 0);
+        if (want and linux.errno(rc) == .PERM) {
+            ok.store(false, .monotonic);
+            flags.NOATIME = false;
+            return linux.openat(dir_fd, path_z, flags, 0);
+        }
+        return rc;
+    }
+
+    fn openatZ(dir_fd: posix.fd_t, path_z: [*:0]const u8, base_flags: posix.O) posix.OpenError!posix.fd_t {
+        var flags = base_flags;
+        const want = ok.load(.monotonic);
+        flags.NOATIME = want;
+        return posix.openatZ(dir_fd, path_z, flags, 0) catch |err| {
+            if (!want or err != error.PermissionDenied) return err;
+            ok.store(false, .monotonic);
+            flags.NOATIME = false;
+            return posix.openatZ(dir_fd, path_z, flags, 0);
+        };
+    }
+};
+
 // Uses getdents64 syscall but only for recursive walking.
 // Linux-only: the entire body assumes `std.posix` / `std.os.linux` are available.
 const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else struct {
@@ -498,11 +542,11 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         path_z[start_path.len] = 0;
 
         const dir_fd = if (config.base_dir) |bd| bd.handle else posix.AT.FDCWD;
-        const start_fd = posix.openatZ(dir_fd, &path_z, .{
+        const start_fd = noatime.openatZ(dir_fd, &path_z, .{
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
-        }, 0) catch |err| {
+        }) catch |err| {
             try handleOpenError(start_path, err, config);
             return err;
         };
@@ -852,11 +896,11 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             if (gop.found_existing) return false;
         }
 
-        const subdir_fd = posix.openatZ(parent_fd, name_z.ptr, .{
+        const subdir_fd = noatime.openatZ(parent_fd, name_z.ptr, .{
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
-        }, 0) catch return false;
+        }) catch return false;
 
         if (self.config.follow_symlinks and kind == .directory) {
             if (statFd(subdir_fd)) |key| {
@@ -1104,12 +1148,12 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         // An .unknown entry may be a symlink; without follow mode
         // NOFOLLOW makes such a probe fail (ELOOP) instead of
         // descending through it.
-        const subdir_fd = posix.openatZ(self.current_fd, name_z.ptr, .{
+        const subdir_fd = noatime.openatZ(self.current_fd, name_z.ptr, .{
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
             .NOFOLLOW = kind == .unknown and !self.config.follow_symlinks,
-        }, 0) catch return kind;
+        }) catch return kind;
         // The probe succeeded: an .unknown entry is a directory.
         if (kind == .unknown) kind = .directory;
 
@@ -1546,7 +1590,7 @@ pub const SingleDirIterator = struct {
 
         // Use raw syscall for maximum performance
         const dir_fd = if (base_dir) |bd| bd.handle else linux.AT.FDCWD;
-        const rc = linux.openat(dir_fd, &path_z, flags, 0);
+        const rc = noatime.openat(dir_fd, &path_z, flags);
         // Map onto the same error set std.Io.Dir.openDir produces so
         // openHandled reports an accurate errno through ErrCallbackFn.
         return switch (linux.errno(rc)) {
