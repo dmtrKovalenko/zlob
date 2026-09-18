@@ -170,6 +170,19 @@ pub const WalkerConfig = struct {
     /// Filesystem provider for ALTDIRFUNC support.
     /// When set with valid callbacks, uses custom directory functions instead of real filesystem.
     fs: AltFs = AltFs.real_fs,
+
+    /// Emit entries in strcmp order of their relative paths (getdents64
+    /// backend only; see `supports_sorted`). Each directory is drained and
+    /// its entries sorted before any is emitted; a subdirectory's contents are
+    /// emitted at the position of `name ++ "/"` among its siblings, which is
+    /// exactly where a global byte-wise sort of the full paths would put them.
+    /// Costs one small L1-resident sort per directory instead of one global
+    /// sort over every result.
+    sorted: bool = false,
+
+    /// With `sorted`: directory entries are keyed `name ++ "/"` instead of
+    /// `name`, matching the paths a ZLOB_MARK caller will build from them.
+    sort_marks_dirs: bool = false,
 };
 
 /// Identifies a filesystem object across remounts within a single walk.
@@ -246,6 +259,22 @@ fn statAtFollow(dir_fd: std.posix.fd_t, name_z: [*:0]const u8) ?ResolvedSym {
     var st: std.c.Stat = undefined;
     if (std.c.fstatat(dir_fd, name_z, &st, 0) != 0) return null;
     return .{ .is_dir = isDirMode(st.mode), .key = keyFromCStat(st) };
+}
+
+/// Kind of a dirent whose d_type is DT_UNKNOWN, from one lstat. Unknown
+/// stays unknown when the stat fails.
+fn statKindNoFollow(dir_fd: std.posix.fd_t, name_z: [:0]const u8) EntryKind {
+    if (builtin.os.tag == .linux) {
+        var stx: std.os.linux.Statx = undefined;
+        const rc = std.os.linux.statx(dir_fd, name_z.ptr, std.os.linux.AT.SYMLINK_NOFOLLOW, std.os.linux.STATX{ .TYPE = true }, &stx);
+        if (std.os.linux.errno(rc) != .SUCCESS) return .unknown;
+        return switch (stx.mode & std.os.linux.S.IFMT) {
+            std.os.linux.S.IFDIR => .directory,
+            std.os.linux.S.IFLNK => .sym_link,
+            else => .file,
+        };
+    }
+    return .unknown;
 }
 
 /// Length of the NUL-terminated name in a dirent record. Shared with the
@@ -344,6 +373,18 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
     // `trust_short` (that filesystem was never examined).
     root_dev: u64,
 
+    // Sorted mode (config.sorted): per-level buffered listings. Levels are
+    // strict LIFO, so each level's items and dirent bytes are a tail of these
+    // arenas and popping a level is a shrink. Empty (and free) otherwise.
+    // `sorted_dirents` receives raw getdents64 output (records are 8-byte
+    // multiples, so record starts stay 8-aligned); items point at the
+    // NUL-terminated names inside those records, so nothing is copied.
+    sorted_items: std.ArrayList(SortedItem),
+    sorted_dirents: std.ArrayListAligned(u8, .@"8"),
+    levels: std.ArrayList(SortedLevel),
+
+    pub const supports_sorted = true;
+
     const DirEntry = struct {
         fd: posix.fd_t,
         depth: u16,
@@ -351,6 +392,92 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         path_len: u16,
         path_off: u32,
     };
+
+    /// One buffered entry of a sorted listing. A directory (or, under
+    /// follow_symlinks, a symlink) contributes two items: the entry itself,
+    /// keyed `name`, and a descend marker keyed `name ++ "/"`. Names are the
+    /// NUL-terminated d_name of the record in `sorted_dirents`, so the marker
+    /// can openat them directly.
+    const SortedItem = struct {
+        /// First 8 bytes of the sort key (`name`, or `name ++ "/"` when
+        /// `slash`), big-endian and zero-padded, so a single integer compare
+        /// decides almost every sibling comparison. Equal prefixes fall back
+        /// to the full byte-wise rule in sortedLess.
+        key: u64,
+        name_off: u32,
+        name_len: u16,
+        kind: EntryKind,
+        /// Sort key is `name ++ "/"`: descend markers, and directory
+        /// entries themselves when `sort_marks_dirs` is set.
+        slash: bool,
+        descend: bool,
+    };
+
+    const SortedLevel = struct {
+        fd: posix.fd_t,
+        depth: u16,
+        /// path_len of the parent listing, restored when this level pops.
+        parent_path_len: u16,
+        items_off: u32,
+        items_end: u32,
+        cursor: u32,
+        dirents_off: u32,
+    };
+
+    /// Bytes [i, i+8) of the virtual sort key `name ++ ("/" if slash)`, as a
+    /// big-endian word, zero-padded past the key's end. Reads 8 raw bytes at
+    /// `name + i` whenever i < name_len, which stays inside the dirent
+    /// over-read contract shared with direntNameLen (the record holds the
+    /// NUL and the chunk keeps 8 spare bytes).
+    inline fn sortedKeyAt(name: [*]const u8, name_len: usize, slash: bool, i: usize) u64 {
+        if (i >= name_len) {
+            @branchHint(.unlikely);
+            return if (slash and i == name_len) @as(u64, '/') << 56 else 0;
+        }
+        const raw = mem.readInt(u64, name[i..][0..8], .big);
+        const remaining = name_len - i;
+        if (remaining >= 8) return raw;
+        const shift: u6 = @intCast(8 * (8 - remaining));
+        const kept = raw & (~@as(u64, 0) << shift);
+        if (!slash) return kept;
+        return kept | (@as(u64, '/') << (shift - 8));
+    }
+
+    /// Byte-wise order of the items' keys (`name` or `name ++ "/"`), compared
+    /// a word at a time, with an entry sorting before the descend marker of
+    /// the same name so a directory is emitted before its contents.
+    inline fn sortedLess(dirents: []const u8, a: SortedItem, b: SortedItem) bool {
+        if (a.key != b.key) return a.key < b.key;
+        const ap = dirents.ptr + a.name_off;
+        const bp = dirents.ptr + b.name_off;
+        const max_len: usize = @max(a.name_len, b.name_len);
+        var i: usize = 8;
+        while (i <= max_len) : (i += 8) {
+            const ka = sortedKeyAt(ap, a.name_len, a.slash, i);
+            const kb = sortedKeyAt(bp, b.name_len, b.slash, i);
+            if (ka != kb) return ka < kb;
+        }
+        // Identical keys: same name, same slash. Entry before its contents.
+        return !a.descend and b.descend;
+    }
+
+    /// Non-inline entry point for std.sort.pdq (large listings only).
+    fn sortedLessFn(dirents: []const u8, a: SortedItem, b: SortedItem) bool {
+        return sortedLess(dirents, a, b);
+    }
+
+    /// Hole-shifting insertion sort for the common small listing.
+    fn insertionSortItems(items: []SortedItem, dirents: []const u8) void {
+        var i: usize = 1;
+        while (i < items.len) : (i += 1) {
+            const x = items[i];
+            var j = i;
+            while (j > 0 and sortedLess(dirents, x, items[j - 1])) : (j -= 1) {
+                items[j] = items[j - 1];
+            }
+            items[j] = x;
+        }
+    }
 
     pub fn init(allocator: Allocator, io: Io, start_path: []const u8, config: WalkerConfig) !RecursiveGetdents64Walker {
         _ = io; // Linux getdents64 backend uses raw syscalls; accepted for API parity with StdFsWalker.
@@ -411,6 +538,9 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             .path_len = 0,
             .current_entry = undefined,
             .finished = false,
+            .sorted_items = std.ArrayList(SortedItem).empty,
+            .sorted_dirents = std.ArrayListAligned(u8, .@"8").empty,
+            .levels = std.ArrayList(SortedLevel).empty,
         };
     }
 
@@ -442,10 +572,16 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         for (self.dir_stack.items) |entry| {
             _ = linux.close(entry.fd);
         }
+        for (self.levels.items) |lvl| {
+            _ = linux.close(lvl.fd);
+        }
 
         self.dir_stack.deinit(self.allocator);
         self.path_stack.deinit(self.allocator);
         self.visited.deinit(self.allocator);
+        self.sorted_items.deinit(self.allocator);
+        self.sorted_dirents.deinit(self.allocator);
+        self.levels.deinit(self.allocator);
 
         if (self.getdents_buffer.len > 0) {
             self.allocator.free(self.getdents_buffer);
@@ -454,6 +590,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
     pub fn next(self: *RecursiveGetdents64Walker) !?Entry {
         if (self.finished) return null;
+        if (self.config.sorted) return self.nextSorted();
 
         while (true) {
             // Process entries from current buffer
@@ -475,6 +612,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
     /// never reported. Errors from emitFile abort the walk.
     pub fn walkInto(self: *RecursiveGetdents64Walker, sink: anytype) !void {
         if (self.finished) return;
+        if (self.config.sorted) return self.walkIntoSorted(sink);
         // Loop invariants, hoisted so the per-entry path reads no config.
         const hidden = self.config.hidden;
         const follow = self.config.follow_symlinks;
@@ -550,6 +688,319 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             self.getdents_offset = 0;
             if (self.trust_short and dirent64.shortReadIsEof(bytes_read, cap)) self.current_eof = true;
             return true;
+        }
+    }
+
+    /// Sorted mode: emit the next entry in strcmp order of relative paths.
+    /// The root listing is drained lazily on the first call; `current_fd`
+    /// hands its fd over to level 0 and is -1 from then on.
+    fn nextSorted(self: *RecursiveGetdents64Walker) !?Entry {
+        try self.drainRootSorted(null);
+
+        while (true) {
+            const item = self.popSortedItem() orelse return null;
+            const name_z = self.sortedName(item);
+            const name: []const u8 = name_z;
+
+            // Build path for this entry
+            const path_start = self.path_len;
+            if (self.path_len + 1 + name.len > self.path_buffer.len) {
+                @branchHint(.unlikely);
+                continue;
+            }
+            self.appendNameToPath(name);
+            const name_in_path_start = self.path_len - name.len;
+            const relative_path = self.path_buffer[0..self.path_len];
+
+            if (!item.descend) {
+                self.current_entry = .{
+                    .path = relative_path,
+                    .basename = self.path_buffer[name_in_path_start..][0..name.len],
+                    .kind = item.kind,
+                };
+                // Reset path for next entry; the slices stay valid until then.
+                self.path_len = path_start;
+                return self.current_entry;
+            }
+
+            // Descend marker: the pushed level keeps path_len extended with
+            // its own name until it pops.
+            if (!self.descendSorted(item.parent_fd, name_z, item.kind, relative_path, item.depth, @intCast(path_start), null)) {
+                self.path_len = path_start;
+            }
+        }
+    }
+
+    /// Sorted counterpart of `walkInto`: same sink contract, entries emitted
+    /// in strcmp order of their relative paths. `sink.wantFile` runs inside
+    /// `drainDir` on the raw dirent name, so rejected entries are never
+    /// sorted, let alone given a path. Directories only contribute their
+    /// descend marker (they are never reported), which keeps the per-level
+    /// sort to the matching files plus the subdirectories.
+    pub fn walkIntoSorted(self: *RecursiveGetdents64Walker, sink: anytype) !void {
+        if (self.finished) return;
+        try self.drainRootSorted(sink);
+
+        while (true) {
+            const item = self.popSortedItem() orelse return;
+            const name_z = self.sortedName(item);
+
+            if (!item.descend) {
+                try sink.emitFile(self.path_buffer[0..self.path_len], name_z);
+                continue;
+            }
+
+            const path_start = self.path_len;
+            if (self.path_len + 1 + name_z.len > self.path_buffer.len) {
+                @branchHint(.unlikely);
+                continue;
+            }
+            self.appendNameToPath(name_z);
+            if (!self.descendSorted(item.parent_fd, name_z, item.kind, self.path_buffer[0..self.path_len], item.depth, @intCast(path_start), sink)) {
+                self.path_len = path_start;
+            }
+        }
+    }
+
+    /// Sorted mode: drain the start dir into level 0 on the first call.
+    /// `current_fd` hands its fd over to that level and is -1 from then on.
+    fn drainRootSorted(self: *RecursiveGetdents64Walker, sink: anytype) !void {
+        if (self.current_fd < 0) return;
+        const root_fd = self.current_fd;
+        self.current_fd = -1;
+        self.drainDir(root_fd, 0, sink) catch |err| {
+            _ = linux.close(root_fd);
+            self.finished = true;
+            return err;
+        };
+        self.levels.append(self.allocator, .{
+            .fd = root_fd,
+            .depth = 0,
+            .parent_path_len = 0,
+            .items_off = 0,
+            .items_end = @intCast(self.sorted_items.items.len),
+            .cursor = 0,
+            .dirents_off = 0,
+        }) catch |err| {
+            _ = linux.close(root_fd);
+            self.finished = true;
+            return err;
+        };
+    }
+
+    /// The next buffered item of the innermost level, with the level's fd and
+    /// depth (levels are popped, closed and their arena tail released on the
+    /// way). Null, and `finished`, once every level is exhausted.
+    inline fn popSortedItem(self: *RecursiveGetdents64Walker) ?struct { name_off: u32, name_len: u16, kind: EntryKind, descend: bool, parent_fd: posix.fd_t, depth: u16 } {
+        while (true) {
+            const n_levels = self.levels.items.len;
+            if (n_levels == 0) {
+                self.finished = true;
+                return null;
+            }
+            const lvl = &self.levels.items[n_levels - 1];
+            if (lvl.cursor >= lvl.items_end) {
+                _ = linux.close(lvl.fd);
+                self.sorted_items.shrinkRetainingCapacity(lvl.items_off);
+                self.sorted_dirents.shrinkRetainingCapacity(lvl.dirents_off);
+                self.path_len = lvl.parent_path_len;
+                self.levels.items.len = n_levels - 1;
+                continue;
+            }
+            const item = self.sorted_items.items[lvl.cursor];
+            lvl.cursor += 1;
+            // `lvl` may be invalidated by a push after this; copy what we need.
+            return .{
+                .name_off = item.name_off,
+                .name_len = item.name_len,
+                .kind = item.kind,
+                .descend = item.descend,
+                .parent_fd = lvl.fd,
+                .depth = lvl.depth,
+            };
+        }
+    }
+
+    inline fn sortedName(self: *const RecursiveGetdents64Walker, item: anytype) [:0]const u8 {
+        return self.sorted_dirents.items[item.name_off..][0..item.name_len :0];
+    }
+
+    /// Sorted mode: filter, open, drain and push `name_z` as a new level.
+    /// Returns false (and pushes nothing) when the directory is pruned,
+    /// unopenable, a follow-mode cycle, or out of memory, mirroring the
+    /// silent skips of the unsorted path.
+    fn descendSorted(
+        self: *RecursiveGetdents64Walker,
+        parent_fd: posix.fd_t,
+        name_z: [:0]const u8,
+        kind: EntryKind,
+        relative_path: []const u8,
+        depth: u16,
+        parent_path_len: u16,
+        sink: anytype,
+    ) bool {
+        if (self.config.dir_filter) |filter| {
+            if (!filter.filterDir(relative_path, name_z)) return false;
+        }
+
+        // Symlink pre-flight, as in maybeDescend.
+        if (kind == .sym_link) {
+            const res = statAtFollow(parent_fd, name_z) orelse return false;
+            if (!res.is_dir) return false;
+            if (res.key.dev != self.root_dev) self.trust_short = false;
+            const gop = self.visited.getOrPut(self.allocator, res.key) catch return false;
+            if (gop.found_existing) return false;
+        }
+
+        const subdir_fd = posix.openatZ(parent_fd, name_z.ptr, .{
+            .ACCMODE = .RDONLY,
+            .DIRECTORY = true,
+            .CLOEXEC = true,
+        }, 0) catch return false;
+
+        if (self.config.follow_symlinks and kind == .directory) {
+            if (statFd(subdir_fd)) |key| {
+                if (self.visited.getOrPut(self.allocator, key)) |gop| {
+                    if (gop.found_existing) {
+                        _ = linux.close(subdir_fd);
+                        return false;
+                    }
+                } else |_| {}
+            }
+        }
+
+        const items_off = self.sorted_items.items.len;
+        const dirents_off = self.sorted_dirents.items.len;
+        const ok = blk: {
+            self.levels.ensureUnusedCapacity(self.allocator, 1) catch break :blk false;
+            self.drainDir(subdir_fd, depth + 1, sink) catch break :blk false;
+            break :blk true;
+        };
+        if (!ok) {
+            self.sorted_items.shrinkRetainingCapacity(items_off);
+            self.sorted_dirents.shrinkRetainingCapacity(dirents_off);
+            _ = linux.close(subdir_fd);
+            return false;
+        }
+        self.levels.appendAssumeCapacity(.{
+            .fd = subdir_fd,
+            .depth = depth + 1,
+            .parent_path_len = parent_path_len,
+            .items_off = @intCast(items_off),
+            .items_end = @intCast(self.sorted_items.items.len),
+            .cursor = @intCast(items_off),
+            .dirents_off = @intCast(dirents_off),
+        });
+        return true;
+    }
+
+    /// Sorted mode: read every entry of `fd` (a directory at `depth`) into
+    /// the arenas, then sort the new items. getdents64 writes straight into
+    /// `sorted_dirents`, one chunk of `getdents_buffer_size` at a time, and
+    /// the items index the names in place. Same record validation and hidden
+    /// filtering as parseNextEntry. On error the caller unwinds the arenas;
+    /// nothing here closes `fd`.
+    ///
+    /// `sink` is `null` for `nextSorted` (every entry is buffered) or a
+    /// `walkInto` sink: then non-directories are offered to `sink.wantFile`
+    /// first and directories contribute only their descend marker.
+    fn drainDir(self: *RecursiveGetdents64Walker, fd: posix.fd_t, depth: u16, sink: anytype) !void {
+        const lazy = @TypeOf(sink) != @TypeOf(null);
+        const items_off = self.sorted_items.items.len;
+        const may_have_descend = depth < self.config.max_depth;
+        const follow = self.config.follow_symlinks;
+        const mark = self.config.sort_marks_dirs;
+        const chunk = self.getdents_buffer.len;
+        const cap = chunk - 8;
+
+        while (true) {
+            // Reserve a full chunk but hand the kernel 8 bytes less: the
+            // spare tail backs the over-reads of direntNameLen and sortedKey.
+            try self.sorted_dirents.ensureUnusedCapacity(self.allocator, chunk);
+            const base = self.sorted_dirents.items.len;
+            const dst = self.sorted_dirents.items.ptr + base;
+            const bytes_read = linux.getdents64(fd, dst, cap);
+            if (@as(isize, @bitCast(bytes_read)) < 0 or bytes_read == 0) break;
+            self.sorted_dirents.items.len = base + bytes_read;
+            const buf = self.sorted_dirents.items;
+            const end = base + bytes_read;
+
+            var off = base;
+            while (off + dirent64.NAME_OFFSET <= end) {
+                const reclen = mem.readInt(u16, buf[off + dirent64.RECLEN_OFFSET ..][0..2], .little);
+                const d_type = buf[off + dirent64.TYPE_OFFSET];
+                if (reclen < dirent64.NAME_OFFSET or off + reclen > end) {
+                    @branchHint(.unlikely);
+                    break;
+                }
+                const name_start = off + dirent64.NAME_OFFSET;
+                const name_area = buf[name_start .. off + reclen];
+                off += reclen;
+
+                const name_len = direntNameLen(name_area.ptr, name_area.len);
+                if (name_len == name_area.len) {
+                    @branchHint(.unlikely);
+                    continue;
+                }
+                const name = name_area[0..name_len];
+                if (shouldSkipEntry(name, self.config.hidden)) continue;
+
+                var kind: EntryKind = switch (d_type) {
+                    DT_REG => .file,
+                    DT_DIR => .directory,
+                    DT_LNK => .sym_link,
+                    else => .unknown,
+                };
+                // DT_UNKNOWN (XFS ftype=0, FUSE, ...): the unsorted walk
+                // probes with openat(O_DIRECTORY) when it reaches the entry;
+                // here the kind decides the sort key and the descend marker
+                // up front, so classify with one lstat. Never taken on
+                // filesystems that report d_type.
+                if (kind == .unknown and may_have_descend) {
+                    @branchHint(.unlikely);
+                    kind = statKindNoFollow(fd, name_area[0..name_len :0]);
+                }
+                const is_dir = kind == .directory;
+                const may_descend = may_have_descend and (is_dir or (follow and kind == .sym_link));
+                const entry_slash = is_dir and mark;
+
+                const want_entry = if (lazy) !is_dir and sink.wantFile(name, kind) else true;
+                if (!want_entry and !may_descend) continue;
+
+                try self.sorted_items.ensureUnusedCapacity(self.allocator, 2);
+                if (want_entry) {
+                    self.sorted_items.appendAssumeCapacity(.{
+                        .key = sortedKeyAt(name_area.ptr, name_len, entry_slash, 0),
+                        .name_off = @intCast(name_start),
+                        .name_len = @intCast(name_len),
+                        .kind = kind,
+                        .slash = entry_slash,
+                        .descend = false,
+                    });
+                }
+                if (may_descend) {
+                    self.sorted_items.appendAssumeCapacity(.{
+                        .key = sortedKeyAt(name_area.ptr, name_len, true, 0),
+                        .name_off = @intCast(name_start),
+                        .name_len = @intCast(name_len),
+                        .kind = kind,
+                        .slash = true,
+                        .descend = true,
+                    });
+                }
+            }
+
+            // A short read proves EOF on a trusted filesystem: skip the
+            // confirming call that would only return 0.
+            if (self.trust_short and dirent64.shortReadIsEof(bytes_read, cap)) break;
+        }
+
+        const new_items = self.sorted_items.items[items_off..];
+        const dirents: []const u8 = self.sorted_dirents.items;
+        if (new_items.len <= 32) {
+            insertionSortItems(new_items, dirents);
+        } else {
+            std.sort.pdq(SortedItem, new_items, dirents, sortedLessFn);
         }
     }
 
@@ -733,6 +1184,9 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 };
 
 const StdFsWalker = struct {
+    /// `WalkerConfig.sorted` is ignored here; callers sort globally instead.
+    pub const supports_sorted = false;
+
     allocator: Allocator,
     io: Io,
     config: WalkerConfig,
