@@ -8,6 +8,7 @@ const scan = @import("scan.zig");
 const scan_linux = @import("scan_linux.zig");
 const compiled_pattern = @import("../compiled_pattern.zig");
 const ignore_rules_mod = @import("ignore_rules.zig");
+const sort_mod = @import("sort.zig");
 
 const SharedWorkerState = worker.SharedWorkerState;
 const Worker = worker.Worker;
@@ -35,6 +36,7 @@ pub const __internal_test_api = if (builtin.is_test) struct {
     pub const max_dir_chain = ignore_rules_mod.__internal_test_api.max_dir_chain;
     pub const isIgnoredResolved = ignore_rules_mod.__internal_test_api.isIgnoredResolved;
     pub const isIgnoredPathSlow = ignore_rules_mod.__internal_test_api.isIgnoredPathSlow;
+    pub const sortEntries = sort_mod.sortEntries;
 } else struct {};
 
 pub const WalkError = types.WalkError;
@@ -79,6 +81,9 @@ pub const EntryAdapter = struct {
     pub inline fn path(o: *const Entry) []const u8 {
         return o.path;
     }
+    pub inline fn relativePath(o: *const Entry) []const u8 {
+        return o.relativePath();
+    }
 };
 
 fn runSink(ctx: *anyopaque, walk_id: u32, entry: *const Entry) VisitAction {
@@ -113,7 +118,8 @@ pub fn collect(gpa: Allocator, root: []const u8, options: Options) WalkError!Wal
 /// `Adapter.convert(out: *Out, entry: *const Entry) void`, so a foreign
 /// record layout (e.g. the C ABI's `zlob_walk_entry_t`) never goes through
 /// an intermediate `Entry[]` plus a second fill pass. `Adapter.path` must
-/// return the path an `Out` record points at (used by `Options.sort`).
+/// return the path an `Out` record points at and `Adapter.relativePath` its
+/// root-relative tail (the `Options.sort` key).
 /// `entry.path` handed to `convert` already lives in chunk storage: stable
 /// for the result's lifetime and NUL-terminated. `entry.meta` is only stable
 /// past `convert` when `Adapter.retain_meta` is true (it then points into
@@ -202,11 +208,10 @@ pub fn collectAs(gpa: Allocator, root: []const u8, options: Options, comptime Ad
         ws.chunks.clearRetainingCapacity(); // ownership moved to Results
     }
 
-    if (options.sort) std.sort.pdq(Out, entries, {}, struct {
-        fn lessThan(_: void, a: Out, b: Out) bool {
-            return mem.order(u8, Adapter.path(&a), Adapter.path(&b)) == .lt;
-        }
-    }.lessThan);
+    if (options.sort) {
+        const io = options.io orelse std.Io.Threaded.global_single_threaded.io();
+        entries = try sort_mod.sortAs(Out, Adapter.relativePath, gpa, io, entries, n_workers);
+    }
 
     return .{ .entries = entries, .chunks = chunks, .metas = metas, .allocator = gpa, .ignore_rules = rules };
 }

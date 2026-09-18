@@ -917,6 +917,9 @@ const CWalkAdapter = struct {
     pub inline fn path(o: *const zlob_walk_entry_t) []const u8 {
         return o.path[0..o.path_len];
     }
+    pub inline fn relativePath(o: *const zlob_walk_entry_t) []const u8 {
+        return o.path[o.relative_offset..o.path_len];
+    }
 };
 
 const WalkResultHolder = struct {
