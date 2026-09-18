@@ -169,7 +169,7 @@ pub const SharedWorkerState = struct {
         // workers already running (worker 0 at minimum), so the walk still
         // completes, just with less parallelism.
         for (sh.threads, 1..) |*t, i| {
-            t.* = Thread.spawn(workerThreadMain, @ptrCast(&sh.workers[i])) catch break;
+            t.* = Thread.spawn(workerThreadMain, @ptrCast(&sh.workers[i]), sh.options.thread_stack_size) catch break;
             sh.spawned += 1;
         }
 

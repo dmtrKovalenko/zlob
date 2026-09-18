@@ -64,6 +64,30 @@ const pthread_join: ?PthreadJoinFn = if (needs_weak_pthread)
 else
     null;
 
+/// `pthread_attr_t` is 56 bytes on glibc x86_64, 64 on musl x86_64, 24 on
+/// bionic (32-bit) / 56 on bionic 64-bit. 64 bytes of 16-byte-aligned storage
+/// covers every Linux libc we can be linked against.
+const PthreadAttr = extern struct { opaque_bytes: [64]u8 align(16) };
+
+const PthreadAttrInitFn = *const fn (attr: *PthreadAttr) callconv(.c) c_int;
+const PthreadAttrDestroyFn = *const fn (attr: *PthreadAttr) callconv(.c) c_int;
+const PthreadAttrSetStackSizeFn = *const fn (attr: *PthreadAttr, size: usize) callconv(.c) c_int;
+
+const pthread_attr_init: ?PthreadAttrInitFn = if (needs_weak_pthread)
+    @extern(?PthreadAttrInitFn, .{ .name = "pthread_attr_init", .linkage = .weak })
+else
+    null;
+
+const pthread_attr_destroy: ?PthreadAttrDestroyFn = if (needs_weak_pthread)
+    @extern(?PthreadAttrDestroyFn, .{ .name = "pthread_attr_destroy", .linkage = .weak })
+else
+    null;
+
+const pthread_attr_setstacksize: ?PthreadAttrSetStackSizeFn = if (needs_weak_pthread)
+    @extern(?PthreadAttrSetStackSizeFn, .{ .name = "pthread_attr_setstacksize", .linkage = .weak })
+else
+    null;
+
 /// True when `std.Thread`'s raw-clone backend can be trusted, i.e. Zig's start
 /// code ran and initialized the TLS descriptor that backend reads. `initStatic`
 /// always leaves a non-zero size behind, so zero means "never ran".
@@ -78,14 +102,60 @@ pub const SpawnError = error{
     SpawnFailed,
 };
 
+/// Default helper-thread stack size: 1 MiB.
+///
+/// `std.Thread`'s default is 16 MiB, and glibc keeps at most 40 MiB
+/// (`glibc.pthread.stack_cache_size`) of exited threads' stacks around for
+/// reuse. Fifteen 16 MiB stacks blow through that cache, so every walk pays
+/// for 13-15 fresh `mmap(MAP_STACK)` + `mprotect` guard + first-touch faults,
+/// and `munmap` (TLB shootdowns under `mmap_lock`) at join -- about 2/3 of a
+/// small walk's page faults. Fifteen 1 MiB stacks (15 MiB) fit in the cache
+/// and are reused across walks with no mmap traffic at all.
+///
+/// The walker itself is non-recursive and keeps its big buffers off-stack
+/// (`Worker.io_buf`, `Worker.path_buf` live in the workers array), so the
+/// only stack consumer of note is the caller's visitor/sink callback. Rust
+/// defaults threads to 2 MiB and bionic to 1 MiB, so 1 MiB is a familiar
+/// floor; `Options.thread_stack_size` raises it when a callback needs more.
+///
+/// Do not go much lower: glibc rejects sizes that cannot also hold the
+/// static TLS block plus the guard page (256 KiB fails with EINVAL on a
+/// typical desktop glibc), and `std.Thread.spawn` maps EINVAL to
+/// `unreachable`, which in ReleaseFast silently degrades to a single-threaded
+/// walk. `spawn` below additionally falls back to `FALLBACK_STACK_SIZE` when
+/// the requested size is refused, so an unusual libc cannot cost parallelism.
+pub const DEFAULT_STACK_SIZE: usize = 1 << 20;
+
+/// Second attempt when the libc refuses `stack_size`; matches the
+/// `std.Thread` default so behaviour is at worst what it was before.
+pub const FALLBACK_STACK_SIZE: usize = 16 << 20;
+
+/// Anything below this is refused by glibc (static TLS + guard) and would
+/// only silently serialize the walk, so clamp rather than try.
+const MIN_STACK_SIZE: usize = 512 << 10;
+
 pub const Thread = struct {
     inner: union(enum) {
         pthread: pthread_t,
         std: std.Thread,
     },
 
-    /// Spawn `f(ctx)` on a new thread. `ctx` must outlive the thread.
-    pub fn spawn(comptime f: fn (*anyopaque) void, ctx: *anyopaque) SpawnError!Thread {
+    /// Spawn `f(ctx)` on a new thread with a `stack_size`-byte stack (0 =
+    /// `DEFAULT_STACK_SIZE`). `ctx` must outlive the thread. If the libc
+    /// refuses the requested size the spawn is retried once with
+    /// `FALLBACK_STACK_SIZE`.
+    pub fn spawn(comptime f: fn (*anyopaque) void, ctx: *anyopaque, stack_size: usize) SpawnError!Thread {
+        const requested = @max(if (stack_size == 0) DEFAULT_STACK_SIZE else stack_size, MIN_STACK_SIZE);
+        return spawnSized(f, ctx, requested) catch |err| switch (err) {
+            error.SpawnFailed => if (requested < FALLBACK_STACK_SIZE)
+                spawnSized(f, ctx, FALLBACK_STACK_SIZE)
+            else
+                err,
+            else => err,
+        };
+    }
+
+    fn spawnSized(comptime f: fn (*anyopaque) void, ctx: *anyopaque, stack_size: usize) SpawnError!Thread {
         if (needs_weak_pthread) {
             if (pthread_create) |create| {
                 const trampoline = struct {
@@ -95,18 +165,33 @@ pub const Thread = struct {
                     }
                 }.entry;
 
+                // Build a pthread_attr carrying the stack size. If the attr
+                // functions did not resolve (a libc exporting pthread_create
+                // but not the attr API is not something we expect, but the
+                // symbols are weak) fall back to the host libc's defaults.
+                var attr: PthreadAttr = undefined;
+                var attr_ptr: ?*const anyopaque = null;
+                const have_attr = pthread_attr_init != null and
+                    pthread_attr_setstacksize != null and
+                    pthread_attr_destroy != null;
+                if (have_attr and pthread_attr_init.?(&attr) == 0) {
+                    if (pthread_attr_setstacksize.?(&attr, stack_size) == 0) {
+                        attr_ptr = @ptrCast(&attr);
+                    }
+                }
+                defer {
+                    if (have_attr and attr_ptr != null) _ = pthread_attr_destroy.?(&attr);
+                }
+                if (attr_ptr == null and stack_size != FALLBACK_STACK_SIZE) return error.SpawnFailed;
+
                 var handle: pthread_t = 0;
-                // Null attrs = the host libc's defaults. The walker keeps its
-                // per-worker buffers on the heap (`Worker.io_buf`, `path_buf`
-                // live in the workers array) and traverses through an explicit
-                // queue rather than recursion, so the default stack is ample.
-                if (create(&handle, null, trampoline, ctx) != 0) return error.SpawnFailed;
+                if (create(&handle, attr_ptr, trampoline, ctx) != 0) return error.SpawnFailed;
                 return .{ .inner = .{ .pthread = handle } };
             }
             if (!zigStartRan()) return error.ThreadsUnavailable;
         }
 
-        const t = std.Thread.spawn(.{}, f, .{ctx}) catch return error.SpawnFailed;
+        const t = std.Thread.spawn(.{ .stack_size = stack_size }, f, .{ctx}) catch return error.SpawnFailed;
         return .{ .inner = .{ .std = t } };
     }
 

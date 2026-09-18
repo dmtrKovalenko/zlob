@@ -194,6 +194,13 @@ pub const TrustShortGetdents = enum(u8) { auto, never };
 pub const Options = struct {
     /// Worker thread count. 0 = one per CPU (capped). 1 = caller thread only.
     threads: u16 = 0,
+    /// Stack size in bytes for each helper worker thread. 0 = 1 MiB
+    /// (`thread.DEFAULT_STACK_SIZE`). Small stacks let glibc's stack cache
+    /// reuse them across walks instead of mmap/munmap-ing 16 MiB per thread
+    /// per walk. The walker itself needs very little stack; raise this only
+    /// when a `Visitor`/sink callback running on worker threads needs more.
+    /// Values below 512 KiB are clamped up (glibc refuses them).
+    thread_stack_size: usize = 0,
     /// Maximum entry depth to yield/descend (root children = 1). 0 = unlimited.
     max_depth: u16 = 0,
     /// Descend into symlinked directories (cycles are detected and broken).
