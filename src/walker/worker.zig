@@ -40,6 +40,10 @@ const DirTask = queue_mod.DirTask;
 
 pub const WalkError = types.WalkError;
 pub const SinkFn = *const fn (ctx: *anyopaque, worker_id: u32, entry: *const Entry) VisitAction;
+/// Called once by every worker (on its own thread) after it has drained the
+/// queue, before the helper thread exits. `sh.spawned` is final by then for
+/// worker 0 (only worker 0 spawns, and only from inside its loop).
+pub const FinishFn = *const fn (ctx: *anyopaque, worker_id: u32, sh: *SharedWorkerState) void;
 
 const Failure = enum(u8) { none = 0, aborted = 1, oom = 2, read_failed = 3, permission_denied = 4, name_too_long = 5 };
 const InodeKey = struct { dev: u64, ino: u64 };
@@ -107,6 +111,7 @@ pub const SharedWorkerState = struct {
     failure: std.atomic.Value(u8) = .init(0),
     sink: SinkFn,
     sink_ctx: *anyopaque,
+    finish: ?FinishFn = null,
     pattern: ?*const CompiledPattern = null,
     /// Literal directory prefix of the pattern, used to prune traversal
     /// outside the pattern's scope ("src/lib" for "src/lib/**/*.c").
@@ -329,6 +334,7 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
         freeTask(state, task);
         state.queue.taskDone(state.io);
     }
+    if (state.finish) |f| f(state.sink_ctx, worker.id, state);
 }
 
 fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void {
