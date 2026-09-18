@@ -108,6 +108,13 @@ typedef struct {
  * them). A (dev,ino) visited-set breaks cycles, so each physical dir is walked
  * once — never loops, never double-emits a file. */
 #define ZLOB_FOLLOW_SYMLINKS      (1 << 27)
+/* Opt-in: run recursive `**` patterns over the parallel walker (up to
+ * zlob_set_threads() worker threads, default 4). Results are identical to the
+ * serial path (sorted unless ZLOB_NOSORT; under NOSORT the order differs).
+ * Not used with ZLOB_ALTDIRFUNC, ZLOB_GITIGNORE, zlob_at(), or brace
+ * alternatives before the `**` -- those fall back to the serial walker.
+ * errfunc may be invoked from worker threads; calls are serialized. */
+#define ZLOB_PARALLEL             (1 << 28)
 
 /* Recommended modern defaults for globbing:
  * - BRACE: Brace expansion {a,b,c}
@@ -155,6 +162,10 @@ int zlob(const char *restrict pattern, int flags, int (*errfunc)(const char *epa
  * Safe to call on an already-freed or zero-initialized zlob_t.
  */
 void zlobfree(zlob_t *pzlob);
+
+/* Worker thread count for ZLOB_PARALLEL recursive globs. Default 4.
+ * 0 = one per CPU (capped at 16). Process-wide; not per-call. */
+void zlob_set_threads(unsigned threads);
 
 /**
  * Same as `zlob` but interpreted relative to `base_path`.

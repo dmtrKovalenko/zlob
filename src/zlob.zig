@@ -346,6 +346,21 @@ pub const ResultsList = struct {
         return self.count;
     }
 
+    /// Bulk-append every path of `other` (records and bytes copied wholesale,
+    /// offsets rebased). `other` is left untouched.
+    pub fn appendAll(self: *ResultsList, other: *ResultsList) Allocator.Error!void {
+        const n = other.count;
+        if (n == 0) return;
+        if (self.count + n > self.capacity) try self.grow(self.count + n);
+        const base = self.bytes.items.len;
+        try self.bytes.appendSlice(self.allocator, other.bytes.items);
+        const src_off = other.offsetsPtr()[0..n];
+        const dst_off = self.offsetsPtr()[self.count..][0..n];
+        for (dst_off, src_off) |*d, o| d.* = @intCast(base + o);
+        @memcpy(self.lengthsPtr()[self.count..][0..n], other.lengthsPtr()[0..n]);
+        self.count += n;
+    }
+
     /// View of the i-th path's bytes. Invalidated by any subsequent addPath.
     pub fn getPath(self: *ResultsList, i: usize) []const u8 {
         return self.bytes.items[self.offsetsPtr()[i]..][0..self.lengthsPtr()[i]];
@@ -1471,7 +1486,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     // Under follow_symlinks the visited-set cycle check makes the result set
     // depend on traversal order (which alias of a shared target dir wins), so
     // keep the unsorted walk there to preserve the exact same set.
-    const walk_sorted = pre_ds_count == 0 and !flags.nosort and !flags.follow_symlinks and
+    var walk_sorted = pre_ds_count == 0 and !flags.nosort and !flags.follow_symlinks and
         walker.DefaultWalker.supports_sorted;
 
     // Handle pre-doublestar components (braces BEFORE **)
@@ -1492,6 +1507,12 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
             base_dir,
             fs_provider,
         );
+    } else if (flags.parallel and base_dir == null and !fs_provider.isAltDirFunc() and gitignore_filter == null and
+        try globRecursiveWalkParallel(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc))
+    {
+        // ZLOB_PARALLEL: the parallel walker filled all_results in worker
+        // completion order; finalizeResults sorts it like any unsorted walk.
+        walk_sorted = false;
     } else {
         // Use unified walker for both simple (**/*.txt) and complex (**/foo/*.txt) patterns
         try globRecursiveWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc, io, base_dir, fs_provider, walk_sorted);
@@ -2135,6 +2156,241 @@ const RecursiveMatchSink = struct {
         return emitRecursiveMatch(self.results, self.prefix, dir_rel, name);
     }
 };
+
+// ============================================================================
+// ZLOB_PARALLEL: recursive `**` globs over the parallel walker
+// ============================================================================
+
+/// Worker threads used by ZLOB_PARALLEL recursive globs. Four is the
+/// break-even-safe default: on the kernel tree t4 is never slower than t1
+/// above ~2k entries while t16 loses below ~4k. 0 = walker default (CPU
+/// count, capped at 16).
+var glob_parallel_threads: u16 = 4;
+
+pub fn setGlobParallelThreads(n: u16) void {
+    @atomicStore(u16, &glob_parallel_threads, n, .monotonic);
+}
+
+pub fn getGlobParallelThreads() u16 {
+    return @atomicLoad(u16, &glob_parallel_threads, .monotonic);
+}
+
+/// A C errfunc carries no context, so a parallel walk can't hand each worker
+/// a per-call closure. Instead one process-wide slot holds the errfunc of the
+/// parallel glob in flight and a trampoline serializes calls through a mutex.
+/// A second concurrent parallel glob that also needs an errfunc simply takes
+/// the serial path (see `acquireParallelErrfunc`).
+var par_errfunc_mutex: std.Io.Mutex = .init;
+var par_errfunc_slot = std.atomic.Value(usize).init(0);
+
+inline fn parErrfuncIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn parallelErrfuncTrampoline(epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int {
+    par_errfunc_mutex.lockUncancelable(parErrfuncIo());
+    defer par_errfunc_mutex.unlock(parErrfuncIo());
+    const raw = par_errfunc_slot.load(.acquire);
+    if (raw == 0) return 0;
+    const cb: walker.ErrCallbackFn = @ptrFromInt(raw);
+    return cb(epath, eerrno);
+}
+
+/// Returns false when the slot is busy (another parallel glob with an errfunc
+/// is running); the caller then falls back to the serial walker.
+fn acquireParallelErrfunc(errfunc: zlob_errfunc_t) bool {
+    const cb = errfunc orelse return true;
+    return par_errfunc_slot.cmpxchgStrong(0, @intFromPtr(cb), .acq_rel, .acquire) == null;
+}
+
+fn releaseParallelErrfunc(errfunc: zlob_errfunc_t) void {
+    if (errfunc == null) return;
+    // Take the mutex so a trampoline call already past its load can't run
+    // the errfunc after we return to the caller.
+    par_errfunc_mutex.lockUncancelable(parErrfuncIo());
+    defer par_errfunc_mutex.unlock(parErrfuncIo());
+    par_errfunc_slot.store(0, .release);
+}
+
+const ParallelGlobSink = struct {
+    lists: []ResultsList,
+    failed: []bool,
+    rec_pattern: *const RecursivePattern,
+    info: *const PatternInfo,
+    pattern_ctx: PatternContext,
+    dir_contexts: []const PatternContext,
+    start_dir: []const u8,
+    use_dirname: bool,
+    enable_extglob: bool,
+    file_pattern_is_extglob: bool,
+    file_alt_extglob_mask: u64,
+    mark: bool,
+
+    fn visit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
+        const self: *ParallelGlobSink = @ptrCast(@alignCast(ctx.?));
+        const rec_pattern = self.rec_pattern;
+        const is_dir = entry.kind == .directory;
+        // report_dirs already excludes directories unless directories_only.
+        const rel_path = entry.relativePath();
+
+        if (rec_pattern.dir_components.len > 0) {
+            const last_slash = mem.lastIndexOf(u8, rel_path, "/") orelse return .cont;
+            const parent_path = rel_path[0..last_slash];
+            if (!matchDirComponents(parent_path, rec_pattern.dir_components, rec_pattern.dir_component_alternatives, self.dir_contexts, self.enable_extglob)) {
+                return .cont;
+            }
+        }
+
+        const matches = matchRecursiveBasename(
+            entry.basename(),
+            rec_pattern,
+            &self.pattern_ctx,
+            self.enable_extglob,
+            self.file_pattern_is_extglob,
+            self.file_alt_extglob_mask,
+        );
+        if (!matches) return .cont;
+        if (self.info.directories_only and !is_dir) return .cont;
+
+        const needs_mark = self.mark and is_dir;
+        const base_path_len = if (self.use_dirname) self.start_dir.len + 1 + rel_path.len else rel_path.len;
+        const alloc_len = if (needs_mark) base_path_len + 1 else base_path_len;
+
+        const list = &self.lists[entry.worker_id];
+        const path_buf = list.addPath(alloc_len) catch {
+            self.failed[entry.worker_id] = true;
+            return .stop;
+        };
+        if (self.use_dirname) {
+            @memcpy(path_buf[0..self.start_dir.len], self.start_dir);
+            path_buf[self.start_dir.len] = '/';
+            @memcpy(path_buf[self.start_dir.len + 1 ..][0..rel_path.len], rel_path);
+        } else {
+            @memcpy(path_buf[0..rel_path.len], rel_path);
+        }
+        if (needs_mark) path_buf[base_path_len] = '/';
+        return .cont;
+    }
+};
+
+/// ZLOB_PARALLEL path of `globRecursiveWalk`: same per-entry matching, but the
+/// tree is enumerated by the work-stealing parallel walker (`walk.run`) and
+/// each worker appends into its own ResultsList (no locking); the lists are
+/// concatenated into `results` afterwards. Returns false (without touching
+/// `results`) when the parallel path can't be used and the caller should run
+/// the serial walker instead.
+fn globRecursiveWalkParallel(
+    allocator: std.mem.Allocator,
+    rec_pattern: *const RecursivePattern,
+    start_dir: []const u8,
+    flags: ZlobFlags,
+    results: *ResultsList,
+    info: *const PatternInfo,
+    errfunc: zlob_errfunc_t,
+) !bool {
+    const has_dir_components = rec_pattern.dir_components.len > 0;
+    const pattern_ctx = PatternContext.init(rec_pattern.file_pattern);
+    const enable_extglob = flags.extglob;
+
+    var dir_component_contexts: [32]PatternContext = undefined;
+    if (has_dir_components) {
+        for (rec_pattern.dir_components, 0..) |comp, i| {
+            dir_component_contexts[i] = PatternContext.init(comp);
+        }
+    }
+
+    var pattern_wants_hidden = pattern_ctx.starts_with_dot;
+    if (has_dir_components and !pattern_wants_hidden) {
+        for (rec_pattern.dir_components) |comp| {
+            if (comp.len > 0 and comp[0] == '.') {
+                pattern_wants_hidden = true;
+                break;
+            }
+        }
+    }
+
+    const opts = walk.Options{
+        .threads = getGlobParallelThreads(),
+        .follow_symlinks = flags.follow_symlinks,
+        .include_hidden = flags.period or pattern_wants_hidden,
+        .respect_git = false,
+        .skip_git_dir = false,
+        .report_dirs = info.directories_only,
+        .pattern = null,
+        .err_callback = if (errfunc != null) &parallelErrfuncTrampoline else null,
+        .abort_on_error = flags.err,
+    };
+    const n_workers = walk.effectiveThreads(&opts);
+    // A single worker only adds the walker's thread/merge overhead on top of
+    // the serial walk (measured +6.7% at t1); let the caller run serially.
+    if (n_workers <= 1) return false;
+
+    if (!acquireParallelErrfunc(errfunc)) return false;
+    defer releaseParallelErrfunc(errfunc);
+
+    const lists = try allocator.alloc(ResultsList, n_workers);
+    defer allocator.free(lists);
+    for (lists) |*l| l.* = ResultsList.init(allocator);
+    defer for (lists) |*l| l.deinit();
+    const failed = try allocator.alloc(bool, n_workers);
+    defer allocator.free(failed);
+    @memset(failed, false);
+
+    var sink = ParallelGlobSink{
+        .lists = lists,
+        .failed = failed,
+        .rec_pattern = rec_pattern,
+        .info = info,
+        .pattern_ctx = pattern_ctx,
+        .dir_contexts = dir_component_contexts[0..rec_pattern.dir_components.len],
+        .start_dir = start_dir,
+        .use_dirname = start_dir.len > 0 and !mem.eql(u8, start_dir, "."),
+        .enable_extglob = enable_extglob,
+        .file_pattern_is_extglob = enable_extglob and fnmatch_impl.containsExtglob(rec_pattern.file_pattern),
+        .file_alt_extglob_mask = if (enable_extglob) altExtglobMask(rec_pattern.file_alternatives) else 0,
+        .mark = flags.mark,
+    };
+
+    // The serial walker's root is start_dir (or cwd when empty/"."); the
+    // parallel walker takes "" for cwd and joins root + "/" + rel itself.
+    const root: []const u8 = if (sink.use_dirname) start_dir else "";
+    const rules = walk.run(allocator, root, opts, .{ .context = @ptrCast(&sink), .visit = &ParallelGlobSink.visit }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // Serial path maps every walker failure to Aborted (only reachable
+        // with ZLOB_ERR / a non-zero errfunc return).
+        else => return error.Aborted,
+    };
+    rules.deinit();
+    allocator.destroy(rules);
+
+    for (failed) |f| if (f) return error.OutOfMemory;
+
+    var total_count: usize = 0;
+    var total_bytes: usize = 0;
+    var non_empty: usize = 0;
+    var last_non_empty: usize = 0;
+    for (lists, 0..) |*l, i| {
+        if (l.count == 0) continue;
+        non_empty += 1;
+        last_non_empty = i;
+        total_count += l.count;
+        total_bytes += l.bytes.items.len;
+    }
+    if (total_count == 0) return true;
+
+    if (non_empty == 1 and results.count == 0) {
+        // Single producer (t1 or a shallow tree): adopt its list outright.
+        results.deinit();
+        results.* = lists[last_non_empty];
+        lists[last_non_empty] = ResultsList.init(allocator);
+        return true;
+    }
+
+    if (results.count + total_count > results.capacity) try results.grow(results.count + total_count);
+    try results.bytes.ensureUnusedCapacity(allocator, total_bytes);
+    for (lists) |*l| try results.appendAll(l);
+    return true;
+}
 
 fn matchDirComponents(
     path: []const u8,

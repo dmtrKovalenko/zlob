@@ -900,6 +900,142 @@ test "isIgnoredResolved: a nested negation re-includes a parent-excluded dir" {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ZLOB_PARALLEL: recursive ** globs routed through the parallel walker must
+// produce exactly the serial result set.
+// ---------------------------------------------------------------------------
+
+const c_lib = @import("c_lib");
+const zlob_flags = @import("zlob_flags");
+
+fn globPathsSorted(alloc: std.mem.Allocator, pattern: [:0]const u8, flags: c_int) ![][]u8 {
+    var g: c_lib.zlob_t = undefined;
+    const rc = c_lib.zlob(pattern.ptr, flags, null, &g);
+    if (rc == zlob_flags.ZLOB_NOMATCH) return try alloc.alloc([]u8, 0);
+    try testing.expectEqual(@as(c_int, 0), rc);
+    defer c_lib.zlobfree(&g);
+    const out = try alloc.alloc([]u8, g.zlo_pathc);
+    for (out, 0..) |*o, i| o.* = try alloc.dupe(u8, std.mem.span(g.zlo_pathv[g.zlo_offs + i]));
+    std.sort.pdq([]u8, out, {}, struct {
+        fn lt(_: void, a: []u8, b: []u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+    return out;
+}
+
+fn expectParallelEqualsSerial(alloc: std.mem.Allocator, pattern: [:0]const u8, base_flags: c_int, threads: u16) !void {
+    const serial = try globPathsSorted(alloc, pattern, base_flags);
+    defer {
+        for (serial) |p| alloc.free(p);
+        alloc.free(serial);
+    }
+    zlob.setGlobParallelThreads(threads);
+    defer zlob.setGlobParallelThreads(4);
+    const parallel = try globPathsSorted(alloc, pattern, base_flags | zlob_flags.ZLOB_PARALLEL);
+    defer {
+        for (parallel) |p| alloc.free(p);
+        alloc.free(parallel);
+    }
+    try testing.expectEqual(serial.len, parallel.len);
+    for (serial, parallel) |s, p| try testing.expectEqualStrings(s, p);
+}
+
+test "ZLOB_PARALLEL recursive glob matches serial result set" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("parglob");
+    defer t.deinit();
+
+    try t.mkdir("src");
+    try t.mkdir("src/a");
+    try t.mkdir("src/a/deep");
+    try t.mkdir("src/b");
+    try t.mkdir("lib");
+    try t.mkdir("lib/foo");
+    try t.mkdir(".hidden");
+    try t.mkdir("src/.hdir");
+    try t.write("root.c", "");
+    try t.write("src/main.c", "");
+    try t.write("src/main.h", "");
+    try t.write("src/a/x.c", "");
+    try t.write("src/a/deep/y.c", "");
+    try t.write("src/a/deep/z.txt", "");
+    try t.write("src/b/w.c", "");
+    try t.write("lib/foo/f.c", "");
+    try t.write("lib/foo/Makefile", "");
+    try t.write(".hidden/h.c", "");
+    try t.write("src/.hdir/hh.c", "");
+    try t.write("src/.dot.c", "");
+
+    const base: c_int = zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE;
+    var pat_buf: [512:0]u8 = undefined;
+    const patterns = [_][]const u8{
+        "**/*.c",       "**/*.{c,h}", "**/foo/*.c", "src/**/*.c", "**/deep/*",
+        "**/.*.c",      "**",         "**/",        "src/**",     "lib/**/Makefile",
+        "**/nomatch.x", "**/*",
+    };
+    for ([_]u16{ 1, 4, 16 }) |threads| {
+        for (patterns) |p| {
+            const pat = try std.fmt.bufPrintZ(&pat_buf, "{s}/{s}", .{ t.root, p });
+            try expectParallelEqualsSerial(alloc, pat, base, threads);
+            try expectParallelEqualsSerial(alloc, pat, base | zlob_flags.ZLOB_MARK, threads);
+            try expectParallelEqualsSerial(alloc, pat, base | zlob_flags.ZLOB_PERIOD, threads);
+            try expectParallelEqualsSerial(alloc, pat, base | zlob_flags.ZLOB_ONLYDIR | zlob_flags.ZLOB_MARK, threads);
+        }
+    }
+}
+
+var par_errfunc_calls: usize = 0;
+fn countingErrfunc(_: [*:0]const u8, _: c_int) callconv(.c) c_int {
+    par_errfunc_calls += 1;
+    return 0;
+}
+fn abortingErrfunc(_: [*:0]const u8, _: c_int) callconv(.c) c_int {
+    par_errfunc_calls += 1;
+    return 1;
+}
+
+test "ZLOB_PARALLEL errfunc is delivered and can abort" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    // Only meaningful when running unprivileged (root can read a 000 dir).
+    if (std.os.linux.getuid() == 0) return error.SkipZigTest;
+
+    var t: TestTree = .{ .io = undefined };
+    try t.init("parglob_err");
+    defer t.deinit();
+    try t.mkdir("ok");
+    try t.write("ok/a.c", "");
+    try t.mkdir("locked");
+    try t.write("locked/b.c", "");
+    var buf: [512:0]u8 = undefined;
+    const locked = try std.fmt.bufPrintZ(&buf, "{s}/locked", .{t.root});
+    try testing.expectEqual(@as(usize, 0), std.os.linux.chmod(locked.ptr, 0));
+    defer _ = std.os.linux.chmod(locked.ptr, 0o755);
+
+    var pat_buf: [512:0]u8 = undefined;
+    const pat = try std.fmt.bufPrintZ(&pat_buf, "{s}/**/*.c", .{t.root});
+    const base: c_int = zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE | zlob_flags.ZLOB_PARALLEL;
+
+    par_errfunc_calls = 0;
+    var g: c_lib.zlob_t = undefined;
+    var rc = c_lib.zlob(pat.ptr, base, countingErrfunc, &g);
+    try testing.expectEqual(@as(c_int, 0), rc);
+    try testing.expectEqual(@as(usize, 1), g.zlo_pathc);
+    c_lib.zlobfree(&g);
+    try testing.expectEqual(@as(usize, 1), par_errfunc_calls);
+
+    par_errfunc_calls = 0;
+    rc = c_lib.zlob(pat.ptr, base, abortingErrfunc, &g);
+    try testing.expectEqual(zlob_flags.ZLOB_ABORTED, rc);
+    try testing.expectEqual(@as(usize, 1), par_errfunc_calls);
+
+    rc = c_lib.zlob(pat.ptr, base | zlob_flags.ZLOB_ERR, null, &g);
+    try testing.expectEqual(zlob_flags.ZLOB_ABORTED, rc);
+}
+
 test "isIgnoredResolved: overflow beyond the directory-chain limit falls back and matches" {
     const alloc = testing.allocator;
     var rules: walk.IgnoreRules = .{ .allocator = alloc };
