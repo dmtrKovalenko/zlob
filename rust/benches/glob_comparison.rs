@@ -95,6 +95,10 @@ struct PatternSpec {
     /// symlinks (e.g. the kernel's `scripts/dtc/include-prefixes/*`), where
     /// following links changes both the result set and the walk cost.
     bench_follow: bool,
+    /// Also benchmark zlob without `NOSORT` (sorted output) for this pattern.
+    /// Only worth it for the large recursive result sets, where the sort is a
+    /// measurable share of the total.
+    bench_sort: bool,
 }
 
 const PATTERNS: &[PatternSpec] = &[
@@ -104,6 +108,7 @@ const PATTERNS: &[PatternSpec] = &[
         supports_brace: false,
         fs_samples: 100,
         bench_follow: false,
+        bench_sort: false,
     },
     PatternSpec {
         label: "top_makefile", // */Makefile        top-level makefiles
@@ -111,6 +116,7 @@ const PATTERNS: &[PatternSpec] = &[
         supports_brace: false,
         fs_samples: 100,
         bench_follow: false,
+        bench_sort: false,
     },
     PatternSpec {
         label: "bracket_star_c", // [fk]*/*.c
@@ -118,6 +124,7 @@ const PATTERNS: &[PatternSpec] = &[
         supports_brace: false,
         fs_samples: 60,
         bench_follow: false,
+        bench_sort: false,
     },
     PatternSpec {
         label: "drivers_star_c", // drivers/*/*.c
@@ -125,6 +132,7 @@ const PATTERNS: &[PatternSpec] = &[
         supports_brace: false,
         fs_samples: 40,
         bench_follow: false,
+        bench_sort: false,
     },
     PatternSpec {
         label: "drivers_recursive_c", // drivers/**/*.c   STRESS: 20k+ matches (symlink-free)
@@ -132,6 +140,7 @@ const PATTERNS: &[PatternSpec] = &[
         supports_brace: false,
         fs_samples: 15,
         bench_follow: false,
+        bench_sort: true,
     },
     PatternSpec {
         label: "net_recursive_c", // net/**/*.c       symlink-free recursive subtree
@@ -139,6 +148,7 @@ const PATTERNS: &[PatternSpec] = &[
         supports_brace: false,
         fs_samples: 30,
         bench_follow: false,
+        bench_sort: false,
     },
     PatternSpec {
         label: "net_brace_c_h", // net/**/*.{c,h}   symlink-free recursive + brace
@@ -146,6 +156,7 @@ const PATTERNS: &[PatternSpec] = &[
         supports_brace: true,
         fs_samples: 30,
         bench_follow: false,
+        bench_sort: false,
     },
     PatternSpec {
         label: "all_recursive_c", // **/*.c           full tree - WARNING: hits symlink loops in `glob` crate
@@ -153,6 +164,7 @@ const PATTERNS: &[PatternSpec] = &[
         supports_brace: false,
         fs_samples: 10,
         bench_follow: true,
+        bench_sort: true,
     },
 ];
 
@@ -185,6 +197,22 @@ fn bench_fs_walk(c: &mut Criterion) {
                 spec,
                 |b, spec| {
                     let flags = ZlobFlags::RECOMMENDED | ZlobFlags::FOLLOW_SYMLINKS;
+                    b.iter(|| {
+                        let r =
+                            zlob_at(root.to_str().unwrap(), spec.pattern, flags).expect("zlob_at");
+                        black_box(r.as_ref().map(|m| m.len()).unwrap_or(0))
+                    });
+                },
+            );
+        }
+
+        // ----- zlob sorted output (RECOMMENDED minus NOSORT) -----
+        if spec.bench_sort {
+            group.bench_with_input(
+                BenchmarkId::new("zlob_sorted", spec.label),
+                spec,
+                |b, spec| {
+                    let flags = ZlobFlags::RECOMMENDED - ZlobFlags::NOSORT;
                     b.iter(|| {
                         let r =
                             zlob_at(root.to_str().unwrap(), spec.pattern, flags).expect("zlob_at");

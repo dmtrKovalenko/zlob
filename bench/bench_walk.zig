@@ -1,8 +1,19 @@
 //! Walk benchmark harness for A/B perf work.
 //!
 //! Usage:
-//!   bench_walk <root> <mode> [iters] [threads]     mode: plain | gitignore | meta | serial
+//!   bench_walk <root> <mode> [iters] [threads]
+//!       mode: plain | gitignore | meta | serial | sort | follow | ccollect | run | crun
+//!         plain     walk.collect, no gitignore, hidden + dirs reported
+//!         gitignore walk.collect honoring .gitignore (skips .git)
+//!         meta      walk.collect with size+mtime metadata (statx per entry)
+//!         serial    walk.collect with threads=1
+//!         sort      walk.collect with Options.sort (sorted-collect cost)
+//!         follow    walk.collect with follow_symlinks (symlink pre-flight cost)
+//!         ccollect  C API zlob_walk_collect (C-ABI collect overhead)
+//!         run       walk.run streaming visitor (no result allocation)
+//!         crun      C API zlob_walk streaming callback
 //!   bench_walk <root> glob <pattern> [iters]          C-style zlob() glob (single-threaded)
+//!   bench_walk <root> globsort <pattern> [iters]      same without ZLOB_NOSORT (glob sort cost)
 //!   bench_walk <root> walkglob <pattern> [iters] [threads]   parallel walker with Options.pattern
 //!   bench_walk sizes                                     print @sizeOf hot structs
 //!
@@ -30,16 +41,21 @@ pub const std_options: std.Options = .{
     .allow_stack_tracing = false,
 };
 
-const Mode = enum { plain, gitignore, meta, serial, glob, walkglob, sizes };
+const Mode = enum { plain, gitignore, meta, serial, sort, follow, ccollect, run, crun, glob, globsort, walkglob, sizes };
+
+fn isGlobMode(m: Mode) bool {
+    return m == .glob or m == .globsort;
+}
 
 fn usage(prog: []const u8) noreturn {
     std.debug.print(
-        \\Usage: {s} <root> <plain|gitignore|meta|serial> [iters=5] [threads=0]
+        \\Usage: {s} <root> <plain|gitignore|meta|serial|sort|follow|ccollect|run|crun> [iters=5] [threads=0]
         \\       {s} <root> glob <pattern> [iters=5]
+        \\       {s} <root> globsort <pattern> [iters=5]
         \\       {s} <root> walkglob <pattern> [iters=5] [threads=0]
         \\       {s} sizes
         \\
-    , .{ prog, prog, prog, prog });
+    , .{ prog, prog, prog, prog, prog });
     std.process.exit(2);
 }
 
@@ -62,8 +78,8 @@ pub fn main(init: std.process.Init) !void {
     const args = argv_list.items;
     const prog = if (args.len > 0) args[0] else "bench_walk";
     if (args.len >= 2 and std.mem.eql(u8, args[1], "sizes")) {
-        std.debug.print("sizeof Entry={d} Metadata={d} MetaMask={d} Options={d}\n", .{
-            @sizeOf(walk.Entry), @sizeOf(walk.Metadata), @sizeOf(walk.MetaMask), @sizeOf(walk.Options),
+        std.debug.print("sizeof Entry={d} Metadata={d} MetaMask={d} Options={d} zlob_walk_entry_t={d}\n", .{
+            @sizeOf(walk.Entry), @sizeOf(walk.Metadata), @sizeOf(walk.MetaMask), @sizeOf(walk.Options), @sizeOf(c_lib.zlob_walk_entry_t),
         });
         return;
     }
@@ -75,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
     var iters: usize = 5;
     var threads: u16 = 0;
     var pattern: []const u8 = "";
-    if (mode == .glob or mode == .walkglob) {
+    if (isGlobMode(mode) or mode == .walkglob) {
         if (args.len < 4) usage(prog);
         pattern = args[3];
         if (args.len > 4) iters = parseUsize(args[4], prog);
@@ -93,15 +109,19 @@ pub fn main(init: std.process.Init) !void {
     var eff_threads: u32 = 1;
 
     switch (mode) {
-        .glob => {
+        .glob, .globsort => {
             try std.process.setCurrentPath(io, root);
             const pat_z = try allocator.dupeZ(u8, pattern);
             defer allocator.free(pat_z);
+            const gflags: c_int = if (mode == .globsort)
+                zlob_flags.ZLOB_RECOMMENDED & ~@as(c_int, zlob_flags.ZLOB_NOSORT)
+            else
+                zlob_flags.ZLOB_RECOMMENDED;
             // warmup
-            count = runGlob(pat_z);
+            count = runGlob(pat_z, gflags);
             for (times) |*t| {
                 const start = std.Io.Timestamp.now(io, .awake);
-                const n = runGlob(pat_z);
+                const n = runGlob(pat_z, gflags);
                 const end = std.Io.Timestamp.now(io, .awake);
                 t.* = @intCast(start.durationTo(end).nanoseconds);
                 if (n != count) {
@@ -131,15 +151,21 @@ pub fn main(init: std.process.Init) !void {
                     opts.pattern = pattern;
                     opts.report_dirs = false;
                 },
-                .glob, .sizes => unreachable,
+                .sort => opts.sort = true,
+                .follow => opts.follow_symlinks = true,
+                .ccollect, .run, .crun => {},
+                .glob, .globsort, .sizes => unreachable,
             }
             eff_threads = walk.effectiveThreads(&opts);
 
+            const root_z = try allocator.dupeZ(u8, root);
+            defer allocator.free(root_z);
+
             // warmup
-            count = try runWalk(allocator, root, opts);
+            count = try runMode(mode, allocator, root, root_z, opts);
             for (times) |*t| {
                 const start = std.Io.Timestamp.now(io, .awake);
-                const n = try runWalk(allocator, root, opts);
+                const n = try runMode(mode, allocator, root, root_z, opts);
                 const end = std.Io.Timestamp.now(io, .awake);
                 t.* = @intCast(start.durationTo(end).nanoseconds);
                 if (n != count) {
@@ -160,8 +186,8 @@ pub fn main(init: std.process.Init) !void {
     var out_buf: [4096]u8 = undefined;
     var stdout_file = std.Io.File.stdout();
     var w = stdout_file.writer(io, &out_buf);
-    if (mode == .glob) {
-        try w.interface.print("RESULT mode=glob root={s} pattern={s} count={d} best_us={d} median_us={d} threads=1 iters={d}\n", .{ root, pattern, count, best_us, median_us, iters });
+    if (isGlobMode(mode)) {
+        try w.interface.print("RESULT mode={s} root={s} pattern={s} count={d} best_us={d} median_us={d} threads=1 iters={d}\n", .{ @tagName(mode), root, pattern, count, best_us, median_us, iters });
     } else if (mode == .walkglob) {
         try w.interface.print("RESULT mode=walkglob root={s} pattern={s} count={d} best_us={d} median_us={d} threads={d} iters={d}\n", .{ root, pattern, count, best_us, median_us, eff_threads, iters });
     } else {
@@ -170,15 +196,99 @@ pub fn main(init: std.process.Init) !void {
     try w.interface.flush();
 }
 
+fn runMode(mode: Mode, allocator: std.mem.Allocator, root: []const u8, root_z: [:0]const u8, opts: walk.Options) !usize {
+    return switch (mode) {
+        .ccollect => runCCollect(root_z, opts),
+        .run => runRun(allocator, root, opts),
+        .crun => runCRun(root_z, opts),
+        else => runWalk(allocator, root, opts),
+    };
+}
+
 fn runWalk(allocator: std.mem.Allocator, root: []const u8, opts: walk.Options) !usize {
     var res = try walk.collect(allocator, root, opts);
     defer res.deinit();
     return res.entries.len;
 }
 
-fn runGlob(pattern: [:0]const u8) usize {
+/// Mirror the bench's walk.Options onto the C ABI options (bits from include/zlob.h).
+fn cOpts(o: walk.Options) c_lib.zlob_walk_options_t {
+    var f: u32 = 0;
+    if (o.respect_git) f |= 1 << 0; // ZLOB_WALK_GITIGNORE
+    if (!o.include_hidden) f |= 1 << 1; // ZLOB_WALK_SKIP_HIDDEN
+    if (o.follow_symlinks) f |= 1 << 2; // ZLOB_WALK_FOLLOW_SYMLINKS
+    if (!o.report_dirs) f |= 1 << 3; // ZLOB_WALK_NO_REPORT_DIRS
+    if (o.sort) f |= 1 << 4; // ZLOB_WALK_SORT
+    if (!o.skip_git_dir) f |= 1 << 6; // ZLOB_WALK_KEEP_GIT_DIR
+    return .{ .flags = f, .meta_mask = o.meta.toInt(), .threads = o.threads, .max_depth = o.max_depth };
+}
+
+fn runCCollect(root_z: [:0]const u8, o: walk.Options) !usize {
+    const co = cOpts(o);
+    var out: c_lib.zlob_walk_result_t = undefined;
+    const rc = c_lib.zlob_walk_collect(root_z.ptr, &co, &out);
+    if (rc != 0) {
+        std.debug.print("zlob_walk_collect() failed: rc={d}\n", .{rc});
+        std.process.exit(4);
+    }
+    const n = out.count;
+    c_lib.zlob_walk_result_free(&out);
+    return n;
+}
+
+// Per-worker counters on their own cache lines so the streaming modes measure
+// the walker, not false sharing in the visitor. effectiveThreads caps at 1024.
+const Slot = struct { n: u64 align(64) = 0 };
+var slots: [1024]Slot = undefined;
+
+fn resetSlots() void {
+    for (&slots) |*s| s.n = 0;
+}
+
+fn sumSlots() usize {
+    var total: usize = 0;
+    for (&slots) |*s| total += s.n;
+    return total;
+}
+
+fn visitCount(ctx: ?*anyopaque, e: *const walk.Entry) walk.VisitAction {
+    _ = ctx;
+    slots[e.worker_id].n += 1;
+    std.mem.doNotOptimizeAway(e.path.len);
+    return .cont;
+}
+
+fn runRun(a: std.mem.Allocator, r: []const u8, o: walk.Options) !usize {
+    resetSlots();
+    const rules = try walk.run(a, r, o, .{ .context = null, .visit = visitCount });
+    rules.deinit();
+    a.destroy(rules);
+    return sumSlots();
+}
+
+fn cVisitCount(e: *const c_lib.zlob_walk_entry_t, ctx: ?*anyopaque) callconv(.c) c_int {
+    _ = ctx;
+    slots[e.worker_id].n += 1;
+    std.mem.doNotOptimizeAway(e.path_len);
+    return 0;
+}
+
+fn runCRun(root_z: [:0]const u8, o: walk.Options) !usize {
+    resetSlots();
+    const co = cOpts(o);
+    var rules: ?*anyopaque = null;
+    const rc = c_lib.zlob_walk(root_z.ptr, &co, cVisitCount, null, &rules);
+    if (rc != 0) {
+        std.debug.print("zlob_walk() failed: rc={d}\n", .{rc});
+        std.process.exit(4);
+    }
+    c_lib.zlob_ignore_rules_free(rules);
+    return sumSlots();
+}
+
+fn runGlob(pattern: [:0]const u8, flags: c_int) usize {
     var pzlob: c_lib.zlob_t = undefined;
-    const rc = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_RECOMMENDED, null, &pzlob);
+    const rc = c_lib.zlob(pattern.ptr, flags, null, &pzlob);
     if (rc != 0) {
         std.debug.print("zlob() failed: rc={d}\n", .{rc});
         std.process.exit(4);

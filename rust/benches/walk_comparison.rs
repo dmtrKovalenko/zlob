@@ -1,6 +1,20 @@
+//! Criterion benchmarks for the parallel walker against `walkdir` and `ignore`.
+//!
+//! Synthetic trees (small/medium/large) are built in a temp dir. `tempdir()`
+//! lands on /tmp, which is often tmpfs, where per-directory syscall cost is
+//! far lower than on a disk filesystem; set `BENCH_TMP=/path/on/disk` to
+//! place the synthetic trees there instead.
+//!
+//! `REPO=/path/to/real/tree` adds an opt-in `repo` group that walks a real
+//! on-disk tree (e.g. a Linux kernel checkout) with every zlob entry point
+//! (`run_serial`, `run`, `collect`, `collect` + `SORT`) and both crates, plain
+//! and with gitignore. Criterion over a 100k-entry disk tree takes minutes, so
+//! the group runs only when `REPO` is set.
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use zlob::walk::{WalkBuilder, WalkFlags, WalkMetadata, WalkState};
 
@@ -175,6 +189,21 @@ fn zlob_collect_parallel(root: &Path, gitignore: bool) -> u64 {
     results.iter().map(|e| consume_path(e.path_bytes())).sum()
 }
 
+fn zlob_collect_sorted(root: &Path, gitignore: bool) -> u64 {
+    // `collect` + SORT: the only path that sorts, so the merge+sort cost on a
+    // large result set is visible here and nowhere else.
+    let mut b = WalkBuilder::new(root).unwrap();
+    b.options(
+        if gitignore {
+            WalkFlags::RECOMMENDED
+        } else {
+            WalkFlags::empty()
+        } | WalkFlags::SORT,
+    );
+    let results = b.collect().unwrap();
+    results.iter().map(|e| consume_path(e.path_bytes())).sum()
+}
+
 fn walkdir_plain(root: &Path) -> u64 {
     walkdir::WalkDir::new(root)
         .into_iter()
@@ -270,11 +299,21 @@ fn assert_parity(root: &Path) {
     );
 }
 
+fn bench_tmp_dir() -> Option<PathBuf> {
+    let p = env::var_os("BENCH_TMP").map(PathBuf::from)?;
+    assert!(p.is_dir(), "BENCH_TMP={} is not a directory", p.display());
+    Some(p)
+}
+
 fn bench_walk(c: &mut Criterion) {
+    let bench_tmp = bench_tmp_dir();
     let trees: Vec<(tempfile::TempDir, &TreeSpec, usize)> = TREES
         .iter()
         .map(|spec| {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = match &bench_tmp {
+                Some(dir) => tempfile::tempdir_in(dir).unwrap(),
+                None => tempfile::tempdir().unwrap(),
+            };
             let n = build_tree(tmp.path(), spec);
             assert_parity(tmp.path());
             (tmp, spec, n)
@@ -446,5 +485,104 @@ fn bench_walk(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_walk);
+/// Opt-in real-tree group: `REPO=/path/to/tree cargo bench --bench walk_comparison`.
+fn bench_repo(c: &mut Criterion) {
+    let Some(repo) = env::var_os("REPO").map(PathBuf::from) else {
+        eprintln!("[bench] REPO not set; skipping the real-tree `repo` group");
+        return;
+    };
+    assert!(
+        repo.is_dir(),
+        "REPO={} is not a directory (set REPO=/path/to/large/source/tree)",
+        repo.display()
+    );
+    let root = repo.as_path();
+    assert_parity(root);
+    let entries = zlob_count(root, false);
+    let kept = zlob_count(root, true);
+    eprintln!(
+        "[bench] repo {}: {} entries, {} after gitignore",
+        root.display(),
+        entries,
+        kept
+    );
+
+    let mut group = c.benchmark_group("repo");
+    group.sample_size(10);
+    group.throughput(Throughput::Elements(entries as u64));
+
+    // plain
+    group.bench_with_input(BenchmarkId::from_parameter("zlob_serial"), root, |b, r| {
+        b.iter(|| std::hint::black_box(zlob_run_serial(r, false)))
+    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("zlob_parallel"),
+        root,
+        |b, r| b.iter(|| std::hint::black_box(zlob_run_parallel(r, false))),
+    );
+    group.bench_with_input(
+        BenchmarkId::from_parameter("zlob_collect_parallel"),
+        root,
+        |b, r| b.iter(|| std::hint::black_box(zlob_collect_parallel(r, false))),
+    );
+    group.bench_with_input(
+        BenchmarkId::from_parameter("zlob_collect_sorted"),
+        root,
+        |b, r| b.iter(|| std::hint::black_box(zlob_collect_sorted(r, false))),
+    );
+    group.bench_with_input(BenchmarkId::from_parameter("walkdir"), root, |b, r| {
+        b.iter(|| std::hint::black_box(walkdir_plain(r)))
+    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("walkdir_parallel"),
+        root,
+        |b, r| {
+            let builder = ignore_builder(r, false, false);
+            b.iter(|| std::hint::black_box(ignore_parallel(&builder)))
+        },
+    );
+
+    // with gitignore
+    group.throughput(Throughput::Elements(kept as u64));
+    group.bench_with_input(
+        BenchmarkId::from_parameter("zlob_gitignore_serial"),
+        root,
+        |b, r| b.iter(|| std::hint::black_box(zlob_run_serial(r, true))),
+    );
+    group.bench_with_input(
+        BenchmarkId::from_parameter("zlob_gitignore_parallel"),
+        root,
+        |b, r| b.iter(|| std::hint::black_box(zlob_run_parallel(r, true))),
+    );
+    group.bench_with_input(
+        BenchmarkId::from_parameter("zlob_gitignore_collect_parallel"),
+        root,
+        |b, r| b.iter(|| std::hint::black_box(zlob_collect_parallel(r, true))),
+    );
+    group.bench_with_input(
+        BenchmarkId::from_parameter("zlob_gitignore_collect_sorted"),
+        root,
+        |b, r| b.iter(|| std::hint::black_box(zlob_collect_sorted(r, true))),
+    );
+    group.bench_with_input(
+        BenchmarkId::from_parameter("ignore_serial"),
+        root,
+        |b, r| {
+            let builder = ignore_builder(r, true, true);
+            b.iter(|| std::hint::black_box(ignore_serial(&builder)))
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::from_parameter("ignore_parallel"),
+        root,
+        |b, r| {
+            let builder = ignore_builder(r, true, true);
+            b.iter(|| std::hint::black_box(ignore_parallel(&builder)))
+        },
+    );
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_walk, bench_repo);
 criterion_main!(benches);
