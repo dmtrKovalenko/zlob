@@ -41,6 +41,9 @@ pub const WalkError = types.WalkError;
 pub const WalkerResult = struct {
     entries: []Entry,
     chunks: [][]u8,
+    /// Out-of-line metadata storage; `Entry.meta` points into it. Empty
+    /// unless `Options.meta` requested at least one attribute.
+    metas: []Metadata,
     allocator: Allocator,
     /// Inferred set of ignore rules, valid until the .gitignore/.ignore file is changed
     ignore_rules: *IgnoreRules,
@@ -50,6 +53,7 @@ pub const WalkerResult = struct {
         self.allocator.destroy(self.ignore_rules);
         for (self.chunks) |c| self.allocator.free(c);
         self.allocator.free(self.chunks);
+        self.allocator.free(self.metas);
         self.allocator.free(self.entries);
         self.* = undefined;
     }
@@ -107,6 +111,11 @@ pub fn collect(gpa: Allocator, root: []const u8, options: Options) WalkError!Wal
 
     const entries = try gpa.alloc(Entry, total);
     errdefer gpa.free(entries);
+    // With metadata on, every reported entry carries one record (same order
+    // as `entries`), so the per-worker lists line up index by index.
+    const want_meta = options.meta.any();
+    const metas = try gpa.alloc(Metadata, if (want_meta) total else 0);
+    errdefer gpa.free(metas);
     var n_chunks: usize = 0;
     for (col.sinks) |*ws| n_chunks += ws.chunks.items.len;
     const chunks = try gpa.alloc([]u8, n_chunks);
@@ -116,7 +125,7 @@ pub fn collect(gpa: Allocator, root: []const u8, options: Options) WalkError!Wal
     var ei: usize = 0;
     var ci: usize = 0;
     for (col.sinks, 0..) |*ws, wid| {
-        ei = ws.materialize(entries, ei, @intCast(wid));
+        ei = ws.materialize(entries, metas, ei, @intCast(wid));
         @memcpy(chunks[ci..][0..ws.chunks.items.len], ws.chunks.items);
         ci += ws.chunks.items.len;
         ws.chunks.clearRetainingCapacity(); // ownership moved to Results
@@ -124,7 +133,7 @@ pub fn collect(gpa: Allocator, root: []const u8, options: Options) WalkError!Wal
 
     if (options.sort) std.sort.pdq(Entry, entries, {}, entryLessThan);
 
-    return .{ .entries = entries, .chunks = chunks, .allocator = gpa, .ignore_rules = rules };
+    return .{ .entries = entries, .chunks = chunks, .metas = metas, .allocator = gpa, .ignore_rules = rules };
 }
 
 fn entryLessThan(_: void, a: Entry, b: Entry) bool {
@@ -297,7 +306,7 @@ const CHUNK_SIZE = 120 * 1024;
 /// is malloc'd once at this byte size.
 const SEG_BYTES = 120 * 1024;
 
-/// Compact per-entry record kept by `collectSink`; the 120-byte public
+/// Compact per-entry record kept by `collectSink`; the 40-byte public
 /// `Entry` is only built at merge time. `relative_offset` and `worker_id`
 /// are per-walk / per-sink constants, so they are not stored.
 const SinkRec = extern struct {
@@ -367,6 +376,8 @@ const WorkerSink = struct {
     off: usize = 0,
     recs: Segmented(SinkRec) = .{},
     /// Index-aligned with `recs`; only populated when `Options.meta.any()`.
+    /// The worker's metadata record is scratch, so the sink keeps a copy and
+    /// `collect` re-points `Entry.meta` into the gathered `WalkerResult.metas`.
     metas: Segmented(Metadata) = .{},
     /// `Entry.relative_offset` is the same for every entry of a walk (the
     /// "root/" prefix length); remembered from the sunk entries.
@@ -395,34 +406,39 @@ const WorkerSink = struct {
         return @intCast(off);
     }
 
-    /// Builds the public entries for this sink into `dest[start..]`; returns
-    /// the index one past the last written entry.
-    fn materialize(ws: *WorkerSink, dest: []Entry, start: usize, worker_id: u16) usize {
+    /// Builds the public entries for this sink into `dest[start..]` (and,
+    /// when metadata was collected, the records into `metas[start..]` with
+    /// `Entry.meta` pointing at them); returns the index one past the last
+    /// written entry.
+    fn materialize(ws: *WorkerSink, dest: []Entry, metas: []Metadata, start: usize, worker_id: u16) usize {
         var ei = start;
         const relative_offset = ws.relative_offset;
         const with_meta = ws.metas.len != 0;
         std.debug.assert(!with_meta or ws.metas.len == ws.recs.len);
+        if (with_meta) {
+            var mi = start;
+            for (ws.metas.segs.items, 0..) |_, si| {
+                const seg = ws.metas.segment(si);
+                @memcpy(metas[mi..][0..seg.len], seg);
+                mi += seg.len;
+            }
+        }
         for (ws.recs.segs.items, 0..) |_, si| {
             for (ws.recs.segment(si)) |rec| {
                 const path: []const u8 = ws.chunks.items[rec.chunk_idx][rec.off..][0..rec.len];
                 dest[ei] = .{
                     .path = path,
+                    .meta = if (with_meta) &metas[ei] else null,
                     .relative_offset = relative_offset,
-                    .basename = path[rec.basename_off..],
-                    .kind = @enumFromInt(rec.kind),
+                    .basename_offset = rec.basename_off,
                     .depth = rec.depth,
                     .worker_id = worker_id,
-                    .meta = if (with_meta) metaAt(ws, ei - start) else .{},
+                    .kind = @enumFromInt(rec.kind),
                 };
                 ei += 1;
             }
         }
         return ei;
-    }
-
-    inline fn metaAt(ws: *const WorkerSink, i: usize) Metadata {
-        const per = Segmented(Metadata).per_seg;
-        return ws.metas.segs.items[i / per][i % per];
     }
 
     fn deinit(ws: *WorkerSink) void {
@@ -447,7 +463,7 @@ fn collectSink(ctx: *anyopaque, worker_id: u32, entry: *const Entry) VisitAction
         .chunk_idx = @intCast(ws.chunks.items.len - 1),
         .off = off,
         .len = @intCast(entry.path.len),
-        .basename_off = @intCast(entry.path.len - entry.basename.len),
+        .basename_off = @intCast(entry.basename_offset),
         .depth = entry.depth,
         .kind = @intFromEnum(entry.kind),
     }) catch {
@@ -455,7 +471,7 @@ fn collectSink(ctx: *anyopaque, worker_id: u32, entry: *const Entry) VisitAction
         return .stop;
     };
     if (col.with_meta) {
-        ws.metas.push(ws.gpa, entry.meta) catch {
+        ws.metas.push(ws.gpa, if (entry.meta) |m| m.* else .{}) catch {
             ws.failed = true;
             return .stop;
         };

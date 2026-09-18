@@ -385,7 +385,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
 
     for (w.entries.items, 0..) |se, i| {
         const name = w.names.items[se.name_off..][0..se.name_len];
-        const meta: Metadata = if (want_meta) w.metas.items[i] else .{};
+        const meta: ?*const Metadata = if (want_meta) &w.metas.items[i] else null;
         try processEntry(sh, w, handle, name, se.kind, meta, ignore, prefix_len, entry_depth, may_descend, &child_ref, &handle_consumed);
     }
 }
@@ -396,7 +396,7 @@ fn processEntry(
     handle: Handle,
     name: []const u8,
     entry_kind: EntryKind,
-    meta: Metadata,
+    meta: ?*const Metadata,
     cur_ignore: ?*IgnoreNode,
     prefix_len: usize,
     entry_depth: u16,
@@ -451,12 +451,12 @@ fn processEntry(
     if (report) {
         var entry = Entry{
             .path = full,
+            .meta = meta,
             .relative_offset = sh.root_prefix_len,
-            .basename = basename,
-            .kind = entry_kind,
+            .basename_offset = @intCast(prefix_len),
             .depth = entry_depth,
             .worker_id = @intCast(w.id),
-            .meta = meta,
+            .kind = entry_kind,
         };
         action = sh.sink(sh.sink_ctx, w.id, &entry);
         if (action == .stop) {

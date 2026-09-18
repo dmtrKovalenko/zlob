@@ -800,11 +800,13 @@ fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
 }
 
 inline fn fillCWalkEntry(out: *zlob_walk_entry_t, e: *const walk.Entry) void {
+    const no_meta = walk.Metadata{};
+    const m: *const walk.Metadata = e.meta orelse &no_meta;
     out.* = .{
         .path = @ptrCast(e.path.ptr),
         .path_len = e.path.len,
         .relative_offset = e.relative_offset,
-        .basename_offset = @intCast(e.path.len - e.basename.len),
+        .basename_offset = e.basename_offset,
         .kind = switch (e.kind) {
             .file => 1,
             .directory => 2,
@@ -813,17 +815,17 @@ inline fn fillCWalkEntry(out: *zlob_walk_entry_t, e: *const walk.Entry) void {
         },
         .depth = e.depth,
         .worker_id = e.worker_id,
-        .meta_valid = e.meta.valid.toInt(),
-        .size = e.meta.size,
-        .mtime_ns = e.meta.mtime_ns,
-        .atime_ns = e.meta.atime_ns,
-        .ctime_ns = e.meta.ctime_ns,
-        .btime_ns = e.meta.btime_ns,
-        .inode = e.meta.inode,
-        .nlink = e.meta.nlink,
-        .mode = e.meta.mode,
-        .uid = e.meta.uid,
-        .gid = e.meta.gid,
+        .meta_valid = m.valid.toInt(),
+        .size = m.size,
+        .mtime_ns = m.mtime_ns,
+        .atime_ns = m.atime_ns,
+        .ctime_ns = m.ctime_ns,
+        .btime_ns = m.btime_ns,
+        .inode = m.inode,
+        .nlink = m.nlink,
+        .mode = m.mode,
+        .uid = m.uid,
+        .gid = m.gid,
     };
 }
 

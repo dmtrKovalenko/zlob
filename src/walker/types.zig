@@ -144,25 +144,36 @@ pub const Metadata = struct {
     valid: MetaMask = .{},
 };
 
-/// A reported filesystem entry. Slices are valid only for the duration of the
-/// `run` visitor callback; `collect` returns owned copies.
+/// A reported filesystem entry. Slices and the `meta` pointer are valid only
+/// for the duration of the `run` visitor callback; `collect` returns owned
+/// copies (paths in `WalkerResult.chunks`, metadata in `WalkerResult.metas`).
+///
+/// Kept small on purpose (40 bytes): every reported entry moves through the
+/// per-worker sink, the final gather and the optional sort, so the 72-byte
+/// `Metadata` lives out of line and is only materialized when requested.
 pub const Entry = struct {
     /// Full path: walk root joined with the relative path. NUL-terminated at
     /// `path.len` for zero-cost C interop.
     path: []const u8,
+    /// Per-entry metadata, or null when `Options.meta` is empty.
+    meta: ?*const Metadata,
     /// Offset into `path` where the root-relative part starts.
     relative_offset: u32,
-    /// Basename (slice into `path`).
-    basename: []const u8,
-    kind: EntryKind,
+    /// Offset into `path` where the basename starts (see `basename`).
+    basename_offset: u32,
     /// Depth below the root: direct children of the root have depth 1.
     depth: u16,
     /// Index of the current worker id
     worker_id: u16 = 0,
-    meta: Metadata,
+    kind: EntryKind,
 
     pub inline fn relativePath(self: *const Entry) []const u8 {
         return self.path[self.relative_offset..];
+    }
+
+    /// Basename (slice into `path`).
+    pub inline fn basename(self: *const Entry) []const u8 {
+        return self.path[self.basename_offset..];
     }
 };
 
