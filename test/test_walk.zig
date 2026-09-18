@@ -426,6 +426,102 @@ test "walk parallel matches serial results" {
     try testing.expectEqual(@as(usize, 8 + 8 + 128 + 8 + 1), serial.entries.len);
 }
 
+fn fullPathLessThan(_: void, a: walk.Entry, b: walk.Entry) bool {
+    return std.mem.order(u8, a.path, b.path) == .lt;
+}
+
+test "sort: collect order equals a full-path pdq sort of the unsorted collect" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("sortorder");
+    defer t.deinit();
+
+    // Names chosen so that bytes below and above '/' ('-', '.', '_', digits,
+    // upper case), prefix relations ("a" vs "a-b" vs "a/b") and deep nesting
+    // all appear; the sort must be plain byte order on the full path.
+    const dirs = [_][]const u8{ "a", "a-b", "a.b", "a_b", "A", "a/b", "a/b/c", "a-b/c", "dir0", "dir1", "dir10", "dir2" };
+    for (dirs) |d| try t.mkdir(d);
+    const files = [_][]const u8{
+        "a/b/c/z.txt", "a/b/c.txt", "a/b.txt", "a.txt",  "a-b/c/x", "a-b/x", "a.b/x", "a_b/x", "A/x",
+        "dir0/f",      "dir1/f",    "dir10/f", "dir2/f", "z",       "Z",     "0",     "~",     " space",
+    };
+    for (files) |f| try t.write(f, "x");
+    var name_buf: [64]u8 = undefined;
+    for (0..300) |i| {
+        const name = try std.fmt.bufPrint(&name_buf, "dir{d}/file{d}.c", .{ i % 3, (i * 7919) % 1000 });
+        try t.write(name, "x");
+    }
+
+    const gpa = std.heap.smp_allocator;
+    var unsorted = try walk.collect(gpa, t.root, .{ .threads = 1 });
+    defer unsorted.deinit();
+    const reference = try gpa.dupe(walk.Entry, unsorted.entries);
+    defer gpa.free(reference);
+    std.sort.pdq(walk.Entry, reference, {}, fullPathLessThan);
+
+    inline for (.{ 1, 4 }) |threads| {
+        var sorted = try walk.collect(gpa, t.root, .{ .threads = threads, .sort = true });
+        defer sorted.deinit();
+        try testing.expectEqual(reference.len, sorted.entries.len);
+        for (reference, sorted.entries) |*r, *s| {
+            try testing.expectEqualStrings(r.path, s.path);
+            try testing.expectEqualStrings(r.relativePath(), s.relativePath());
+        }
+    }
+}
+
+fn syntheticEntry(gpa: std.mem.Allocator, rng: std.Random, prefix: []const u8) !walk.Entry {
+    // Short alphabet with bytes on both sides of '/' so directory boundaries,
+    // prefix relations and duplicates all occur often.
+    const alphabet = "ab/.-_A";
+    const len = rng.uintLessThan(usize, 12);
+    const buf = try gpa.allocSentinel(u8, prefix.len + len, 0);
+    @memcpy(buf[0..prefix.len], prefix);
+    for (buf[prefix.len..]) |*c| c.* = alphabet[rng.uintLessThan(usize, alphabet.len)];
+    return .{
+        .path = buf,
+        .relative_offset = @intCast(prefix.len),
+        .basename_offset = @intCast(prefix.len),
+        .kind = .file,
+        .depth = 1,
+        .meta = null,
+    };
+}
+
+fn checkSortAgainstPdq(gpa: std.mem.Allocator, n: usize, threads: u32, seed: u64) !void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+    const prefix = "/tmp/some/root/";
+
+    const reference = try gpa.alloc(walk.Entry, n);
+    defer {
+        for (reference) |e| gpa.free(e.path.ptr[0 .. e.path.len + 1]);
+        gpa.free(reference);
+    }
+    for (reference) |*e| e.* = try syntheticEntry(gpa, rng, prefix);
+
+    var subject = try gpa.alloc(walk.Entry, n);
+    @memcpy(subject, reference);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    subject = try walk.__internal_test_api.sortEntries(gpa, io, subject, threads);
+    defer gpa.free(subject);
+
+    std.sort.pdq(walk.Entry, reference, {}, fullPathLessThan);
+    for (reference, subject) |r, s| try testing.expectEqualStrings(r.path, s.path);
+}
+
+test "sort: sortEntries matches pdq on full paths (serial, randomized)" {
+    try checkSortAgainstPdq(testing.allocator, 0, 1, 1);
+    try checkSortAgainstPdq(testing.allocator, 1, 1, 1);
+    try checkSortAgainstPdq(testing.allocator, 13, 1, 2);
+    try checkSortAgainstPdq(testing.allocator, 5000, 1, 3);
+}
+
+test "sort: sortEntries matches pdq on full paths (parallel pool, randomized)" {
+    // Large enough that the task pool is exercised with several helpers.
+    try checkSortAgainstPdq(std.heap.smp_allocator, 20000, 4, 4);
+    try checkSortAgainstPdq(std.heap.smp_allocator, 20000, 16, 5);
+}
+
 test "walk empty root and missing root" {
     var t: TestTree = .{ .io = undefined };
     try t.init("empty");

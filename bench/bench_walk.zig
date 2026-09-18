@@ -154,11 +154,11 @@ pub fn main(init: std.process.Init) !void {
                 },
                 .meta => opts.meta = .{ .size = true, .mtime = true },
                 .serial => opts.threads = 1,
+                .sort => opts.sort = true,
                 .walkglob => {
                     opts.pattern = pattern;
                     opts.report_dirs = false;
                 },
-                .sort => opts.sort = true,
                 .follow => opts.follow_symlinks = true,
                 .ccollect, .run, .crun => {},
                 .glob, .globsort, .globpar, .sizes => unreachable,
