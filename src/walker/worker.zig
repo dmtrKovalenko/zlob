@@ -414,7 +414,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
 
     for (w.entries.items, 0..) |se, i| {
         const name = w.names.items[se.name_off..][0..se.name_len];
-        const meta: Metadata = if (want_meta) w.metas.items[i] else .{};
+        const meta: ?*const Metadata = if (want_meta) &w.metas.items[i] else null;
         try processEntry(sh, w, handle, name, se.kind, meta, se.metadata_deferred, ignore, prefix_len, entry_depth, may_descend, &child_ref, &handle_consumed);
     }
 }
@@ -425,7 +425,7 @@ fn processEntry(
     handle: Handle,
     name: []const u8,
     entry_kind: EntryKind,
-    meta: Metadata,
+    meta: ?*const Metadata,
     metadata_deferred: bool,
     cur_ignore: ?*IgnoreNode,
     prefix_len: usize,
@@ -489,20 +489,22 @@ fn processEntry(
         if (sh.pattern) |cp| report = cp.matches(relative_path, opts.pattern_flags);
     }
     if (report) {
+        var deferred_meta: Metadata = undefined;
         var reported_meta = meta;
         if (comptime backend == .linux_getdents) {
             if (metadata_deferred) {
-                reported_meta = scan_linux.readMetadata(handle, @ptrCast(basename.ptr), opts.meta, sh.statx_mask);
+                deferred_meta = scan_linux.readMetadata(handle, @ptrCast(basename.ptr), opts.meta, sh.statx_mask);
+                reported_meta = &deferred_meta;
             }
         }
         var entry = Entry{
             .path = full,
+            .meta = reported_meta,
             .relative_offset = sh.root_prefix_len,
-            .basename = basename,
-            .kind = entry_kind,
+            .basename_offset = @intCast(prefix_len),
             .depth = entry_depth,
             .worker_id = @intCast(w.id),
-            .meta = reported_meta,
+            .kind = entry_kind,
         };
         action = sh.sink(sh.sink_ctx, w.id, &entry);
         if (action == .stop) {

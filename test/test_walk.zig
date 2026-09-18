@@ -66,7 +66,7 @@ test "walk basic tree: paths, kinds, depths, NUL termination" {
     const a = findEntry(&results, "a.txt").?;
     try testing.expectEqual(walk.EntryKind.file, a.kind);
     try testing.expectEqual(@as(u16, 1), a.depth);
-    try testing.expectEqualStrings("a.txt", a.basename);
+    try testing.expectEqualStrings("a.txt", a.basename());
     // NUL-terminated storage for zero-cost C interop
     try testing.expectEqual(@as(u8, 0), a.path.ptr[a.path.len]);
     // Full path = root + '/' + rel
@@ -112,17 +112,17 @@ test "walk unicode and invalid-UTF-8 names: byte-exact paths and offsets" {
         try testing.expectEqual(t.root.len + 1, e.relative_offset);
         try testing.expectEqual(@as(u8, '/'), e.path[e.relative_offset - 1]);
         const last_slash = std.mem.lastIndexOfScalar(u8, e.path, '/').?;
-        try testing.expectEqualStrings(e.path[last_slash + 1 ..], e.basename);
+        try testing.expectEqualStrings(e.path[last_slash + 1 ..], e.basename());
     }
 
     const rocket = findEntry(&results, "ünïcode/日本語ディレクトリ/файл-🚀.txt").?;
-    try testing.expectEqualStrings("файл-🚀.txt", rocket.basename);
+    try testing.expectEqualStrings("файл-🚀.txt", rocket.basename());
     try testing.expectEqual(@as(u16, 3), rocket.depth);
     try testing.expectEqual(walk.EntryKind.file, rocket.kind);
 
     if (builtin.os.tag == .linux) {
         const deep = findEntry(&results, invalid_dir ++ "/" ++ invalid_file).?;
-        try testing.expectEqualStrings(invalid_file, deep.basename);
+        try testing.expectEqualStrings(invalid_file, deep.basename());
         try testing.expectEqual(walk.EntryKind.file, deep.kind);
         try testing.expectEqual(walk.EntryKind.directory, findEntry(&results, invalid_dir).?.kind);
     }
@@ -279,7 +279,7 @@ test "walk include_hidden=false skips hidden files and dirs" {
     defer results.deinit();
 
     try testing.expectEqual(@as(usize, 1), results.entries.len);
-    try testing.expectEqualStrings("visible.txt", results.entries[0].basename);
+    try testing.expectEqualStrings("visible.txt", results.entries[0].basename());
 }
 
 test "walk max_depth limits traversal" {
@@ -316,15 +316,17 @@ test "walk metadata: size/mtime/inode/mode" {
     defer results.deinit();
 
     try testing.expectEqual(@as(usize, 1), results.entries.len);
+    try testing.expectEqual(@as(usize, 1), results.metas.len);
     const e = &results.entries[0];
-    try testing.expect(e.meta.valid.size);
-    try testing.expectEqual(@as(u64, 5), e.meta.size);
-    try testing.expect(e.meta.valid.mtime);
-    try testing.expect(e.meta.mtime_ns > 0);
-    try testing.expect(e.meta.valid.inode);
-    try testing.expect(e.meta.inode != 0);
-    if (e.meta.valid.mode) {
-        try testing.expect(e.meta.mode & 0o400 != 0); // owner-readable
+    const meta = e.meta.?;
+    try testing.expect(meta.valid.size);
+    try testing.expectEqual(@as(u64, 5), meta.size);
+    try testing.expect(meta.valid.mtime);
+    try testing.expect(meta.mtime_ns > 0);
+    try testing.expect(meta.valid.inode);
+    try testing.expect(meta.inode != 0);
+    if (meta.valid.mode) {
+        try testing.expect(meta.mode & 0o400 != 0); // owner-readable
     }
 }
 
@@ -345,8 +347,8 @@ test "walk visitor: skip_dir prunes, stop halts" {
         fn visit(ctx_ptr: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
             const self: *@This() = @ptrCast(@alignCast(ctx_ptr.?));
             self.count += 1;
-            if (std.mem.eql(u8, entry.basename, "inner.txt")) self.saw_inner = true;
-            if (std.mem.eql(u8, entry.basename, "skipme")) return .skip_dir;
+            if (std.mem.eql(u8, entry.basename(), "inner.txt")) self.saw_inner = true;
+            if (std.mem.eql(u8, entry.basename(), "skipme")) return .skip_dir;
             return .cont;
         }
     };
