@@ -334,7 +334,14 @@ fn walkImpl(
     sh.threads = threads;
 
     const root_task = try allocator.create(DirTask);
-    root_task.* = .{ .rel = try allocator.dupe(u8, ""), .depth = 0, .ignore = null, .parent = null };
+    root_task.* = .{
+        .rel = try allocator.dupe(u8, ""),
+        .depth = 0,
+        .ignore = null,
+        .parent = null,
+        .dev = sh.root_key.dev,
+        .ino = sh.root_key.ino,
+    };
     sh.queue.push(allocator, sh.io, 0, root_task) catch |err| {
         worker.freeTask(&sh, root_task);
         return err;

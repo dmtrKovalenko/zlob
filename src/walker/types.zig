@@ -183,6 +183,10 @@ pub const RawEntry = struct {
     name: []const u8,
     kind: EntryKind,
     meta: Metadata,
+    /// Inode number as reported by the parent's directory listing (Linux
+    /// `d_ino`), 0 when unknown. Only consumed under `follow_symlinks`, where
+    /// it keys the cycle set without a statx per real directory.
+    ino: u64 = 0,
 };
 
 pub const VisitAction = enum(c_int) {

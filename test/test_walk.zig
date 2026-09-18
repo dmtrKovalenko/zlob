@@ -568,6 +568,85 @@ test "walk follow_symlinks: descends links, breaks cycles, never re-walks root" 
     }
 }
 
+test "walk follow_symlinks: link to ancestor and link into sibling" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("symlinks_ancestor");
+    defer t.deinit();
+
+    // tree/
+    //   a/b/f.txt
+    //   a/b/up   -> ..      (a: an ancestor, already visited)
+    //   a/b/root -> ../..   (the walk root itself)
+    //   a/b/side -> ../../c (a sibling subtree, visited once either way)
+    //   a/b/absout -> <absolute>/outside (outside the walk root; descended)
+    //   c/c.txt
+    //   c/d/d.txt
+    // outside/o.txt (sibling of tree/)
+    try t.mkdir("outside");
+    try t.write("outside/o.txt", "o");
+    try t.mkdir("tree");
+    try t.mkdir("tree/a");
+    try t.mkdir("tree/a/b");
+    try t.mkdir("tree/c");
+    try t.mkdir("tree/c/d");
+    try t.write("tree/a/b/f.txt", "f");
+    try t.write("tree/c/c.txt", "c");
+    try t.write("tree/c/d/d.txt", "d");
+
+    var lbuf: [512]u8 = undefined;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.symLink(t.io, "..", try std.fmt.bufPrint(&lbuf, "{s}/tree/a/b/up", .{t.root}), .{});
+    try cwd.symLink(t.io, "../..", try std.fmt.bufPrint(&lbuf, "{s}/tree/a/b/root", .{t.root}), .{});
+    try cwd.symLink(t.io, "../../c", try std.fmt.bufPrint(&lbuf, "{s}/tree/a/b/side", .{t.root}), .{});
+    {
+        var abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var rel_out: [512]u8 = undefined;
+        const outside_rel = try std.fmt.bufPrint(&rel_out, "{s}/outside", .{t.root});
+        const outside_abs = abs_buf[0..try cwd.realPathFile(t.io, outside_rel, &abs_buf)];
+        try cwd.symLink(t.io, outside_abs, try std.fmt.bufPrint(&lbuf, "{s}/tree/a/b/absout", .{t.root}), .{});
+    }
+
+    var root_buf: [512]u8 = undefined;
+    const walk_root = try std.fmt.bufPrint(&root_buf, "{s}/tree", .{t.root});
+
+    for ([_]u16{ 1, 4 }) |threads| {
+        var results = try walk.collect(testing.allocator, walk_root, .{
+            .threads = threads,
+            .sort = true,
+            .follow_symlinks = true,
+        });
+        defer results.deinit();
+
+        // The links themselves are reported...
+        try testing.expect(findEntry(&results, "a/b/up") != null);
+        try testing.expect(findEntry(&results, "a/b/root") != null);
+        try testing.expect(findEntry(&results, "a/b/side") != null);
+        // An absolute link out of the tree is followed like any other.
+        try testing.expect(findEntry(&results, "a/b/absout/o.txt") != null);
+
+        var f_count: usize = 0;
+        var c_via_real: usize = 0;
+        var c_via_link: usize = 0;
+        var d_leaves: usize = 0;
+        for (results.entries) |*e| {
+            const rel = e.relativePath();
+            // ...but ancestors are never re-entered through them.
+            try testing.expect(!std.mem.startsWith(u8, rel, "a/b/up/"));
+            try testing.expect(!std.mem.startsWith(u8, rel, "a/b/root/"));
+            if (std.mem.eql(u8, rel, "a/b/f.txt")) f_count += 1;
+            if (std.mem.eql(u8, rel, "c/c.txt")) c_via_real += 1;
+            if (std.mem.eql(u8, rel, "a/b/side/c.txt")) c_via_link += 1;
+            if (std.mem.endsWith(u8, rel, "/d.txt")) d_leaves += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), f_count);
+        // The sibling subtree is walked exactly once: through whichever of
+        // the real directory and the link was reached first.
+        try testing.expectEqual(@as(usize, 1), c_via_real + c_via_link);
+        try testing.expectEqual(@as(usize, 1), d_leaves);
+    }
+}
+
 test "walk error callback: receives path and errno, nonzero return aborts" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no POSIX chmod
     var t: TestTree = .{ .io = undefined };

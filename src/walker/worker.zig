@@ -147,6 +147,12 @@ pub const SharedWorkerState = struct {
     /// Symlink-cycle bookkeeping, only touched when follow_symlinks is set.
     visited_mutex: std.Io.Mutex = .init,
     visited: std.AutoHashMapUnmanaged(InodeKey, void) = .empty,
+    /// (dev, ino) of the walk root, seeded by `recordRootVisited`; the root
+    /// task inherits it and every child task derives its key from there.
+    root_key: InodeKey = .{ .dev = 0, .ino = 0 },
+    /// Linux: set once openat2 fails with ENOSYS so the follow_symlinks open
+    /// path stops retrying it (pre-5.6 kernels, seccomp).
+    openat2_unavailable: std.atomic.Value(bool) = .init(false),
     /// Reusable ignore rules. Workers register each parsed `.gitignore`/ `.ignore`
     ignore_rules: *IgnoreRules,
     retain_mutex: std.Io.Mutex = .init,
@@ -219,6 +225,12 @@ pub const Worker = struct {
     entries: std.ArrayList(Scratch) = .empty,
     /// Parallel to `entries`; filled only when `options.meta.any()`.
     metas: std.ArrayList(Metadata) = .empty,
+    /// Parallel to `entries`; listing inode numbers (`RawEntry.ino`), filled
+    /// only when `options.follow_symlinks` so cycle keys need no statx.
+    inos: std.ArrayList(u64) = .empty,
+    /// d_ino of the "." record of the directory just scanned (Linux), 0 when
+    /// the listing didn't start with one. See `resolveTaskKey`.
+    dot_ino: u64 = 0,
     saw_gitignore: bool = false,
     saw_ignore: bool = false,
     /// Kernel buffer for getdents64 / getattrlistbulk.
@@ -244,6 +256,7 @@ pub const Worker = struct {
         w.names.deinit(allocator);
         w.entries.deinit(allocator);
         w.metas.deinit(allocator);
+        w.inos.deinit(allocator);
         if (w.io_buf.len > 0) allocator.free(w.io_buf);
     }
 };
@@ -295,6 +308,9 @@ pub inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: types.RawEn
     if (sh.options.meta.any()) {
         try w.metas.append(sh.allocator, raw.meta);
     }
+    if (sh.options.follow_symlinks) {
+        try w.inos.append(sh.allocator, raw.ino);
+    }
 }
 
 pub inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []const u8, kind: EntryKind) WalkError!void {
@@ -314,6 +330,9 @@ pub inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []co
         .name_len = @intCast(name.len),
         .kind = kind,
     });
+    if (sh.options.follow_symlinks) {
+        try w.inos.append(sh.allocator, 0);
+    }
 }
 
 pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
@@ -362,6 +381,8 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     w.names.clearRetainingCapacity();
     w.entries.clearRetainingCapacity();
     w.metas.clearRetainingCapacity();
+    w.inos.clearRetainingCapacity();
+    w.dot_ino = 0;
     w.saw_gitignore = false;
     w.saw_ignore = false;
     scan.scanDir(sh, w, handle) catch |err| switch (err) {
@@ -373,6 +394,9 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
             return;
         },
     };
+    if (builtin.os.tag == .linux and sh.options.follow_symlinks and task.depth != 0) {
+        if (!resolveTaskKey(sh, task, handle, w.dot_ino)) return;
+    }
 
     var ignore: ?*IgnoreNode = task.ignore;
     var own_ignore = false;
@@ -395,23 +419,27 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     const entry_depth: u16 = task.depth +| 1;
     const may_descend = opts.max_depth == 0 or entry_depth < opts.max_depth;
     const want_meta = opts.meta.any();
+    const have_inos = opts.follow_symlinks and w.inos.items.len == w.entries.items.len;
     var child_ref: ?*HandleRef = null;
     defer if (child_ref) |cr| cr.release(sh);
 
     for (w.entries.items, 0..) |se, i| {
         const name = w.names.items[se.name_off..][0..se.name_len];
         const meta: ?*const Metadata = if (want_meta) &w.metas.items[i] else null;
-        try processEntry(sh, w, handle, name, se.kind, meta, ignore, prefix_len, entry_depth, may_descend, &child_ref, &handle_consumed);
+        const ino: u64 = if (have_inos) w.inos.items[i] else 0;
+        try processEntry(sh, w, task, handle, name, se.kind, meta, ino, ignore, prefix_len, entry_depth, may_descend, &child_ref, &handle_consumed);
     }
 }
 
 fn processEntry(
     sh: *SharedWorkerState,
     w: *Worker,
+    task: *DirTask,
     handle: Handle,
     name: []const u8,
     entry_kind: EntryKind,
     meta: ?*const Metadata,
+    ino: u64,
     cur_ignore: ?*IgnoreNode,
     prefix_len: usize,
     entry_depth: u16,
@@ -450,11 +478,30 @@ fn processEntry(
     // .gitignore would give a deeper directory.
     if (chainIgnored(cur_ignore, sh.extra_ignore_root, relative_path, basename, is_dir)) return;
 
+    // Cycle key the child task will carry under follow_symlinks. Real
+    // directories are keyed by the listing's d_ino under the parent's device
+    // (exact within one filesystem; a mount or btrfs-subvolume crossing is
+    // re-keyed when the child is opened, see `resolveTaskKey`), so only
+    // symlinks -- whose target lives elsewhere -- pay a statx here.
+    var child_key: InodeKey = .{ .dev = task.dev, .ino = ino };
     if (!is_dir and opts.follow_symlinks and entry_kind == .sym_link) {
-        is_dir = isSymlinkedDir(sh, handle, name);
+        // stat(FOLLOW): a directory target not yet visited is descended
+        if (statForSymlink(sh, handle, name, true)) |res| {
+            // Leaving the root's device may land on a filesystem the
+            // short-read gate never examined; stop trusting short reads for
+            // the rest of the walk. Ordered before the child task is pushed,
+            // so the worker that scans it observes the cleared flag.
+            if (res.is_dir and res.key.dev != sh.root_dev) sh.trust_short.store(false, .release);
+            is_dir = res.is_dir and !sh.visitedBefore(res.key);
+            child_key = res.key;
+        }
     } else if (is_dir and opts.follow_symlinks) {
-        if (statForSymlink(sh, handle, name, false)) |res| {
+        if (ino != 0) {
+            if (sh.visitedBefore(child_key)) return;
+        } else if (statForSymlink(sh, handle, name, false)) |res| {
+            // Listing gave no inode (non-Linux backends, DT_UNKNOWN).
             if (sh.visitedBefore(res.key)) return;
+            child_key = res.key;
         }
     }
 
@@ -509,6 +556,8 @@ fn processEntry(
             .depth = entry_depth,
             .ignore = cur_ignore,
             .parent = cr,
+            .dev = child_key.dev,
+            .ino = child_key.ino,
         };
         try sh.queue.push(sh.allocator, sh.io, w.id, child);
     }
@@ -550,7 +599,7 @@ fn openTaskDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!?Ha
 
     const open_result: anyerror!Handle = blk: {
         if (task.parent) |p| {
-            break :blk openChild(sh, p.handle, basenameOf(task.rel));
+            break :blk openChild(sh, p.handle, basenameOf(task.rel), task);
         }
         const root = if (sh.root_path.len == 0) "." else sh.root_path;
         break :blk openRoot(sh, root);
@@ -566,18 +615,34 @@ fn openTaskDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!?Ha
     return handle;
 }
 
-fn openChild(sh: *SharedWorkerState, parent: Handle, name: []const u8) anyerror!Handle {
+fn openChild(sh: *SharedWorkerState, parent: Handle, name: []const u8, task: *DirTask) anyerror!Handle {
     if (is_posix_backend) {
         var name_z: [NAME_BUF:0]u8 = undefined;
         if (name.len > NAME_MAX) return error.NameTooLong;
         @memcpy(name_z[0..name.len], name);
         name_z[name.len] = 0;
-        return openDirNoatime(sh, parent, name_z[0..name.len :0], .{
+        const flags: posix.O = .{
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
             .NOFOLLOW = !sh.options.follow_symlinks,
-        });
+        };
+        if (builtin.os.tag == .linux and sh.options.follow_symlinks) {
+            // The task's inherited (dev, d_ino) key is only right while the
+            // open stays on the parent's filesystem. RESOLVE_NO_XDEV makes a
+            // mount-point crossing fail with EXDEV; then (and when openat2 is
+            // unavailable) the task is re-keyed by statx once opened.
+            if (!sh.openat2_unavailable.load(.monotonic)) {
+                switch (openat2NoXdevNoatime(sh, parent, name_z[0..name.len :0], flags)) {
+                    .opened => |fd| return fd,
+                    .xdev => {},
+                    .unavailable => sh.openat2_unavailable.store(true, .monotonic),
+                    .other => {}, // let openat report the error
+                }
+            }
+            task.verify_key = true;
+        }
+        return openDirNoatime(sh, parent, name_z[0..name.len :0], flags);
     } else if (is_windows_backend) {
         return win.openChildDir(parent, name);
     } else {
@@ -754,18 +819,80 @@ fn dirInPatternScope(prefix: []const u8, dir_rel: []const u8) bool {
 
 const SymlinkStat = struct { is_dir: bool, key: InodeKey };
 
-/// stat(FOLLOW) on a directory entry; true when it resolves to a directory not yet visited
-fn isSymlinkedDir(sh: *SharedWorkerState, handle: Handle, name: []const u8) bool {
-    if (statForSymlink(sh, handle, name, true)) |res| {
-        if (!res.is_dir) return false;
-        // Leaving the root's device may land on a filesystem the short-read
-        // gate never examined; stop trusting short reads for the rest of the
-        // walk. Ordered before the child task is pushed, so the worker that
-        // scans it observes the cleared flag.
-        if (res.key.dev != sh.root_dev) sh.trust_short.store(false, .release);
-        return !sh.visitedBefore(res.key);
+/// Inode number of every btrfs subvolume root as seen from inside it. A
+/// subvolume's entry in its parent's listing carries the subvolume id instead,
+/// so the "." check below already catches the crossing unless that id is 256
+/// itself; treating 256 as always-suspect closes the gap.
+const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
+
+const OpenHow = extern struct { flags: u64, mode: u64, resolve: u64 };
+const RESOLVE_NO_XDEV: u64 = 0x01;
+
+fn openat2NoXdev(dirfd: posix.fd_t, name_z: [*:0]const u8, flags: posix.O) usize {
+    if (comptime builtin.os.tag != .linux) unreachable;
+    var how: OpenHow = .{ .flags = @as(u32, @bitCast(flags)), .mode = 0, .resolve = RESOLVE_NO_XDEV };
+    return linux.syscall4(.openat2, @bitCast(@as(isize, dirfd)), @intFromPtr(name_z), @intFromPtr(&how), @sizeOf(OpenHow));
+}
+
+const Openat2Result = union(enum) { opened: posix.fd_t, xdev, unavailable, other };
+
+/// openat2(RESOLVE_NO_XDEV) with the same O_NOATIME policy as
+/// `openDirNoatime`. EPERM is ambiguous here: O_NOATIME refused on a foreign
+/// directory, or openat2 itself filtered by seccomp. With the flag set, a
+/// first EPERM retries once without it; only an EPERM without the flag (or
+/// ENOSYS) marks openat2 unavailable.
+fn openat2NoXdevNoatime(sh: *SharedWorkerState, dirfd: posix.fd_t, name_z: [*:0]const u8, base_flags: posix.O) Openat2Result {
+    var flags = base_flags;
+    var noatime = sh.noatime_ok.load(.monotonic);
+    flags.NOATIME = noatime;
+    while (true) {
+        const rc = openat2NoXdev(dirfd, name_z, flags);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return .{ .opened = @intCast(rc) },
+            .XDEV => return .xdev,
+            .NOSYS => return .unavailable,
+            .PERM => {
+                if (!noatime) return .unavailable;
+                sh.noatime_ok.store(false, .monotonic);
+                noatime = false;
+                flags.NOATIME = false;
+            },
+            else => return .other,
+        }
     }
-    return false;
+}
+
+/// Linux, follow_symlinks: a child task was keyed by its parent's device and
+/// the parent listing's d_ino. Inside the directory, the "." record reports
+/// the inode as the directory's own filesystem sees it; when the two agree the
+/// key is exact and no statx is needed. They disagree across a btrfs
+/// subvolume boundary (listing: subvolume id, ".": 256) and a mount point
+/// (listing: covered inode; the EXDEV open path also sets `verify_key`), so
+/// those pay one statx to learn the real (dev, ino). The task's own key is
+/// already in the visited set, so only a *different* real key can mean the
+/// directory was visited before; then this returns false.
+fn resolveTaskKey(sh: *SharedWorkerState, task: *DirTask, handle: Handle, dot_ino: u64) bool {
+    if (!task.verify_key and dot_ino != 0 and dot_ino == task.ino and dot_ino != BTRFS_FIRST_FREE_OBJECTID) {
+        @branchHint(.likely);
+        return true;
+    }
+    var stx: linux.Statx = undefined;
+    const rc = linux.statx(handle, "", linux.AT.EMPTY_PATH, .{ .INO = true }, &stx);
+    if (linux.errno(rc) != .SUCCESS) return true;
+    const key: InodeKey = .{
+        .dev = (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor),
+        .ino = stx.ino,
+    };
+    if (key.dev == task.dev and key.ino == task.ino) return true;
+    // A real (dev, ino) off the root's device: that filesystem was never
+    // examined by the short-read gate (see the symlink branch of
+    // processEntry). This task's own scan already ran, so this only covers
+    // its children, which is exactly where the untrusted reads can happen.
+    if (key.dev != sh.root_dev) sh.trust_short.store(false, .release);
+    if (sh.visitedBefore(key)) return false;
+    task.dev = key.dev;
+    task.ino = key.ino;
+    return true;
 }
 
 pub fn recordRootVisited(sh: *SharedWorkerState) void {
@@ -783,19 +910,20 @@ pub fn recordRootVisited(sh: *SharedWorkerState) void {
             if (linux.errno(rc) != .SUCCESS) return;
             const dev = (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor);
             sh.root_dev = dev;
-            _ = sh.visitedBefore(.{ .dev = dev, .ino = stx.ino });
+            sh.root_key = .{ .dev = dev, .ino = stx.ino };
         } else {
             var st: std.c.Stat = undefined;
             if (std.c.fstatat(types.AT_FDCWD, path_z[0..root.len :0], &st, 0) != 0) return;
-            _ = sh.visitedBefore(.{
+            sh.root_key = .{
                 .dev = @bitCast(@as(i64, @intCast(st.dev))),
                 .ino = @intCast(st.ino),
-            });
+            };
         }
     } else {
         const stat = std.Io.Dir.cwd().statFile(sh.io, root, .{ .follow_symlinks = true }) catch return;
-        _ = sh.visitedBefore(.{ .dev = 0, .ino = @intCast(stat.inode) });
+        sh.root_key = .{ .dev = 0, .ino = @intCast(stat.inode) };
     }
+    _ = sh.visitedBefore(sh.root_key);
 }
 
 /// Stats the handle as fast as possible

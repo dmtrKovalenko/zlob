@@ -15,6 +15,15 @@ pub const DirTask = struct {
     /// Parent directory handle the child opens relative to (one ref owned by
     /// the task). Null for the root task.
     parent: ?*HandleRef,
+    /// Cycle key of this directory, meaningful only under `follow_symlinks`:
+    /// `dev` is inherited from the parent task (re-derived by statx when the
+    /// open crosses a mount point or btrfs subvolume), `ino` is the parent
+    /// listing's d_ino (or the symlink target's, for a followed link).
+    dev: u64 = 0,
+    ino: u64 = 0,
+    /// The open could not guarantee it stayed on `dev` (mount crossing, or no
+    /// openat2): re-derive the key with one statx once the dir is open.
+    verify_key: bool = false,
 };
 
 const LocalQueue = struct {
