@@ -189,6 +189,8 @@ pub const Visitor = struct {
     visit: *const fn (context: ?*anyopaque, entry: *const Entry) VisitAction,
 };
 
+pub const TrustShortGetdents = enum(u8) { auto, never };
+
 pub const Options = struct {
     /// Worker thread count. 0 = one per CPU (capped). 1 = caller thread only.
     threads: u16 = 0,
@@ -224,6 +226,12 @@ pub const Options = struct {
     meta: MetaMask = .{},
     /// Sort collected results by path (`collect` only).
     sort: bool = false,
+    /// Linux: skip the EOF-confirming getdents64 call per directory when the
+    /// root's filesystem is known to fill buffers greedily (ext4, btrfs, xfs,
+    /// tmpfs, f2fs) and no other filesystem is mounted below it. `.never`
+    /// always issues the extra call. Env `ZLOB_TRUST_SHORT_GETDENTS=0` also
+    /// disables it process-wide (libc builds).
+    trust_short_getdents: TrustShortGetdents = .auto,
     err_callback: ?ErrCallbackFn = null,
     abort_on_error: bool = false,
     /// Io used for queue synchronization and by the std_fs fallback backend.

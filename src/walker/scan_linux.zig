@@ -108,7 +108,19 @@ pub fn scanDir(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!voi
 
             try worker.appendScratch(sh, w, .{ .name = name, .kind = kind, .meta = meta });
         }
+
+        // On a greedy-fill filesystem a return that left room for one more
+        // maximal record means the directory is exhausted: skip the call that
+        // would only confirm it with 0.
+        if (dirent.shortReadIsEof(len, w.io_buf.len - 8) and sh.trust_short.load(.monotonic)) return;
     }
+}
+
+/// See `dirent.trustShortReaddir`; re-exported so worker.zig needs no direct
+/// dependency on the Linux-only dirent module.
+pub fn trustShortReaddir(fd: posix.fd_t) bool {
+    if (comptime !supported) return false;
+    return dirent.trustShortReaddir(fd);
 }
 
 /// Translate the caller's requested fields into a statx mask, so each entry's

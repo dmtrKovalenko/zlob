@@ -120,9 +120,25 @@ pub const HiddenConfig = struct {
     }
 };
 
+pub const TrustShortGetdents = enum(u8) { auto, never };
+
+/// Per-glob-call memo of the short-read verdict, shared by every
+/// DirIterator the call opens. The first opened directory (the walk's start
+/// directory) is probed; later ones reuse the answer.
+pub const TrustCache = struct {
+    state: enum(u8) { unknown, yes, no } = .unknown,
+};
+
 pub const WalkerConfig = struct {
-    /// Buffer size for getdents64 (Linux only)
-    getdents_buffer_size: usize = 16384,
+    /// Buffer size for getdents64 (Linux only). 64 KiB holds all but the
+    /// largest directories in one call, which with `trust_short_getdents`
+    /// makes them single-syscall.
+    getdents_buffer_size: usize = 65536,
+
+    /// Linux: treat a short getdents64 return as EOF when the start
+    /// directory's filesystem fills greedily (see dirent.trustShortReaddir),
+    /// saving the confirming call per directory.
+    trust_short_getdents: TrustShortGetdents = .auto,
 
     // left for convenience should not be used for getdents64
     max_depth: usize = 128,
@@ -319,6 +335,15 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
     // State
     finished: bool,
 
+    // A short getdents64 return proves EOF (greedy-fill filesystem under the
+    // start dir), so the confirming call is skipped: `current_eof` marks the
+    // buffer being drained as the directory's last.
+    trust_short: bool,
+    current_eof: bool,
+    // Device of the start dir; a followed symlink onto another device drops
+    // `trust_short` (that filesystem was never examined).
+    root_dev: u64,
+
     const DirEntry = struct {
         fd: posix.fd_t,
         depth: u16,
@@ -356,15 +381,22 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         };
 
         var visited: std.AutoHashMapUnmanaged(InodeKey, void) = .empty;
+        var root_dev: u64 = 0;
         if (config.follow_symlinks) {
             visited.ensureTotalCapacity(allocator, 256) catch {};
             // Seed with the start dir so a symlink pointing back to it is rejected.
             if (statFd(start_fd)) |key| {
+                root_dev = key.dev;
                 visited.put(allocator, key, {}) catch {};
             }
         }
 
+        const trust_short = config.trust_short_getdents == .auto and dirent64.trustShortReaddir(start_fd);
+
         return RecursiveGetdents64Walker{
+            .trust_short = trust_short,
+            .current_eof = false,
+            .root_dev = root_dev,
             .allocator = allocator,
             .config = config,
             .dir_stack = dir_stack,
@@ -432,8 +464,14 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             }
 
             // buffer free - read more from current directory.
-            // Short by 8: see direntNameLen.
-            const bytes_read = linux.getdents64(self.current_fd, self.getdents_buffer.ptr, self.getdents_buffer.len - 8);
+            // Short by 8: see direntNameLen. When the previous read already
+            // proved EOF, skip the call that would only return 0.
+            const cap = self.getdents_buffer.len - 8;
+            const bytes_read: usize = if (self.current_eof)
+                0
+            else
+                linux.getdents64(self.current_fd, self.getdents_buffer.ptr, cap);
+            self.current_eof = false;
 
             if (@as(isize, @bitCast(bytes_read)) < 0 or bytes_read == 0) {
                 // Current directory exhausted or error - close it and pop next from stack
@@ -461,6 +499,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
             self.getdents_len = bytes_read;
             self.getdents_offset = 0;
+            if (self.trust_short and dirent64.shortReadIsEof(bytes_read, cap)) self.current_eof = true;
         }
     }
 
@@ -545,6 +584,9 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                     if (kind != .sym_link) break :blk false;
                     const res = statAtFollow(self.current_fd, name_z) orelse break :blk true;
                     if (!res.is_dir) break :blk true;
+                    // Off the start dir's device: that filesystem was never
+                    // checked, so stop trusting short reads from here on.
+                    if (res.key.dev != self.root_dev) self.trust_short = false;
                     const gop = self.visited.getOrPut(self.allocator, res.key) catch break :blk true;
                     break :blk gop.found_existing;
                 };
@@ -916,6 +958,11 @@ pub const SingleDirIterator = struct {
     offset: usize,
     len: usize,
     hidden: HiddenConfig,
+    /// Short getdents64 returns prove EOF on this filesystem (see
+    /// dirent.trustShortReaddir); `eof` marks the buffer being drained as the
+    /// directory's last, so the confirming call is skipped.
+    trust_short: bool = false,
+    eof: bool = false,
 
     pub const IterEntry = struct {
         name: []const u8,
@@ -1015,7 +1062,10 @@ pub const SingleDirIterator = struct {
             }
 
             // Buffer exhausted - read more. Short by 8: see direntNameLen.
-            const rc = linux.getdents64(self.fd, &self.buffer, self.buffer.len - 8);
+            // A previous short read already proved EOF: skip the 0-return call.
+            if (self.eof) return null;
+            const cap = self.buffer.len - 8;
+            const rc = linux.getdents64(self.fd, &self.buffer, cap);
             const bytes_read: isize = @bitCast(rc);
             if (bytes_read <= 0) {
                 return null;
@@ -1023,6 +1073,7 @@ pub const SingleDirIterator = struct {
 
             self.len = @intCast(bytes_read);
             self.offset = 0;
+            self.eof = self.trust_short and dirent64.shortReadIsEof(self.len, cap);
         }
     }
 };
@@ -1174,6 +1225,15 @@ pub const DirIterator = struct {
         // untouched here.
         if (is_linux) {
             const fd = try SingleDirIterator.openDirFd(path, base_dir);
+            // The first directory a glob call opens is its start directory;
+            // its verdict covers every directory opened below it.
+            var trust_short = false;
+            if (fs.trust) |tc| {
+                if (tc.state == .unknown) {
+                    tc.state = if (dirent64.trustShortReaddir(fd)) .yes else .no;
+                }
+                trust_short = tc.state == .yes;
+            }
             out.* = .{
                 .io = io,
                 .mode = .{ .getdents = .{
@@ -1182,6 +1242,8 @@ pub const DirIterator = struct {
                     .offset = 0,
                     .len = 0,
                     .hidden = hidden_config,
+                    .trust_short = trust_short,
+                    .eof = false,
                 } },
                 .hidden = hidden_config,
             };
@@ -1430,6 +1492,10 @@ pub const AltFs = struct {
     opendir: ?AltOpendirFn = null,
     readdir: ?AltReaddirFn = null,
     closedir: ?AltClosedirFn = null,
+    /// Linux: when set, DirIterators opened through this provider share the
+    /// short-read verdict (probed on the first directory opened). Null keeps
+    /// the EOF-confirming getdents64 call.
+    trust: ?*TrustCache = null,
 
     /// Check if this provider uses ALTDIRFUNC callbacks
     pub inline fn isAltDirFunc(self: AltFs) bool {

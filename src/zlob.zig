@@ -805,9 +805,35 @@ fn expandWildcardComponents(
     }
 }
 
-fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
+/// True when a component after the pattern's literal prefix could climb out
+/// of the start directory: a `..` component, or a wildcard component that
+/// starts with '.' (POSIX: `.*` matches `..`). Conservative: any ".." text or
+/// any component starting with '.' after the first wildcard/brace counts.
+fn patternMayEscapeStartDir(pattern: []const u8) bool {
+    const first_magic = std.mem.indexOfAny(u8, pattern, "*?[{") orelse return false;
+    const tail = pattern[first_magic..];
+    if (std.mem.indexOf(u8, tail, "..") != null) return true;
+    var i: usize = 0;
+    while (i < tail.len) : (i += 1) {
+        if (tail[i] == '.' and (i == 0 or tail[i - 1] == '/' or tail[i - 1] == '{' or tail[i - 1] == ','))
+            return true;
+    }
+    return false;
+}
+
+fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider_in: walker.AltFs) !?void {
     var effective_pattern = pattern;
     var flags = flags_in;
+
+    // Linux getdents: one short-read-is-EOF verdict per start directory,
+    // probed on the first directory this call opens and reused by every
+    // directory below it (see walker.TrustCache). Withheld when the pattern
+    // could climb out of the start directory, which the probe never examined.
+    var trust_cache = walker.TrustCache{};
+    var fs_provider = fs_provider_in;
+    if (builtin.os.tag == .linux and !fs_provider.isAltDirFunc() and !patternMayEscapeStartDir(pattern)) {
+        fs_provider.trust = &trust_cache;
+    }
 
     if (pattern.len > 0 and isSep(pattern[pattern.len - 1])) {
         flags.onlydir = true;

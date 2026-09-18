@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
 const queue_mod = @import("queue.zig");
 const scan = @import("scan.zig");
+const scan_linux = @import("scan_linux.zig");
 const win = @import("scan_windows.zig");
 const gitignore_mod = @import("../gitignore.zig");
 const compiled_pattern = @import("../compiled_pattern.zig");
@@ -122,6 +123,13 @@ pub const SharedWorkerState = struct {
     /// `BulkScanner` AttrList, Windows into its info-class selection — so no
     /// shared field is needed there.
     statx_mask: if (builtin.os.tag == .linux) linux.STATX else void,
+    /// Linux: a short getdents64 return proves EOF, so the confirming call is
+    /// skipped. Decided once from the root fd (see dirent.trustShortReaddir)
+    /// before helper threads exist; only ever cleared afterwards (a followed
+    /// symlink left the root's device), hence the atomic.
+    trust_short: std.atomic.Value(bool) = .init(false),
+    /// Device of the walk root, for the cross-device check above.
+    root_dev: u64 = 0,
     /// Symlink-cycle bookkeeping, only touched when follow_symlinks is set.
     visited_mutex: std.Io.Mutex = .init,
     visited: std.AutoHashMapUnmanaged(InodeKey, void) = .empty,
@@ -327,6 +335,14 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     const handle = (try openTaskDir(sh, w, task)) orelse return;
     var handle_consumed = false;
     defer if (!handle_consumed) closeHandle(handle, sh.io);
+
+    // The root is the first and only task before any helper thread is
+    // spawned, so this plain store is published to them by the spawn.
+    if (comptime backend == .linux_getdents) {
+        if (task.depth == 0 and sh.options.trust_short_getdents == .auto) {
+            sh.trust_short.store(scan_linux.trustShortReaddir(handle), .monotonic);
+        }
+    }
 
     w.names.clearRetainingCapacity();
     w.entries.clearRetainingCapacity();
@@ -710,6 +726,11 @@ const SymlinkStat = struct { is_dir: bool, key: InodeKey };
 fn isSymlinkedDir(sh: *SharedWorkerState, handle: Handle, name: []const u8) bool {
     if (statForSymlink(sh, handle, name, true)) |res| {
         if (!res.is_dir) return false;
+        // Leaving the root's device may land on a filesystem the short-read
+        // gate never examined; stop trusting short reads for the rest of the
+        // walk. Ordered before the child task is pushed, so the worker that
+        // scans it observes the cleared flag.
+        if (res.key.dev != sh.root_dev) sh.trust_short.store(false, .release);
         return !sh.visitedBefore(res.key);
     }
     return false;
@@ -729,6 +750,7 @@ pub fn recordRootVisited(sh: *SharedWorkerState) void {
             const rc = linux.statx(types.AT_FDCWD, path_z[0..root.len :0], 0, .{ .INO = true }, &stx);
             if (linux.errno(rc) != .SUCCESS) return;
             const dev = (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor);
+            sh.root_dev = dev;
             _ = sh.visitedBefore(.{ .dev = dev, .ino = stx.ino });
         } else {
             var st: std.c.Stat = undefined;

@@ -851,3 +851,176 @@ test "isIgnoredResolved: overflow beyond the directory-chain limit falls back an
     try expectFastEqualsSlow(&rules, "d/d/d/keep", false);
     try expectFastEqualsSlow(&rules, "d/d/d/dead", false);
 }
+
+// ---------------------------------------------------------------------------
+// Short-read-is-EOF (single getdents64 per directory) correctness
+// ---------------------------------------------------------------------------
+
+/// Creates `n` files with pseudo-random name lengths under `dir` (absolute or
+/// cwd-relative). Lengths 1..200 so directory listings land on arbitrary
+/// getdents64 buffer boundaries.
+fn fillRandomNames(io: std.Io, dir: []const u8, n: usize) !void {
+    var prng = std.Random.DefaultPrng.init(@intCast(n * 7919 + 13));
+    const rnd = prng.random();
+    var name_buf: [256]u8 = undefined;
+    var path_buf: [1024]u8 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const len = 1 + rnd.uintLessThan(usize, 200);
+        // Unique numeric prefix, then random filler up to the chosen length.
+        const head = try std.fmt.bufPrint(&name_buf, "{d}_", .{i});
+        var k: usize = head.len;
+        while (k < @max(len, head.len)) : (k += 1) name_buf[k] = 'a' + @as(u8, @intCast(rnd.uintLessThan(usize, 26)));
+        const name = name_buf[0..k];
+        const p = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name });
+        var f = try std.Io.Dir.cwd().createFile(io, p, .{});
+        f.close(io);
+    }
+}
+
+fn countStd(io: std.Io, dir: []const u8) !usize {
+    var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+    defer d.close(io);
+    var it = d.iterate();
+    var n: usize = 0;
+    while (try it.next(io)) |_| n += 1;
+    return n;
+}
+
+fn checkShortEofTree(base: []const u8) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const gpa = testing.allocator;
+    const walker = @import("walker");
+
+    var root_buf: [512]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "{s}/short_eof_{d}", .{
+        base, std.Io.Timestamp.now(io, .real).toMilliseconds(),
+    });
+    std.Io.Dir.cwd().createDirPath(io, root) catch return error.SkipZigTest;
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    // Sizes straddle the 8 KiB (DirIterator) and 64 KiB (walkers) buffers,
+    // including the empty and single-entry cases.
+    const sizes = [_]usize{ 0, 1, 2, 27, 28, 29, 60, 61, 300, 700, 3000 };
+    var expected_total: usize = 0;
+    var sub_buf: [600]u8 = undefined;
+    for (sizes) |n| {
+        const sub = try std.fmt.bufPrint(&sub_buf, "{s}/n{d}", .{ root, n });
+        try std.Io.Dir.cwd().createDir(io, sub, .default_dir);
+        try fillRandomNames(io, sub, n);
+        const std_count = try countStd(io, sub);
+        try testing.expectEqual(n, std_count);
+        expected_total += n + 1; // files + the subdir itself
+
+        // Walker B single-directory iterator (8 KiB buffer, per-call trust cache).
+        var tc = walker.TrustCache{};
+        var iter: walker.DirIterator = undefined;
+        const opened = try walker.DirIterator.openHandledInto(&iter, io, sub, null, .{
+            .include_dot_entries = false,
+            .include_hidden = true,
+        }, .{ .trust = &tc }, .{});
+        try testing.expect(opened);
+        defer iter.close();
+        var it_count: usize = 0;
+        while (iter.next()) |_| it_count += 1;
+        try testing.expectEqual(n, it_count);
+    }
+
+    // Walker A, serial and parallel.
+    inline for ([_]u16{ 1, 0 }) |threads| {
+        var results = try walk.collect(gpa, root, .{ .threads = threads, .respect_git = false });
+        defer results.deinit();
+        try testing.expectEqual(expected_total, results.entries.len);
+    }
+    // Walker A with the optimization off must agree.
+    {
+        var results = try walk.collect(gpa, root, .{ .threads = 1, .respect_git = false, .trust_short_getdents = .never });
+        defer results.deinit();
+        try testing.expectEqual(expected_total, results.entries.len);
+    }
+
+    // Walker B recursive (64 KiB buffer).
+    inline for ([_]walker.TrustShortGetdents{ .auto, .never }) |trust| {
+        var w = try walker.DefaultWalker.init(gpa, io, root, .{
+            .hidden = .{ .include_dot_entries = false, .include_hidden = true },
+            .trust_short_getdents = trust,
+        });
+        defer w.deinit();
+        var count: usize = 0;
+        while (try w.next()) |_| count += 1;
+        try testing.expectEqual(expected_total, count);
+    }
+}
+
+// The dirent module's own tests are not collected (non-root module), so its
+// short-read gate is unit-tested here.
+const dirent = if (builtin.os.tag == .linux) @import("dirent") else struct {};
+
+test "short-read EOF: filesystem whitelist" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    try testing.expect(dirent.fsMagicIsGreedy(0xEF53)); // ext4
+    try testing.expect(dirent.fsMagicIsGreedy(0x9123683E)); // btrfs
+    try testing.expect(dirent.fsMagicIsGreedy(0x01021994)); // tmpfs
+    try testing.expect(!dirent.fsMagicIsGreedy(0x65735546)); // FUSE
+    try testing.expect(!dirent.fsMagicIsGreedy(0x6969)); // NFS
+    try testing.expect(!dirent.fsMagicIsGreedy(0x794C7630)); // overlay
+    try testing.expect(!dirent.fsMagicIsGreedy(0xFF534D42)); // cifs
+    try testing.expect(dirent.fsNameIsGreedy("xfs"));
+    try testing.expect(!dirent.fsNameIsGreedy("fuse.sshfs"));
+}
+
+test "short-read EOF: threshold leaves room for one maximal record" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    try testing.expectEqual(@as(usize, 280), dirent.MAX_RECLEN);
+    try testing.expect(dirent.shortReadIsEof(0, 280));
+    try testing.expect(dirent.shortReadIsEof(1000, 1280));
+    try testing.expect(!dirent.shortReadIsEof(1001, 1280));
+}
+
+test "short-read EOF: mountinfo parse keeps only non-greedy mounts, unescaped" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const sample =
+        \\72 1 0:33 /root / rw,relatime shared:1 - btrfs /dev/mapper/luks rw,ssd
+        \\51 72 0:33 /home /home rw,relatime shared:2 - btrfs /dev/mapper/luks rw
+        \\98 51 0:50 / /home/u/my\040mnt rw,nosuid shared:9 - fuse.sshfs u@h:/ rw
+        \\99 72 0:51 / /mnt/nfs rw shared:10 - nfs4 h:/export rw
+        \\54 72 8:1 / /boot rw,relatime shared:3 - ext4 /dev/sda1 rw
+        \\
+    ;
+    const gpa = testing.allocator;
+    const content = try gpa.dupe(u8, sample);
+    defer gpa.free(content);
+    const bad = try dirent.parseMountInfo(gpa, content);
+    defer gpa.free(bad);
+    try testing.expectEqual(@as(usize, 2), bad.len);
+    try testing.expectEqualStrings("/home/u/my mnt", bad[0]);
+    try testing.expectEqualStrings("/mnt/nfs", bad[1]);
+
+    try testing.expect(dirent.anyMountBelow(bad, "/"));
+    try testing.expect(dirent.anyMountBelow(bad, "/home"));
+    try testing.expect(dirent.anyMountBelow(bad, "/home/u"));
+    try testing.expect(dirent.anyMountBelow(bad, "/home/u/my mnt"));
+    try testing.expect(!dirent.anyMountBelow(bad, "/home/v"));
+    try testing.expect(!dirent.anyMountBelow(bad, "/home/u/my"));
+    try testing.expect(!dirent.anyMountBelow(bad, "/boot"));
+}
+
+test "short-read EOF: probe rejects a non-whitelisted filesystem (procfs)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const linux = std.os.linux;
+    const rc = linux.openat(linux.AT.FDCWD, "/proc/self", .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+    if (linux.errno(rc) != .SUCCESS) return error.SkipZigTest;
+    const fd: linux.fd_t = @intCast(rc);
+    defer _ = linux.close(fd);
+    try testing.expect(!dirent.trustShortReaddir(fd));
+}
+
+test "short-read EOF: dense random-name trees match std iteration (cache dir)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    try checkShortEofTree(".zig-cache/walk-tests");
+}
+
+test "short-read EOF: dense random-name trees match std iteration (tmpfs)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    try checkShortEofTree("/dev/shm/zlob-walk-tests");
+}
