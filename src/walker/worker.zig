@@ -135,6 +135,15 @@ pub const SharedWorkerState = struct {
     trust_short: std.atomic.Value(bool) = .init(false),
     /// Device of the walk root, for the cross-device check above.
     root_dev: u64 = 0,
+    /// Linux only: directories are opened with O_NOATIME so getdents64 never
+    /// dirties directory inodes (on relatime mounts the first walk after 24h
+    /// otherwise rewrites every directory's atime inline in getdents64 and
+    /// queues a metadata writeback per directory). O_NOATIME is refused with
+    /// EPERM when the caller neither owns the directory nor has CAP_FOWNER;
+    /// the first refusal retries once without the flag and clears this for the
+    /// rest of the walk, so a foreign tree costs one extra open, not one per
+    /// directory.
+    noatime_ok: std.atomic.Value(bool) = .init(true),
     /// Symlink-cycle bookkeeping, only touched when follow_symlinks is set.
     visited_mutex: std.Io.Mutex = .init,
     visited: std.AutoHashMapUnmanaged(InodeKey, void) = .empty,
@@ -563,17 +572,34 @@ fn openChild(sh: *SharedWorkerState, parent: Handle, name: []const u8) anyerror!
         if (name.len > NAME_MAX) return error.NameTooLong;
         @memcpy(name_z[0..name.len], name);
         name_z[name.len] = 0;
-        return posix.openatZ(parent, name_z[0..name.len :0], .{
+        return openDirNoatime(sh, parent, name_z[0..name.len :0], .{
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
             .NOFOLLOW = !sh.options.follow_symlinks,
-        }, 0);
+        });
     } else if (is_windows_backend) {
         return win.openChildDir(parent, name);
     } else {
         return parent.openDir(sh.io, name, .{ .iterate = true });
     }
+}
+
+/// POSIX directory open with O_NOATIME on Linux (see
+/// `SharedWorkerState.noatime_ok`). EPERM is the only way a read-only
+/// directory open can fail *because of* O_NOATIME, so on EPERM with the flag
+/// set retry once without it and stop asking for it for the rest of the walk.
+fn openDirNoatime(sh: *SharedWorkerState, dir_fd: posix.fd_t, name_z: [*:0]const u8, base_flags: posix.O) posix.OpenError!posix.fd_t {
+    if (comptime builtin.os.tag != .linux) return posix.openatZ(dir_fd, name_z, base_flags, 0);
+    var flags = base_flags;
+    const noatime = sh.noatime_ok.load(.monotonic);
+    flags.NOATIME = noatime;
+    return posix.openatZ(dir_fd, name_z, flags, 0) catch |err| {
+        if (!noatime or err != error.PermissionDenied) return err;
+        sh.noatime_ok.store(false, .monotonic);
+        flags.NOATIME = false;
+        return posix.openatZ(dir_fd, name_z, flags, 0);
+    };
 }
 
 fn openRoot(sh: *SharedWorkerState, root: []const u8) anyerror!Handle {
@@ -582,11 +608,11 @@ fn openRoot(sh: *SharedWorkerState, root: []const u8) anyerror!Handle {
         if (root.len >= MAX_PATH) return error.NameTooLong;
         @memcpy(path_z[0..root.len], root);
         path_z[root.len] = 0;
-        return posix.openatZ(posix.AT.FDCWD, path_z[0..root.len :0], .{
+        return openDirNoatime(sh, posix.AT.FDCWD, path_z[0..root.len :0], .{
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
-        }, 0);
+        });
     } else if (is_windows_backend) {
         // Reuse std's path normalization for the single root open; children
         // open NT-natively relative to it afterwards.
