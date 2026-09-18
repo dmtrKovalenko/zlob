@@ -676,7 +676,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         return null;
     }
 
-    return finalizeResults(allocator, &result_paths, flags, pzlob);
+    return finalizeResults(allocator, &result_paths, flags, pzlob, false);
 }
 
 /// One path component of a wildcard-dirs pattern, with its match state
@@ -1510,6 +1510,15 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     var all_results = ResultsList.initWithCapacity(allocator, 8192) catch ResultsList.init(allocator);
     defer all_results.deinit();
 
+    // A single walk can emit results already in strcmp order (sorted DFS),
+    // replacing the global sort in finalizeResults. Braced prefixes run
+    // several walks whose sets interleave, so they keep the global sort.
+    // Under follow_symlinks the visited-set cycle check makes the result set
+    // depend on traversal order (which alias of a shared target dir wins), so
+    // keep the unsorted walk there to preserve the exact same set.
+    const walk_sorted = pre_ds_count == 0 and !flags.nosort and !flags.follow_symlinks and
+        walker.DefaultWalker.supports_sorted;
+
     // Handle pre-doublestar components (braces BEFORE **)
     // e.g., "{src,lib}/**/*.rs" - need to find matching dirs first, then recurse into each
     if (pre_ds_count > 0) {
@@ -1530,7 +1539,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
         );
     } else {
         // Use unified walker for both simple (**/*.txt) and complex (**/foo/*.txt) patterns
-        try globRecursiveWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc, io, base_dir, fs_provider);
+        try globRecursiveWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc, io, base_dir, fs_provider, walk_sorted);
     }
 
     if (all_results.len() == 0) {
@@ -1538,7 +1547,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     }
 
     // Note: sorting is now handled inside finalizeResults using pre-computed lengths
-    return finalizeResults(allocator, &all_results, flags, pzlob);
+    return finalizeResults(allocator, &all_results, flags, pzlob, walk_sorted);
 }
 
 /// Handle non-recursive patterns with braced directory components
@@ -1631,7 +1640,7 @@ fn globWithBracedComponents(
         const root = base_dir orelse std.Io.Dir.cwd();
         _ = root.statFile(io, start_dir, .{}) catch return null;
         try all_results.appendPath(start_dir);
-        return finalizeResults(allocator, &all_results, flags, pzlob);
+        return finalizeResults(allocator, &all_results, flags, pzlob, false);
     }
 
     // Convert remaining BracedComponents to ComponentMatcher format
@@ -1667,7 +1676,7 @@ fn globWithBracedComponents(
     }
 
     // Note: sorting is now handled inside finalizeResults using pre-computed lengths
-    return finalizeResults(allocator, &all_results, flags, pzlob);
+    return finalizeResults(allocator, &all_results, flags, pzlob, false);
 }
 
 const BracedComponentMatcher = struct {
@@ -1808,8 +1817,9 @@ fn globRecursiveWithBracedPrefix(
 ) !void {
     // If we've matched all pre-doublestar components, start the recursive walk
     if (component_idx >= pre_ds_components.len) {
-        // Use unified walker for both simple and complex patterns
-        try globRecursiveWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc, io, base_dir, fs_provider);
+        // Use unified walker for both simple and complex patterns. The merged
+        // result set is sorted globally afterwards, so walk unsorted.
+        try globRecursiveWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc, io, base_dir, fs_provider, false);
         return;
     }
 
@@ -1864,9 +1874,13 @@ fn globRecursiveWithBracedPrefix(
     }
 }
 
-fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: ZlobFlags, pzlob: *zlob_t) !?void {
+/// `presorted`: the results already arrive in strcmp order (a sorted walk),
+/// so the global sort is skipped. Only the new set is ever sorted here, so
+/// this is safe under ZLOB_APPEND too.
+fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: ZlobFlags, pzlob: *zlob_t, presorted: bool) !?void {
     const offs = dooffsSlots(flags, pzlob);
     const new_count = results.len();
+    const need_sort = !flags.nosort and !presorted;
 
     // ZLOB_APPEND - merge with existing results. The emit format keeps all
     // owned strings in one buffer, so import the old set's bytes then the new
@@ -1891,7 +1905,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
 
         try combined.emit(offs, pzlob);
 
-        if (!flags.nosort and new_count > 0) {
+        if (need_sort and new_count > 0) {
             sorting.sortPaths(@ptrCast(pzlob.zlo_pathv + offs + old_count), pzlob.zlo_pathlen + old_count, new_count);
         }
         return;
@@ -1899,7 +1913,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
 
     try results.emit(offs, pzlob);
 
-    if (!flags.nosort) {
+    if (need_sort) {
         sorting.sortPaths(@ptrCast(pzlob.zlo_pathv + offs), pzlob.zlo_pathlen, new_count);
     }
     return;
@@ -1916,6 +1930,7 @@ fn globRecursiveWalk(
     io: Io,
     base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
+    sorted: bool,
 ) !void {
     const has_dir_components = rec_pattern.dir_components.len > 0;
 
@@ -1960,6 +1975,10 @@ fn globRecursiveWalk(
         .hidden = hidden_config,
         .follow_symlinks = flags.follow_symlinks,
         .fs = fs_provider,
+        // Sorted DFS: results come out in strcmp order of the full paths the
+        // loop below builds (constant start_dir prefix, '/' mark on dirs).
+        .sorted = sorted,
+        .sort_marks_dirs = flags.mark,
     };
 
     if (rec_pattern.gitignore_filter) |gi| {
@@ -2349,7 +2368,7 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
         return null;
     }
 
-    return finalizeResults(allocator, &names, flags, pzlob);
+    return finalizeResults(allocator, &names, flags, pzlob, false);
 }
 
 /// Result of a glob operation containing matched paths.
