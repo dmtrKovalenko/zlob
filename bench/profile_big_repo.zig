@@ -3,12 +3,7 @@ const c_lib = @import("c_lib");
 const zlob_flags = @import("zlob_flags");
 const zlob_t = c_lib.zlob_t;
 
-// Mirror src/c_lib.zig: opt out of the default 256 KiB threadlocal signal
-// stack (std.Thread's entry wrapper instantiates it per spawned thread and
-// glibc memsets the whole TLS block inside pthread_create) and the segfault
-// handler. This is a root-module setting; libzlob.a already sets it, but
-// every Zig root binary must set it itself or every parallel walk pays
-// ~256 KiB of zeroing + 64 page faults + a sigaltstack syscall per thread.
+// Root-module opt-out for per-worker signal-stack setup; see README.md.
 pub const std_options: std.Options = .{
     .signal_stack_size = null,
     .enable_segfault_handler = false,

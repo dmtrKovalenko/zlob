@@ -2173,7 +2173,7 @@ pub fn setGlobParallelThreads(n: u16) void {
     @atomicStore(u16, &glob_parallel_threads, n, .monotonic);
 }
 
-pub fn getGlobParallelThreads() u16 {
+fn getGlobParallelThreads() u16 {
     return @atomicLoad(u16, &glob_parallel_threads, .monotonic);
 }
 
