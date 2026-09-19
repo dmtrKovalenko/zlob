@@ -497,11 +497,17 @@ fn processEntry(
             child_key = res.key;
         }
     } else if (is_dir and opts.follow_symlinks) {
+        // A real directory whose inode was already claimed (reached first
+        // through a symlink, on another thread or earlier in this one) is
+        // still reported -- only the descent is skipped. Every directory is
+        // then listed exactly once and every listing entry reported exactly
+        // once, so the result size does not depend on which path won the
+        // race; only the subtree's placement does.
         if (ino != 0) {
-            if (sh.visitedBefore(child_key)) return;
+            if (sh.visitedBefore(child_key)) is_dir = false;
         } else if (statForSymlink(sh, handle, name, false)) |res| {
             // Listing gave no inode (non-Linux backends, DT_UNKNOWN).
-            if (sh.visitedBefore(res.key)) return;
+            if (sh.visitedBefore(res.key)) is_dir = false;
             child_key = res.key;
         }
     }

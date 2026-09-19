@@ -794,6 +794,52 @@ test "walk follow_symlinks: link to ancestor and link into sibling" {
     }
 }
 
+test "walk follow_symlinks: result size is independent of scheduling" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("symlink_farm");
+    defer t.deinit();
+
+    // A pnpm-style link farm: links/l<i> -> ../real/d<i>, and every real
+    // directory also holds a link back to an ancestor (a cycle). Whichever of
+    // the link and the real directory a worker reaches first gets to list the
+    // directory; the other must still be reported so the total never depends
+    // on the race.
+    const n_dirs = 24;
+    try t.mkdir("real");
+    try t.mkdir("links");
+    var buf: [512]u8 = undefined;
+    var lbuf: [512]u8 = undefined;
+    const cwd = std.Io.Dir.cwd();
+    for (0..n_dirs) |i| {
+        try t.mkdir(try std.fmt.bufPrint(&buf, "real/d{d}", .{i}));
+        for (0..3) |j| try t.write(try std.fmt.bufPrint(&buf, "real/d{d}/f{d}.txt", .{ i, j }), "x");
+        try cwd.symLink(t.io, "../..", try std.fmt.bufPrint(&lbuf, "{s}/real/d{d}/up", .{ t.root, i }), .{});
+        const target = try std.fmt.bufPrint(&buf, "../real/d{d}", .{i});
+        try cwd.symLink(t.io, target, try std.fmt.bufPrint(&lbuf, "{s}/links/l{d}", .{ t.root, i }), .{});
+    }
+    // real, links, n_dirs dirs, 3 files + 1 up link each, n_dirs links.
+    const expected: usize = 2 + n_dirs + n_dirs * 4 + n_dirs;
+
+    for (0..6) |_| {
+        for ([_]u16{ 1, 8 }) |threads| {
+            var results = try walk.collect(testing.allocator, t.root, .{
+                .threads = threads,
+                .follow_symlinks = true,
+            });
+            defer results.deinit();
+            try testing.expectEqual(expected, results.entries.len);
+            // Every file is listed exactly once, by whichever path won.
+            var files: usize = 0;
+            for (results.entries) |*e| {
+                if (e.kind == .file) files += 1;
+                try testing.expect(!std.mem.endsWith(u8, e.relativePath(), "/up/real"));
+            }
+            try testing.expectEqual(@as(usize, n_dirs * 3), files);
+        }
+    }
+}
+
 test "walk error callback: receives path and errno, nonzero return aborts" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no POSIX chmod
     var t: TestTree = .{ .io = undefined };
