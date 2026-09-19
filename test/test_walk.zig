@@ -1591,3 +1591,46 @@ test "short-read EOF: follow_symlinks onto another device lists completely (trus
     while (try w.next()) |_| count += 1;
     try testing.expectEqual(expected, count);
 }
+
+test "ZLOB_PARALLEL matches serial on a tree deeper than the depth limit" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("deep130");
+    defer t.deinit();
+
+    // 130 nested "d" directories with a file at each of the last few levels
+    // (depths 126..130), around the serial walker's 128 limit.
+    var path_buf: [1024]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&path_buf);
+    try fbs.writeAll(t.root);
+    var depth: usize = 0;
+    while (depth < 130) : (depth += 1) try fbs.writeAll("/d");
+    const deepest = fbs.buffered();
+    try std.Io.Dir.cwd().createDirPath(t.io, deepest);
+    var f_buf: [1100]u8 = undefined;
+    var d: usize = 126;
+    while (d <= 130) : (d += 1) {
+        const dir_len = t.root.len + d * 2;
+        const fp = try std.fmt.bufPrint(&f_buf, "{s}/f{d}.c", .{ deepest[0..dir_len], d });
+        var f = try std.Io.Dir.cwd().createFile(t.io, fp, .{});
+        f.close(t.io);
+    }
+
+    const base: c_int = zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE;
+    var pat_buf: [1100:0]u8 = undefined;
+    for ([_][]const u8{ "**/*.c", "**", "**/" }) |p| {
+        const pat = try std.fmt.bufPrintZ(&pat_buf, "{s}/{s}", .{ t.root, p });
+        try expectParallelEqualsSerial(alloc, pat, base, 4);
+        try expectParallelEqualsSerial(alloc, pat, base | zlob_flags.ZLOB_ONLYDIR | zlob_flags.ZLOB_MARK, 4);
+    }
+    // And the limit really bites: the depth-130 file is not reported.
+    const pat = try std.fmt.bufPrintZ(&pat_buf, "{s}/**/*.c", .{t.root});
+    const serial = try globPathsSorted(alloc, pat, base);
+    defer {
+        for (serial) |p| alloc.free(p);
+        alloc.free(serial);
+    }
+    try testing.expect(serial.len < 5);
+    try testing.expect(serial.len > 0);
+}

@@ -136,6 +136,8 @@ pub const TrustCache = struct {
 };
 
 pub const WalkerConfig = struct {
+    pub const default_max_depth: usize = 128;
+
     /// Buffer size for getdents64 (Linux only). 64 KiB holds all but the
     /// largest directories in one call, which with `trust_short_getdents`
     /// makes them single-syscall.
@@ -146,8 +148,9 @@ pub const WalkerConfig = struct {
     /// saving the confirming call per directory.
     trust_short_getdents: TrustShortGetdents = .auto,
 
-    // left for convenience should not be used for getdents64
-    max_depth: usize = 128,
+    /// Deepest directory level descended into (root = 0). Entries at this
+    /// depth are still reported. The ZLOB_PARALLEL path uses the same value.
+    max_depth: usize = default_max_depth,
 
     /// Hidden file and special entry filtering.
     /// Controls whether ".", "..", and hidden files are included in iteration.

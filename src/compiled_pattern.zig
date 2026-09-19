@@ -71,6 +71,12 @@ pub fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8, flags
 /// Split `pattern` on `/` into one segment per path component (a leading `/`
 /// becomes an empty first segment). The result matches component-wise, so no
 /// wildcard can span a separator; `**` segments span whole components.
+///
+/// Limitation: the split is a plain scalar split, so a `/` inside a bracket
+/// expression (`[a/b]`) or after a backslash (`\/`) also ends a component.
+/// glob(3) behaves the same way: a separator can never be matched by a
+/// bracket expression anyway, and `\/` is just an escaped separator, so the
+/// resulting segments match the same paths.
 pub fn splitPatternComponents(allocator: Allocator, pattern: []const u8) !PatternSegments {
     var segment_count: usize = 0;
     var iter = mem.splitScalar(u8, pattern, '/');

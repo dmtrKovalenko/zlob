@@ -353,6 +353,8 @@ pub const ResultsList = struct {
         if (n == 0) return;
         if (self.count + n > self.capacity) try self.grow(self.count + n);
         const base = self.bytes.items.len;
+        // Offsets are u32; refuse to silently truncate past 4 GiB of paths.
+        if (base + other.bytes.items.len > std.math.maxInt(u32)) return error.OutOfMemory;
         try self.bytes.appendSlice(self.allocator, other.bytes.items);
         const src_off = other.offsetsPtr()[0..n];
         const dst_off = self.offsetsPtr()[self.count..][0..n];
@@ -2311,6 +2313,12 @@ fn globRecursiveWalkParallel(
 
     const opts = walk.Options{
         .threads = getGlobParallelThreads(),
+        // Same limit as the serial walker's WalkerConfig.max_depth default, so
+        // both paths report identical sets on trees deeper than that. The
+        // serial walker lists directories at depth <= max_depth (so entries
+        // up to max_depth + 1); the parallel one lists at entry depth <
+        // max_depth. Hence the +1.
+        .max_depth = walker.WalkerConfig.default_max_depth + 1,
         .follow_symlinks = flags.follow_symlinks,
         .include_hidden = flags.period or pattern_wants_hidden,
         .respect_git = false,

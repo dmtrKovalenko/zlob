@@ -200,17 +200,20 @@ pub fn collectAs(gpa: Allocator, root: []const u8, options: Options, comptime Ad
     errdefer gpa.free(entries);
     errdefer gpa.free(metas);
 
+    // Sort while the sinks still own the string chunks (their deinit above
+    // frees them), so a failure here leaks nothing.
+    if (options.sort) {
+        const io = options.io orelse std.Io.Threaded.global_single_threaded.io();
+        entries = try sort_mod.sortAs(Out, Adapter.relativePath, gpa, io, entries, n_workers);
+    }
+
+    // Nothing below may fail once chunk ownership starts moving.
     const chunks = try gpa.alloc([]u8, n_chunks);
     var ci: usize = 0;
     for (col.sinks) |*ws| {
         @memcpy(chunks[ci..][0..ws.chunks.items.len], ws.chunks.items);
         ci += ws.chunks.items.len;
         ws.chunks.clearRetainingCapacity(); // ownership moved to Results
-    }
-
-    if (options.sort) {
-        const io = options.io orelse std.Io.Threaded.global_single_threaded.io();
-        entries = try sort_mod.sortAs(Out, Adapter.relativePath, gpa, io, entries, n_workers);
     }
 
     return .{ .entries = entries, .chunks = chunks, .metas = metas, .allocator = gpa, .ignore_rules = rules };

@@ -52,6 +52,8 @@ pub fn sortAs(
 ) Allocator.Error![]Out {
     const n = entries.len;
     if (n < 2) return entries;
+    // The permutation is a u32 index; more entries than that would truncate.
+    if (n > std.math.maxInt(u32)) return error.OutOfMemory;
 
     // Compact 16-byte keys instead of touching whole records in the hot loop.
     const keys = try gpa.alloc([]const u8, n);
