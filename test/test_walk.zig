@@ -601,6 +601,57 @@ test "walk glob pattern: filters entries and prunes out-of-scope dirs" {
     }
 }
 
+test "walk pattern: wildcards match within one path component" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("pattern_components");
+    defer t.deinit();
+
+    try t.mkdir("src");
+    try t.mkdir("src/net");
+    try t.mkdir("src/net/deep");
+    try t.mkdir("lib");
+    try t.write("top.rs", "");
+    try t.write("src/a.rs", "");
+    try t.write("src/net/b.rs", "");
+    try t.write("src/net/c.c", "");
+    try t.write("src/net/deep/d.rs", "");
+    try t.write("lib/e.rs", "");
+
+    const Case = struct { pattern: []const u8, want: []const []const u8 };
+    const cases = [_]Case{
+        // `*` is exactly one component: not src/a.rs, not src/net/deep/d.rs.
+        .{ .pattern = "src/*/*.rs", .want = &.{"src/net/b.rs"} },
+        // A slash-free pattern only matches at the root.
+        .{ .pattern = "*.rs", .want = &.{"top.rs"} },
+        .{ .pattern = "*.{rs,c}", .want = &.{"top.rs"} },
+        // `?` and bracket classes do not match `/` either.
+        .{ .pattern = "src/???/*.[cr]*", .want = &.{ "src/net/b.rs", "src/net/c.c" } },
+        // Only `**` spans components.
+        .{ .pattern = "src/**/*.rs", .want = &.{ "src/a.rs", "src/net/b.rs", "src/net/deep/d.rs" } },
+        .{ .pattern = "**/*.{rs,c}", .want = &.{ "lib/e.rs", "src/a.rs", "src/net/b.rs", "src/net/c.c", "src/net/deep/d.rs", "top.rs" } },
+        .{ .pattern = "{**/*.c,*.rs}", .want = &.{ "src/net/c.c", "top.rs" } },
+    };
+    for (cases) |case| {
+        for ([_]u16{ 1, 4 }) |threads| {
+            var results = try walk.collect(testing.allocator, t.root, .{
+                .threads = threads,
+                .sort = true,
+                .report_dirs = false,
+                .pattern = case.pattern,
+            });
+            defer results.deinit();
+            testing.expectEqual(case.want.len, results.entries.len) catch |err| {
+                std.debug.print("pattern {s}: got {d} entries\n", .{ case.pattern, results.entries.len });
+                for (results.entries) |*e| std.debug.print("  {s}\n", .{e.relativePath()});
+                return err;
+            };
+            for (case.want, results.entries) |want, *e| {
+                try testing.expectEqualStrings(want, e.relativePath());
+            }
+        }
+    }
+}
+
 test "walk follow_symlinks: descends links, breaks cycles, never re-walks root" {
     // The ntdll backend doesn't implement symlink following (documented).
     if (builtin.os.tag == .windows) return error.SkipZigTest;

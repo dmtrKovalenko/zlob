@@ -281,7 +281,10 @@ fn walkImpl(
 
     var compiled: ?CompiledPattern = null;
     if (options.pattern) |p| {
-        compiled = compiled_pattern.compilePattern(allocator, p, options.pattern_flags) catch
+        // Pathname semantics: the filter sees root-relative paths, and a `*`
+        // must not swallow directory levels ("src/*/*.c" is exactly one
+        // level below src/, like glob(3)); only `**` spans components.
+        compiled = CompiledPattern.compilePathname(allocator, p, options.pattern_flags) catch
             return error.OutOfMemory;
     }
     defer if (compiled) |*c| c.deinit();

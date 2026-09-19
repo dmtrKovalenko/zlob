@@ -232,8 +232,11 @@ pub const Options = struct {
     /// Report directory entries (directories are traversed either way).
     report_dirs: bool = true,
     /// Glob filter: only entries whose root-relative path matches are reported
-    /// (e.g. "**/*.rs", "src/**", "*.{c,h}"). Traversal is narrowed too:
-    /// directories outside the pattern's literal prefix are pruned unopened.
+    /// (e.g. "**/*.rs", "src/**", "src/*/*.{c,h}"). Standard pathname
+    /// semantics: `*`, `?` and `[...]` stay within one path component, so
+    /// "*.c" matches only at the root; `**` spans any number of components.
+    /// Traversal is narrowed too: directories outside the pattern's literal
+    /// prefix are pruned unopened.
     pattern: ?[]const u8 = null,
     /// Flags for compiling/matching `pattern`. Default: brace + recursive `**`.
     pattern_flags: ZlobFlags = .{ .brace = true, .doublestar_recursive = true },

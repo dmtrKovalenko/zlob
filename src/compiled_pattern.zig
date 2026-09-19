@@ -65,7 +65,13 @@ pub fn splitPatternByDoublestar(allocator: Allocator, pattern: []const u8, flags
             .pattern_context = contexts[0],
         };
     }
+    return splitPatternComponents(allocator, pattern);
+}
 
+/// Split `pattern` on `/` into one segment per path component (a leading `/`
+/// becomes an empty first segment). The result matches component-wise, so no
+/// wildcard can span a separator; `**` segments span whole components.
+pub fn splitPatternComponents(allocator: Allocator, pattern: []const u8) !PatternSegments {
     var segment_count: usize = 0;
     var iter = mem.splitScalar(u8, pattern, '/');
     while (iter.next()) |_| {
@@ -255,7 +261,7 @@ fn matchPathSegments(
     var seg_i: usize = 0;
     while (seg_i < pat_len) : (seg_i += 1) {
         const pat_seg = pattern_segments[initial_segment_idx + seg_i];
-        const is_doublestar = pat_seg.len == 2 and pat_seg[0] == '*' and pat_seg[1] == '*';
+        const is_doublestar = flags.doublestar_recursive and pat_seg.len == 2 and pat_seg[0] == '*' and pat_seg[1] == '*';
 
         if (is_doublestar) {
             var saw_true = false;
@@ -498,6 +504,12 @@ pub const CompiledPattern = struct {
 
     body: Body,
 
+    /// Pathname semantics (see `compilePathname`): `*`, `?` and bracket
+    /// classes never match `/`, so a slash-free pattern only matches
+    /// slash-free paths. The general bodies are already component-split at
+    /// compile time; this flag covers the suffix fast paths in `matches`.
+    pathname: bool = false,
+
     pub const Body = union(CompiledPatternKind) {
         /// Sub-slice of `pattern_storage` with consecutive `/` collapsed
         /// in-place during compile. NOT separately allocated.
@@ -532,7 +544,39 @@ pub const CompiledPattern = struct {
     /// Compile a glob pattern into a reusable matcher.
     /// Prepares as much information about the pattern as possible out of the processing loop
     pub fn compile(allocator: Allocator, raw_pattern: []const u8, flags: ZlobFlags) !CompiledPattern {
-        return compileImpl(allocator, raw_pattern, flags);
+        return compileImpl(allocator, raw_pattern, flags, false);
+    }
+
+    /// Compile with standard glob pathname semantics, for matching a path
+    /// against a pattern the way `glob(3)`/bash would when walking a tree:
+    /// `*`, `?` and `[...]` match within one path component only, and a
+    /// component consisting of `**` (with `doublestar_recursive`) spans any
+    /// number of components. `compile` keeps the looser in-memory
+    /// `matchPaths` behaviour where a slash-free pattern is a basename filter
+    /// and `*` in a slash-containing pattern may cross `/`.
+    pub fn compilePathname(allocator: Allocator, raw_pattern: []const u8, flags: ZlobFlags) !CompiledPattern {
+        var cp = try compileImpl(allocator, raw_pattern, flags, true);
+        errdefer cp.deinit();
+        cp.pathname = true;
+        switch (cp.body) {
+            .general_no_prefilter => |*ps| try segmentForPathname(ps),
+            .general_prefilter_fast => |*g| try segmentForPathname(&g.segments),
+            .general_prefilter_generic => |*g| try segmentForPathname(&g.segments),
+            .brace_general => |*bg| for (bg.segments) |*ps| try segmentForPathname(ps),
+            else => {},
+        }
+        return cp;
+    }
+
+    /// Re-split a whole-string fnmatch pattern into per-component segments so
+    /// it is matched component by component (`has_doublestar` also selects the
+    /// segment matcher). Segments that already went through the `**` split are
+    /// left alone.
+    fn segmentForPathname(ps: *PatternSegments) !void {
+        if (ps.has_doublestar) return;
+        const split = try splitPatternComponents(ps.allocator, ps.original_pattern);
+        ps.deinit();
+        ps.* = split;
     }
 
     fn tryCompileOnStack(
@@ -629,9 +673,9 @@ pub const CompiledPattern = struct {
                 return mem.eql(u8, norm, normalized);
             },
 
-            .single_suffix_fast => |*m| return m.matchSuffix(path),
-            .single_suffix_generic => |*m| return m.match(path),
-            .multi_suffix => |*ms| return ms.matchAny(getBasenameNormalized(path)),
+            .single_suffix_fast => |*m| return (!self.pathname or !hasPathSep(path)) and m.matchSuffix(path),
+            .single_suffix_generic => |*m| return (!self.pathname or !hasPathSep(path)) and m.match(path),
+            .multi_suffix => |*ms| return (!self.pathname or !hasPathSep(path)) and ms.matchAny(getBasenameNormalized(path)),
             .recursive_multi_suffix => |*ms| return ms.matchAny(getBasenameNormalized(path)),
 
             .brace_general => |*bg| {
@@ -665,6 +709,11 @@ pub const CompiledPattern = struct {
     }
 };
 
+inline fn hasPathSep(path: []const u8) bool {
+    if (comptime path_sep_is_windows) return lastIndexOfAnyTwoSIMD(path, '/', '\\') != null;
+    return indexOfCharSIMD(path, '/') != null;
+}
+
 /// Replace `old_storage` with the sole element of `expanded` (a brace
 /// expansion that produced exactly one alternative). Frees `old_storage` and
 /// the now-empty wrapper array, then empties `expanded` so the caller's
@@ -685,7 +734,7 @@ fn transferSingleAlternative(
     return new_storage;
 }
 
-fn compileImpl(allocator: Allocator, raw_pattern: []const u8, flags: ZlobFlags) !CompiledPattern {
+fn compileImpl(allocator: Allocator, raw_pattern: []const u8, flags: ZlobFlags, pathname: bool) !CompiledPattern {
     // Strip leading "./" — paths are relative to cwd / base by default.
     const stripped = if (raw_pattern.len >= 2 and raw_pattern[0] == '.' and raw_pattern[1] == '/')
         raw_pattern[2..]
@@ -745,7 +794,10 @@ fn compileImpl(allocator: Allocator, raw_pattern: []const u8, flags: ZlobFlags) 
         // Try recursive multi-suffix: all alternatives are **/*.ext or *.ext.
         // Gated on ZLOB_DOUBLESTAR_RECURSIVE: when unset, `**` is a literal
         // `*` and this fast path (which assumes recursion) must not trigger.
-        if (flags.doublestar_recursive) {
+        // Under pathname semantics a bare `*.ext` alternative is root-only,
+        // so the basename matcher is only right when every alternative is
+        // recursive.
+        if (flags.doublestar_recursive and (!pathname or allRecursivePrefixed(expanded))) {
             const rms_result = tryBuildRecursiveSuffixMatcher(expanded);
             if (rms_result.all_recursive_suffix and rms_result.matcher.count > 0) {
                 for (expanded) |e| allocator.free(e);
@@ -783,6 +835,13 @@ fn compileImpl(allocator: Allocator, raw_pattern: []const u8, flags: ZlobFlags) 
     }
 
     return compileNonBrace(allocator, pattern_storage, flags);
+}
+
+fn allRecursivePrefixed(patterns: []const []u8) bool {
+    for (patterns) |p| {
+        if (!mem.startsWith(u8, p, "**/")) return false;
+    }
+    return true;
 }
 
 fn compileNonBrace(allocator: Allocator, pattern_storage: []u8, flags: ZlobFlags) !CompiledPattern {
