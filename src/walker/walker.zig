@@ -358,7 +358,7 @@ fn walkImpl(
     // Worker 0 is the calling thread; it spawns the rest on demand so shallow
     // trees never create a single helper thread.
     worker.workerLoop(&sh, &workers[0]);
-    for (sh.threads[0..sh.spawned]) |t| t.join();
+    for (sh.threads[0..sh.spawned.load(.acquire)]) |t| t.join();
 
     return sh.failureResult();
 }
@@ -518,10 +518,11 @@ fn Collector(comptime Adapter: type) type {
             const col: *Self = @ptrCast(@alignCast(ctx));
             const own = &col.sinks[worker_id];
             if (worker_id == 0) {
-                // Only worker 0 spawns helpers, and only from inside its own loop, so
-                // sh.spawned is final here. Helpers that were never spawned never
-                // enter this function.
-                const want: u32 = @intCast(sh.spawned);
+                // Helpers are only spawned while a task is outstanding, and the
+                // queue has closed by the time worker 0 gets here, so sh.spawned
+                // is final. Helpers that were never spawned never enter this
+                // function.
+                const want: u32 = @intCast(sh.spawned.load(.acquire));
                 while (true) {
                     const cur = col.arrived.load(.acquire);
                     if (cur >= want) break;

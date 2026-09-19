@@ -41,8 +41,9 @@ const DirTask = queue_mod.DirTask;
 pub const WalkError = types.WalkError;
 pub const SinkFn = *const fn (ctx: *anyopaque, worker_id: u32, entry: *const Entry) VisitAction;
 /// Called once by every worker (on its own thread) after it has drained the
-/// queue, before the helper thread exits. `sh.spawned` is final by then for
-/// worker 0 (only worker 0 spawns, and only from inside its loop).
+/// queue, before the helper thread exits. `sh.spawned` is final by then: the
+/// spawn ramp only runs while a task is outstanding, so nothing spawns after
+/// the queue has closed.
 pub const FinishFn = *const fn (ctx: *anyopaque, worker_id: u32, sh: *SharedWorkerState) void;
 
 const Failure = enum(u8) { none = 0, aborted = 1, oom = 2, read_failed = 3, permission_denied = 4, name_too_long = 5 };
@@ -161,8 +162,15 @@ pub const SharedWorkerState = struct {
     /// demonstrably parallel work, so shallow trees never pay the spawn cost.
     workers: []Worker = &.{},
     threads: []Thread = &.{},
-    spawn_started: std.atomic.Value(bool) = .init(false),
-    spawned: usize = 0,
+    /// Number of helper threads started so far (`threads[0..spawned]` are live).
+    /// Only grows while some task is still outstanding (the ramp check runs
+    /// before `taskDone`), so it is final once the queue has closed. Read by
+    /// every worker after each directory until the pool is full, so it gets
+    /// its own cache line away from the mutexes above.
+    spawned: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
+    spawn_lock: std.atomic.Value(bool) = .init(false),
+    /// Set (under `spawn_lock`) once a spawn failed; no further attempts.
+    spawn_failed: bool = false,
 
     pub fn fail(sh: *SharedWorkerState, f: Failure) void {
         sh.abort_signal.store(true, .release);
@@ -180,23 +188,30 @@ pub const SharedWorkerState = struct {
         };
     }
 
-    /// Spawn the helper worker threads on first call (idempotent). Called by
-    /// the calling thread once it sees enough queued work to justify the cost.
-    fn ensureWorkers(sh: *SharedWorkerState) void {
-        if (sh.threads.len == 0) return;
-        if (sh.spawn_started.swap(true, .acq_rel)) return;
-
-        // A failed spawn is not fatal -- the remaining work stays with the
-        // workers already running (worker 0 at minimum), so the walk still
-        // completes, just with less parallelism.
-        for (sh.threads, 1..) |*t, i| {
-            t.* = Thread.spawn(workerThreadMain, @ptrCast(&sh.workers[i]), sh.options.thread_stack_size) catch break;
-            sh.spawned += 1;
+    /// Demand-driven helper spawn: any worker that finds more queued
+    /// directories than running threads starts up to `want` more, so the
+    /// thread count ramps with the discovered fan-out. A shallow tree with a
+    /// handful of subdirectories gets a handful of helpers instead of the
+    /// full complement; a wide tree still gets everything it can use within
+    /// a couple of directory listings. Serialized by a try-lock: a worker that
+    /// loses the race just carries on, the winner covers the backlog.
+    ///
+    /// A failed spawn is not fatal -- the work stays with the threads already
+    /// running (worker 0 at minimum), so the walk completes with less
+    /// parallelism.
+    fn spawnHelpers(sh: *SharedWorkerState, want: usize) void {
+        if (sh.spawn_lock.swap(true, .acquire)) return;
+        defer sh.spawn_lock.store(false, .release);
+        var n = sh.spawned.load(.monotonic);
+        if (sh.spawn_failed) return;
+        const target = @min(sh.threads.len, n +| want);
+        while (n < target) : (n += 1) {
+            sh.threads[n] = Thread.spawn(workerThreadMain, @ptrCast(&sh.workers[n + 1]), sh.options.thread_stack_size) catch {
+                sh.spawn_failed = true;
+                break;
+            };
+            sh.spawned.store(n + 1, .release);
         }
-
-        // A worker may have parked between its empty-queue check and now; wake
-        // freshly spawned threads so none miss the work that triggered spawn.
-        sh.queue.wakeAll(sh.io);
     }
 
     fn visitedBefore(sh: *SharedWorkerState, key: InodeKey) bool {
@@ -337,13 +352,14 @@ pub inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []co
 }
 
 pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
-    // Lazy spawning is driven only by worker 0 (the calling thread): once it
-    // has uncovered more than a couple of pending directories there is enough
-    // fan-out to amortize the helper-thread cost. Helper workers (id != 0)
-    // never run this, and worker 0 stops checking once it has spawned them, so
-    // the steady-state loop carries no spawn bookkeeping.
-    const spawn_threshold = 2;
-    var may_spawn = worker.id == 0;
+    // Demand-driven spawning (see spawnHelpers): after each directory, a
+    // worker that sees more queued directories than there are threads to take
+    // them starts enough helpers to cover the backlog. Once this worker has
+    // seen the pool full it stops looking, so the steady-state loop carries
+    // no shared loads. The check must stay ahead of `taskDone` so `spawned`
+    // is final by the time the queue closes (the collect barrier in
+    // walker.zig relies on that).
+    var may_spawn = state.threads.len > 0;
 
     while (state.queue.pop(state.io, worker.id)) |task| {
         if (!state.abort_signal.load(.acquire)) {
@@ -355,9 +371,14 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
                 error.Aborted => state.fail(.aborted),
             };
 
-            if (may_spawn and state.queue.queued.load(.monotonic) > spawn_threshold) {
-                state.ensureWorkers();
-                may_spawn = false; // spawned once; never check again
+            if (may_spawn) {
+                const spawned = state.spawned.load(.monotonic);
+                if (spawned >= state.threads.len) {
+                    may_spawn = false;
+                } else {
+                    const queued = state.queue.queued.load(.monotonic);
+                    if (queued > spawned + SPAWN_SLACK) state.spawnHelpers(spawnBurst(spawned, queued));
+                }
             }
         }
         freeTask(state, task);
@@ -365,6 +386,24 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
     }
     if (state.finish) |f| f(state.sink_ctx, worker.id, state);
 }
+
+/// Queued directories beyond the running thread count (worker 0 plus the
+/// helpers) before another helper is worth starting.
+const SPAWN_SLACK: usize = 1;
+
+/// How many helpers to start when `queued` directories are waiting and
+/// `spawned` helpers exist: enough to cover the backlog, or the full
+/// remainder once the backlog shows real fan-out. Covering exactly the
+/// backlog would leave a 10-subdir root with 9 helpers and pay for the rest
+/// one clone at a time on some worker's critical path; the full burst at
+/// `FULL_BURST_QUEUED` keeps wide roots at the old single-burst cost while a
+/// 4-subdir tree still starts 3 threads instead of 15 (LICENSES: -63%).
+inline fn spawnBurst(spawned: usize, queued: usize) usize {
+    if (queued >= FULL_BURST_QUEUED) return std.math.maxInt(usize);
+    return queued - spawned;
+}
+
+const FULL_BURST_QUEUED: usize = 8;
 
 fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void {
     const handle = (try openTaskDir(sh, w, task)) orelse return;
