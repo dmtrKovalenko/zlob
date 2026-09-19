@@ -54,7 +54,9 @@ pub inline fn nameLen(area_ptr: [*]const u8, area_len: usize) usize {
 // short batches before EOF. The verdict is therefore gated on the walk root:
 // its own filesystem must be whitelisted (fstatfs magic) and no mount of any
 // other type may lie below the root's canonical path (/proc/self/mountinfo,
-// parsed once per process). Escaping the root through `..` or a followed
+// re-read whenever the kernel reports a mount-table change, so a mount that
+// appeared since the last walk -- autofs, sshfs, a container bind -- is
+// seen). Escaping the root through `..` or a followed
 // symlink is not covered by the mount check; the walkers additionally drop
 // trust when a followed symlink crosses a device boundary.
 
@@ -92,7 +94,8 @@ pub fn fsNameIsGreedy(name: []const u8) bool {
 }
 
 /// Decide whether short getdents64 reads below the open directory `fd` may be
-/// taken as EOF. One fstatfs, plus one readlink of /proc/self/fd/N when the
+/// taken as EOF. One fstatfs, a mount-table freshness check (fstat + poll,
+/// see currentMountTable), plus one readlink of /proc/self/fd/N when the
 /// mount table contains non-greedy mounts. Returns false on any doubt.
 pub fn trustShortReaddir(fd: linux.fd_t) bool {
     if (envDisabled()) return false;
@@ -105,8 +108,9 @@ pub fn trustShortReaddir(fd: linux.fd_t) bool {
     const f_type = mem.readInt(u64, sfs[0..8], .little) & 0xFFFF_FFFF;
     if (!fsMagicIsGreedy(f_type)) return false;
 
-    mount_table_once.call();
-    const table = mount_table orelse return false;
+    mount_lock.lock();
+    defer mount_lock.unlock();
+    const table = currentMountTable() orelse return false;
     if (table.bad.len == 0) return true;
 
     // Some mount below the root would be a problem; find the root's canonical
@@ -123,12 +127,23 @@ pub fn trustShortReaddir(fd: linux.fd_t) bool {
 }
 
 const MountTable = struct {
+    /// /proc/self/mountinfo exactly as last read.
+    raw: []u8,
+    /// Copy of `raw` that `parseMountInfo` unescaped in place; `bad` slices
+    /// into it.
+    work: []u8,
     /// Mount points of every mount whose filesystem type is not greedy,
     /// unescaped, as they appear in /proc/self/mountinfo.
     bad: []const []const u8,
 
     fn badMountBelow(t: *const MountTable, root: []const u8) bool {
         return anyMountBelow(t.bad, root);
+    }
+
+    fn deinit(t: *MountTable, gpa: std.mem.Allocator) void {
+        gpa.free(t.bad);
+        gpa.free(t.work);
+        gpa.free(t.raw);
     }
 };
 
@@ -166,43 +181,189 @@ fn Once(comptime f: fn () void) type {
     };
 }
 
-var mount_table: ?MountTable = null;
-var mount_table_once: Once(loadMountTable) = .{};
+/// Spinlock guarding `mount_table` (std.Io.Mutex needs an Io this module
+/// does not have). Held for a freshness check (about a microsecond) and,
+/// only when the mount table changed, a mountinfo read and parse; probes
+/// are one per walk root.
+const SpinLock = struct {
+    locked: std.atomic.Value(bool) = .init(false),
 
-fn loadMountTable() void {
+    fn lock(self: *SpinLock) void {
+        while (self.locked.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn unlock(self: *SpinLock) void {
+        self.locked.store(false, .release);
+    }
+};
+
+var mount_lock: SpinLock = .{};
+var mount_table: ?MountTable = null;
+
+/// The mount table as of right now. Caller holds `mount_lock`. Null when
+/// /proc/self/mountinfo cannot be read: with no table there is no proof, so
+/// the caller distrusts.
+///
+/// Change detection uses the kernel's own notification: a long-lived
+/// mountinfo fd reports POLLPRI|POLLERR once per mount-table change of its
+/// namespace (`mounts_poll`). The unchanged case is one fstat (the fd is
+/// still ours: a caller that closes every fd behind the library's back would
+/// otherwise let a recycled number pass as unchanged) plus one poll with
+/// zero timeout, no allocation; any event re-reads and reparses the file.
+/// The fd is bound to the mount namespace it was opened in, so a probe that
+/// finds the process in a different namespace (unshare/setns since the last
+/// one) reopens it.
+fn currentMountTable() ?*const MountTable {
     const gpa = std.heap.page_allocator;
-    const content = readProcFile(gpa, "/proc/self/mountinfo") orelse return;
-    // `content` is kept alive for the process; the table slices into it.
-    const bad = parseMountInfo(gpa, content) catch return;
-    mount_table = .{ .bad = bad };
+    if (mount_table != null and mountinfoUnchanged()) return &mount_table.?;
+    mount_table_reloads += 1;
+
+    if (mount_table) |*t| {
+        t.deinit(gpa);
+        mount_table = null;
+    }
+    if (!openMountinfo()) return null;
+
+    var scratch: [16 * 1024]u8 = undefined;
+    const content = readProcFd(gpa, mount_fd, &scratch) orelse return null;
+    const raw = if (content.heap) content.bytes else gpa.dupe(u8, content.bytes) catch return null;
+    const work = gpa.dupe(u8, raw) catch {
+        gpa.free(raw);
+        return null;
+    };
+    const bad = parseMountInfo(gpa, work) catch {
+        gpa.free(work);
+        gpa.free(raw);
+        return null;
+    };
+    mount_table = .{ .raw = raw, .work = work, .bad = bad };
+    return &mount_table.?;
 }
 
-fn readProcFile(gpa: std.mem.Allocator, path: [*:0]const u8) ?[]u8 {
-    const rc = linux.openat(linux.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-    if (linux.errno(rc) != .SUCCESS) return null;
-    const fd: linux.fd_t = @intCast(rc);
-    defer _ = linux.close(fd);
+var mount_fd: linux.fd_t = -1;
+var mount_fd_dev: u64 = 0;
+var mount_fd_ino: u64 = 0;
+/// nsfs inode of the mount namespace `mount_fd` was opened in.
+var mount_fd_ns: u64 = 0;
+/// Times the table was (re)read; exposed for tests and diagnostics.
+pub var mount_table_reloads: usize = 0;
 
-    var buf = gpa.alloc(u8, 64 * 1024) catch return null;
+/// Identity (nsfs inode) of the caller's current mount namespace, 0 when it
+/// cannot be determined.
+fn currentMountNs() u64 {
+    var stx: linux.Statx = undefined;
+    const rc = linux.statx(linux.AT.FDCWD, "/proc/self/ns/mnt", 0, .{ .INO = true }, &stx);
+    if (linux.errno(rc) != .SUCCESS) return 0;
+    return stx.ino;
+}
+
+fn statFdKey(fd: linux.fd_t, dev: *u64, ino: *u64) bool {
+    var stx: linux.Statx = undefined;
+    const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .INO = true }, &stx);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    dev.* = (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor);
+    ino.* = stx.ino;
+    return true;
+}
+
+/// Make `mount_fd` a fresh /proc/self/mountinfo descriptor positioned at 0,
+/// recording its identity. A previous fd that is still ours is reused
+/// (rewound); one that is not (closed and recycled by the caller) is left
+/// alone and replaced.
+fn openMountinfo() bool {
+    if (mount_fd >= 0) {
+        if (mountFdIsOurs()) {
+            if (mountFdCurrent()) {
+                const off = linux.lseek(mount_fd, 0, linux.SEEK.SET);
+                if (linux.errno(off) == .SUCCESS) return true;
+            }
+            _ = linux.close(mount_fd);
+        }
+        mount_fd = -1;
+    }
+    const rc = linux.openat(linux.AT.FDCWD, "/proc/self/mountinfo", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    const fd: linux.fd_t = @intCast(rc);
+    if (!statFdKey(fd, &mount_fd_dev, &mount_fd_ino)) {
+        _ = linux.close(fd);
+        return false;
+    }
+    mount_fd = fd;
+    mount_fd_ns = currentMountNs();
+    return true;
+}
+
+fn mountFdIsOurs() bool {
+    var dev: u64 = 0;
+    var ino: u64 = 0;
+    if (!statFdKey(mount_fd, &dev, &ino)) return false;
+    return dev == mount_fd_dev and ino == mount_fd_ino;
+}
+
+/// The fd still describes the namespace the caller is in.
+fn mountFdCurrent() bool {
+    const ns = currentMountNs();
+    return ns != 0 and ns == mount_fd_ns;
+}
+
+/// True when the mount table has not changed since `mount_fd` was last read
+/// (or last polled). False on any doubt.
+fn mountinfoUnchanged() bool {
+    if (mount_fd < 0 or !mountFdIsOurs() or !mountFdCurrent()) return false;
+    var pfd = [1]linux.pollfd{.{ .fd = mount_fd, .events = linux.POLL.PRI, .revents = 0 }};
+    const rc = linux.poll(&pfd, 1, 0);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    // POLLIN is always set on this file; only PRI/ERR announce a change.
+    return rc == 0 or (pfd[0].revents & (linux.POLL.PRI | linux.POLL.ERR)) == 0;
+}
+
+const ProcFile = struct {
+    bytes: []u8,
+    /// `bytes` is heap-allocated (did not fit the caller's scratch buffer)
+    /// and must be freed by the caller.
+    heap: bool,
+};
+
+/// Whole content of an open procfs file from its current position. Lands in
+/// `scratch` when it fits, else in an exactly sized heap buffer. Null on any
+/// failure.
+fn readProcFd(gpa: std.mem.Allocator, fd: linux.fd_t, scratch: []u8) ?ProcFile {
+    var buf: []u8 = scratch;
+    var heap = false;
     var len: usize = 0;
     while (true) {
         if (len == buf.len) {
-            buf = gpa.realloc(buf, buf.len * 2) catch {
-                gpa.free(buf);
-                return null;
-            };
+            if (heap) {
+                buf = gpa.realloc(buf, buf.len * 2) catch {
+                    gpa.free(buf);
+                    return null;
+                };
+            } else {
+                const grown = gpa.alloc(u8, buf.len * 2) catch return null;
+                @memcpy(grown[0..len], buf[0..len]);
+                buf = grown;
+                heap = true;
+            }
         }
         const r = linux.read(fd, buf.ptr + len, buf.len - len);
         const n: isize = @bitCast(r);
         if (n < 0) {
             if (linux.errno(r) == .INTR) continue;
-            gpa.free(buf);
+            if (heap) gpa.free(buf);
             return null;
         }
         if (n == 0) break;
         len += @intCast(n);
     }
-    return buf[0..len];
+    if (!heap) return .{ .bytes = buf[0..len], .heap = false };
+    // Exact size, so the slice can be freed as a whole.
+    const exact = gpa.realloc(buf, len) catch {
+        gpa.free(buf);
+        return null;
+    };
+    return .{ .bytes = exact, .heap = true };
 }
 
 /// Collect the (unescaped, in place) mount points of non-greedy mounts.
