@@ -215,7 +215,31 @@ fn runMode(mode: Mode, allocator: std.mem.Allocator, root: []const u8, root_z: [
 fn runWalk(allocator: std.mem.Allocator, root: []const u8, opts: walk.Options) !usize {
     var res = try walk.collect(allocator, root, opts);
     defer res.deinit();
+    if (std.c.getenv("ZLOB_BENCH_DUMP")) |p| try dumpEntries(allocator, std.mem.sliceTo(p, 0), &res);
     return res.entries.len;
+}
+
+/// ZLOB_BENCH_DUMP=<file>: write every collected root-relative path (sorted,
+/// one per line) so two runs can be diffed when their counts disagree.
+fn dumpEntries(allocator: std.mem.Allocator, path: []const u8, res: *const walk.WalkerResult) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const paths = try allocator.alloc([]const u8, res.entries.len);
+    defer allocator.free(paths);
+    for (res.entries, paths) |*e, *p| p.* = e.relativePath();
+    std.mem.sort([]const u8, paths, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+    var f = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer f.close(io);
+    var buf: [1 << 16]u8 = undefined;
+    var fw = f.writer(io, &buf);
+    for (paths) |p| {
+        try fw.interface.writeAll(p);
+        try fw.interface.writeByte('\n');
+    }
+    try fw.interface.flush();
 }
 
 /// Mirror the bench's walk.Options onto the C ABI options (bits from include/zlob.h).
