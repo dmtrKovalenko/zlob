@@ -23,26 +23,21 @@
 //!
 //! Timings are wall-clock per iteration (best and median over `iters`, after one
 //! untimed warmup). Numbers from separate invocations are NOT comparable
-//! (page cache state); interleave base/new binaries in one loop (see ab.sh).
+//! because page-cache state differs; interleave base/new binaries in one loop.
 const std = @import("std");
 const zlob = @import("zlob");
 const c_lib = @import("c_lib");
 const zlob_flags = @import("zlob_flags");
 const walk = zlob.walk;
 
-// Mirror src/c_lib.zig: opt out of the default 256 KiB threadlocal signal
-// stack (std.Thread's entry wrapper instantiates it per spawned thread and
-// glibc memsets the whole TLS block inside pthread_create) and the segfault
-// handler. This is a root-module setting; libzlob.a already sets it, but
-// every Zig root binary must set it itself or every parallel walk pays
-// ~256 KiB of zeroing + 64 page faults + a sigaltstack syscall per thread.
+// Root-module opt-out for per-worker signal-stack setup; see README.md.
 pub const std_options: std.Options = .{
     .signal_stack_size = null,
     .enable_segfault_handler = false,
     .allow_stack_tracing = false,
 };
 
-const Mode = enum { plain, gitignore, meta, serial, sort, follow, ccollect, run, crun, glob, globsort, walkglob, globpar, sizes };
+const Mode = enum { plain, gitignore, meta, serial, sort, follow, ccollect, run, crun, glob, globsort, walkglob, globpar };
 
 fn isGlobMode(m: Mode) bool {
     return m == .glob or m == .globsort or m == .globpar;
@@ -89,6 +84,8 @@ pub fn main(init: std.process.Init) !void {
 
     const root = args[1];
     const mode = std.meta.stringToEnum(Mode, args[2]) orelse usage(prog);
+    // Read once here: runWalk runs inside the timed loop.
+    if (std.c.getenv("ZLOB_BENCH_DUMP")) |p| dump_path = std.mem.sliceTo(p, 0);
 
     var iters: usize = 5;
     var threads: u16 = 0;
@@ -124,7 +121,6 @@ pub fn main(init: std.process.Init) !void {
                 if (threads != 0) zlob.setGlobParallelThreads(threads);
                 eff_threads = if (threads != 0) threads else 4;
             }
-            // warmup
             count = runGlob(pat_z, gflags);
             for (times) |*t| {
                 const start = std.Io.Timestamp.now(io, .awake);
@@ -161,14 +157,13 @@ pub fn main(init: std.process.Init) !void {
                 },
                 .follow => opts.follow_symlinks = true,
                 .ccollect, .run, .crun => {},
-                .glob, .globsort, .globpar, .sizes => unreachable,
+                .glob, .globsort, .globpar => unreachable,
             }
             eff_threads = walk.effectiveThreads(&opts);
 
             const root_z = try allocator.dupeZ(u8, root);
             defer allocator.free(root_z);
 
-            // warmup
             count = try runMode(mode, allocator, root, root_z, opts);
             for (times) |*t| {
                 const start = std.Io.Timestamp.now(io, .awake);
@@ -212,10 +207,13 @@ fn runMode(mode: Mode, allocator: std.mem.Allocator, root: []const u8, root_z: [
     };
 }
 
+/// ZLOB_BENCH_DUMP target, resolved once in main (see dumpEntries).
+var dump_path: ?[]const u8 = null;
+
 fn runWalk(allocator: std.mem.Allocator, root: []const u8, opts: walk.Options) !usize {
     var res = try walk.collect(allocator, root, opts);
     defer res.deinit();
-    if (std.c.getenv("ZLOB_BENCH_DUMP")) |p| try dumpEntries(allocator, std.mem.sliceTo(p, 0), &res);
+    if (dump_path) |p| try dumpEntries(allocator, p, &res);
     return res.entries.len;
 }
 

@@ -69,14 +69,13 @@ pub export fn zlobfree(pzlob: *zlob_t) callconv(.c) void {
     zlob_impl.globfreeInternal(allocator, pzlob);
 }
 
-/// Glob within a specific base directory.
-/// base_path must be an absolute path (starts with '/'), otherwise returns zlob_flags.ZLOB_ABORTED.
-/// This is the C-compatible version of globAt().
 /// Worker threads for ZLOB_PARALLEL recursive globs (default 4; 0 = CPU count, capped).
 pub export fn zlob_set_threads(threads: c_uint) callconv(.c) void {
     zlob_impl.setGlobParallelThreads(@intCast(@min(threads, 1024)));
 }
 
+/// Glob within a specific base directory.
+/// base_path must be an absolute path (starts with '/'), otherwise returns zlob_flags.ZLOB_ABORTED.
 pub export fn zlob_at(
     base_path: [*:0]const u8,
     pattern: [*:0]const u8,
