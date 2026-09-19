@@ -124,9 +124,15 @@ pub const TrustShortGetdents = enum(u8) { auto, never };
 
 /// Per-glob-call memo of the short-read verdict, shared by every
 /// DirIterator the call opens. The first opened directory (the walk's start
-/// directory) is probed; later ones reuse the answer.
+/// directory) is probed; later ones reuse the answer, but only while they
+/// stay on the start directory's device: the non-recursive glob paths open
+/// wildcard-matched components by path with a plain openat, which follows
+/// symlinks, so a matched link into another filesystem (FUSE, NFS, ...)
+/// must not inherit the verdict.
 pub const TrustCache = struct {
     state: enum(u8) { unknown, yes, no } = .unknown,
+    /// st_dev of the probed start directory; valid when `state == .yes`.
+    dev: u64 = 0,
 };
 
 pub const WalkerConfig = struct {
@@ -334,6 +340,7 @@ const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
 
 const OpenHow = extern struct { flags: u64, mode: u64, resolve: u64 };
 const RESOLVE_NO_XDEV: u64 = 0x01;
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 
 /// openat2(RESOLVE_NO_XDEV): like openat, but fails with EXDEV instead of
 /// crossing a mount point, so a child keyed by its parent's device number is
@@ -374,6 +381,45 @@ const noatime = if (builtin.os.tag != .linux) struct {} else struct {
                     flags.NOATIME = false;
                 },
                 else => return .other,
+            }
+        }
+    }
+
+    /// Set once openat2 is seen to be unusable (ENOSYS, seccomp EPERM, ...):
+    /// callers then go straight to `openat`.
+    var no_openat2 = std.atomic.Value(bool).init(false);
+
+    /// Raw `openat2(RESOLVE_NO_SYMLINKS)` with the same O_NOATIME policy as
+    /// `openat`. Returns the syscall result (success or an ordinary open
+    /// error, mapped by the caller exactly as `openat`'s would be), or null
+    /// when the caller must fall back to a plain `openat`: a symlink in the
+    /// path (ELOOP), or openat2 unusable on this system.
+    fn openat2NoSymlinks(dir_fd: i32, path_z: [*:0]const u8, base_flags: linux.O) ?usize {
+        if (no_openat2.load(.monotonic)) return null;
+        var flags = base_flags;
+        var want = ok.load(.monotonic);
+        flags.NOATIME = want;
+        while (true) {
+            var how: OpenHow = .{ .flags = @as(u32, @bitCast(flags)), .mode = 0, .resolve = RESOLVE_NO_SYMLINKS };
+            const rc = linux.syscall4(.openat2, @bitCast(@as(isize, dir_fd)), @intFromPtr(path_z), @intFromPtr(&how), @sizeOf(OpenHow));
+            switch (linux.errno(rc)) {
+                .LOOP => return null,
+                .NOSYS, .INVAL, .@"2BIG" => {
+                    no_openat2.store(true, .monotonic);
+                    return null;
+                },
+                .PERM => {
+                    // O_NOATIME refused, or openat2 filtered by seccomp:
+                    // retry without the flag once, then give up on openat2.
+                    if (!want) {
+                        no_openat2.store(true, .monotonic);
+                        return null;
+                    }
+                    ok.store(false, .monotonic);
+                    want = false;
+                    flags.NOATIME = false;
+                },
+                else => return rc,
             }
         }
     }
@@ -1031,6 +1077,10 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
         if (self.config.follow_symlinks and kind == .directory) {
             if (statFd(subdir_fd)) |key| {
+                // Off the start dir's device (mount point under a followed
+                // link): that filesystem was never checked by the short-read
+                // gate, as in maybeDescend/confirmFreshDir.
+                if (key.dev != self.root_dev) self.trust_short = false;
                 if (self.visited.getOrPut(self.allocator, key)) |gop| {
                     if (gop.found_existing) {
                         _ = linux.close(subdir_fd);
@@ -1734,12 +1784,27 @@ pub const SingleDirIterator = struct {
         kind: EntryKind,
     };
 
+    pub const OpenedDir = struct {
+        fd: i32,
+        /// The path may have been resolved through a symlink (it was, or
+        /// openat2 could not rule it out); false only when
+        /// `openDirFdChecked` was asked to and could prove otherwise.
+        maybe_symlinked: bool,
+    };
+
     /// Open a directory for single-level iteration using raw syscalls.
     /// If base_dir is provided, opens path relative to it; otherwise relative to cwd.
-    /// hidden_config controls filtering of ".", "..", and hidden files.
     /// Open just the directory fd, so callers embedding this iterator can
     /// construct it in place rather than moving it out of an error union.
     pub fn openDirFd(path: []const u8, base_dir: ?std.Io.Dir) !i32 {
+        return (try openDirFdChecked(path, base_dir, false)).fd;
+    }
+
+    /// `openDirFd` that, when `rule_out_symlinks` is set, first tries
+    /// openat2(RESOLVE_NO_SYMLINKS): a success proves the directory was
+    /// reached without following any link, i.e. it lies below the base
+    /// directory's tree. Only a path with a symlink pays a second open.
+    pub fn openDirFdChecked(path: []const u8, base_dir: ?std.Io.Dir, rule_out_symlinks: bool) !OpenedDir {
         if (!is_linux) {
             @compileError("SingleDirIterator.openDirFd requires Linux");
         }
@@ -1754,11 +1819,20 @@ pub const SingleDirIterator = struct {
 
         // Use raw syscall for maximum performance
         const dir_fd = if (base_dir) |bd| bd.handle else linux.AT.FDCWD;
-        const rc = noatime.openat(dir_fd, &path_z, flags);
+        var maybe_symlinked = true;
+        const rc = blk: {
+            if (rule_out_symlinks) {
+                if (noatime.openat2NoSymlinks(dir_fd, &path_z, flags)) |rc2| {
+                    maybe_symlinked = false;
+                    break :blk rc2;
+                }
+            }
+            break :blk noatime.openat(dir_fd, &path_z, flags);
+        };
         // Map onto the same error set std.Io.Dir.openDir produces so
         // openHandled reports an accurate errno through ErrCallbackFn.
         return switch (linux.errno(rc)) {
-            .SUCCESS => @intCast(rc),
+            .SUCCESS => .{ .fd = @intCast(rc), .maybe_symlinked = maybe_symlinked },
             .NOENT => error.FileNotFound,
             .NOTDIR => error.NotDir,
             .ACCES => error.AccessDenied,
@@ -1989,15 +2063,35 @@ pub const DirIterator = struct {
         // via openat. `.buffer = undefined` keeps the 8 KiB scratch area
         // untouched here.
         if (is_linux) {
-            const fd = try SingleDirIterator.openDirFd(path, base_dir);
             // The first directory a glob call opens is its start directory;
-            // its verdict covers every directory opened below it.
+            // its verdict covers every directory opened below it that is on
+            // the same device (see TrustCache). A later open that provably
+            // followed no symlink stayed inside the start directory's tree,
+            // where the probe already vouched for every mount, so only a
+            // symlinked path pays the fstat. Once the verdict is `no`
+            // nothing more is paid here.
+            const rule_out_symlinks = if (fs.trust) |tc| tc.state == .yes else false;
+            const opened = try SingleDirIterator.openDirFdChecked(path, base_dir, rule_out_symlinks);
+            const fd = opened.fd;
             var trust_short = false;
             if (fs.trust) |tc| {
-                if (tc.state == .unknown) {
-                    tc.state = if (dirent64.trustShortReaddir(fd)) .yes else .no;
+                switch (tc.state) {
+                    .unknown => {
+                        tc.state = .no;
+                        if (dirent64.trustShortReaddir(fd)) {
+                            if (statFd(fd)) |key| {
+                                tc.state = .yes;
+                                tc.dev = key.dev;
+                                trust_short = true;
+                            }
+                        }
+                    },
+                    .yes => {
+                        trust_short = !opened.maybe_symlinked or
+                            if (statFd(fd)) |key| key.dev == tc.dev else false;
+                    },
+                    .no => {},
                 }
-                trust_short = tc.state == .yes;
             }
             out.* = .{
                 .io = io,

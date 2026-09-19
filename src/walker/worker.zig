@@ -418,6 +418,15 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
         }
     }
 
+    // A task whose open crossed a mount (openat2 EXDEV, or openat2
+    // unavailable) is re-keyed BEFORE its scan: the directory may sit on a
+    // filesystem the short-read gate never examined, so its own listing
+    // must already run with trust cleared, not just its children's.
+    const verify_first = builtin.os.tag == .linux and sh.options.follow_symlinks and task.depth != 0 and task.verify_key;
+    if (verify_first) {
+        if (!resolveTaskKey(sh, task, handle, 0)) return;
+    }
+
     w.names.clearRetainingCapacity();
     w.entries.clearRetainingCapacity();
     w.metas.clearRetainingCapacity();
@@ -434,7 +443,10 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
             return;
         },
     };
-    if (builtin.os.tag == .linux and sh.options.follow_symlinks and task.depth != 0) {
+    // Same-filesystem opens are keyed by the listing's d_ino and checked
+    // against the "." record the scan just produced (no syscall when they
+    // agree, see resolveTaskKey).
+    if (builtin.os.tag == .linux and sh.options.follow_symlinks and task.depth != 0 and !verify_first) {
         if (!resolveTaskKey(sh, task, handle, w.dot_ino)) return;
     }
 
@@ -945,8 +957,10 @@ fn resolveTaskKey(sh: *SharedWorkerState, task: *DirTask, handle: Handle, dot_in
     if (key.dev == task.dev and key.ino == task.ino) return true;
     // A real (dev, ino) off the root's device: that filesystem was never
     // examined by the short-read gate (see the symlink branch of
-    // processEntry). This task's own scan already ran, so this only covers
-    // its children, which is exactly where the untrusted reads can happen.
+    // processEntry). Tasks that crossed a mount (`verify_key`) reach here
+    // before their own scan, so the listing of this very directory is
+    // already read without trust; the btrfs-subvolume case stays on the
+    // root's device and its scan is unaffected.
     if (key.dev != sh.root_dev) sh.trust_short.store(false, .release);
     if (sh.visitedBefore(key)) return false;
     task.dev = key.dev;

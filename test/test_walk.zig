@@ -1434,3 +1434,160 @@ test "short-read EOF: dense random-name trees match std iteration (tmpfs)" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     try checkShortEofTree("/dev/shm/zlob-walk-tests");
 }
+
+/// st_dev of `path` (symlinks followed), or null when it cannot be stat'ed.
+fn devOf(path: []const u8) ?u64 {
+    const linux = std.os.linux;
+    var path_z: [1024:0]u8 = undefined;
+    if (path.len >= path_z.len) return null;
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+    var stx: linux.Statx = undefined;
+    const rc = linux.statx(linux.AT.FDCWD, path_z[0..path.len :0], 0, .{ .INO = true }, &stx);
+    if (linux.errno(rc) != .SUCCESS) return null;
+    return (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor);
+}
+
+/// Two-device fixture: a root in the repo's cache dir (its filesystem) holding
+/// a symlink `link` to a directory on /dev/shm (tmpfs), plus a same-device
+/// subdir `local`. Skips when both land on the same device or /dev/shm is
+/// unusable.
+const CrossDevTree = struct {
+    io: std.Io,
+    root_buf: [256]u8 = undefined,
+    root: []const u8 = &.{},
+    shm_buf: [256]u8 = undefined,
+    shm: []const u8 = &.{},
+
+    fn init(self: *CrossDevTree, comptime tag: []const u8, dense: usize) !void {
+        self.io = std.Io.Threaded.global_single_threaded.io();
+        const cwd = std.Io.Dir.cwd();
+        const now = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
+        self.root = try std.fmt.bufPrint(&self.root_buf, ".zig-cache/walk-tests/{s}_{d}", .{ tag, now });
+        self.shm = try std.fmt.bufPrint(&self.shm_buf, "/dev/shm/zlob-walk-tests/{s}_{d}", .{ tag, now });
+        try cwd.createDirPath(self.io, self.root);
+        errdefer cwd.deleteTree(self.io, self.root) catch {};
+        cwd.createDirPath(self.io, self.shm) catch return error.SkipZigTest;
+        errdefer cwd.deleteTree(self.io, self.shm) catch {};
+
+        const root_dev = devOf(self.root) orelse return error.SkipZigTest;
+        const shm_dev = devOf(self.shm) orelse return error.SkipZigTest;
+        if (root_dev == shm_dev) return error.SkipZigTest;
+
+        var buf: [512]u8 = undefined;
+        try cwd.createDir(self.io, try std.fmt.bufPrint(&buf, "{s}/local", .{self.root}), .default_dir);
+        try fillRandomNames(self.io, try std.fmt.bufPrint(&buf, "{s}/local", .{self.root}), dense);
+        try fillRandomNames(self.io, self.shm, dense);
+        // Dense subdirs on the foreign device too, so the walkers list
+        // directories there whose batches straddle the short-read threshold.
+        for ([_]usize{ 1, 28, 29, 300 }) |n| {
+            const sub = try std.fmt.bufPrint(&buf, "{s}/sub{d}", .{ self.shm, n });
+            try cwd.createDir(self.io, sub, .default_dir);
+            try fillRandomNames(self.io, sub, n);
+        }
+        // `shm` is already absolute, so the links resolve from anywhere.
+        try cwd.symLink(self.io, self.shm, try std.fmt.bufPrint(&buf, "{s}/link", .{self.root}), .{});
+        try cwd.symLink(self.io, self.shm, try std.fmt.bufPrint(&buf, "{s}/local/link", .{self.root}), .{});
+    }
+
+    fn deinit(self: *CrossDevTree) void {
+        std.Io.Dir.cwd().deleteTree(self.io, self.root) catch {};
+        std.Io.Dir.cwd().deleteTree(self.io, self.shm) catch {};
+    }
+};
+
+test "short-read EOF: DirIterator trust cache stops at a symlink onto another device" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const walker = @import("walker");
+    var t: CrossDevTree = .{ .io = undefined };
+    try t.init("xdev_iter", 29);
+    defer t.deinit();
+    const hidden: walker.HiddenConfig = .{ .include_dot_entries = false, .include_hidden = true };
+
+    // Probe on the start directory, as globSingle does.
+    var tc = walker.TrustCache{};
+    var root_iter: walker.DirIterator = undefined;
+    try testing.expect(try walker.DirIterator.openHandledInto(&root_iter, t.io, t.root, null, hidden, .{ .trust = &tc }, .{}));
+    defer root_iter.close();
+    // The cache dir's filesystem may itself be non-greedy (or have a foreign
+    // mount below it); then there is no trust to inherit and nothing to test.
+    if (tc.state != .yes) return error.SkipZigTest;
+    try testing.expect(root_iter.mode.getdents.trust_short);
+    try testing.expectEqual(devOf(t.root).?, tc.dev);
+
+    var buf: [512]u8 = undefined;
+    // Same device: the verdict carries over.
+    var local_iter: walker.DirIterator = undefined;
+    try testing.expect(try walker.DirIterator.openHandledInto(&local_iter, t.io, try std.fmt.bufPrint(&buf, "{s}/local", .{t.root}), null, hidden, .{ .trust = &tc }, .{}));
+    defer local_iter.close();
+    try testing.expect(local_iter.mode.getdents.trust_short);
+
+    // Through the link onto tmpfs: the verdict must not carry over, and the
+    // listing must still be complete.
+    var link_iter: walker.DirIterator = undefined;
+    try testing.expect(try walker.DirIterator.openHandledInto(&link_iter, t.io, try std.fmt.bufPrint(&buf, "{s}/link", .{t.root}), null, hidden, .{ .trust = &tc }, .{}));
+    defer link_iter.close();
+    try testing.expect(!link_iter.mode.getdents.trust_short);
+    try testing.expectEqual(tc.state, .yes); // siblings on the root device keep it
+    var n: usize = 0;
+    while (link_iter.next()) |_| n += 1;
+    try testing.expectEqual(@as(usize, 29 + 4), n);
+
+    // Same through the glob front door: a literal component after a
+    // wildcard is opened by path (openat follows the link), so the foreign
+    // directory is listed with the start dir's cache in hand; it must still
+    // be listed completely.
+    var pat_buf: [512:0]u8 = undefined;
+    const pat = try std.fmt.bufPrintZ(&pat_buf, "{s}/l*/link/*", .{t.root});
+    const alloc = testing.allocator;
+    const paths = try globPathsSorted(alloc, pat, 0);
+    defer {
+        for (paths) |p| alloc.free(p);
+        alloc.free(paths);
+    }
+    try testing.expectEqual(@as(usize, 29 + 4), paths.len);
+}
+
+test "short-read EOF: follow_symlinks onto another device lists completely (trust auto == never)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const walker = @import("walker");
+    const gpa = testing.allocator;
+    var t: CrossDevTree = .{ .io = undefined };
+    try t.init("xdev_follow", 300);
+    defer t.deinit();
+
+    var expected: usize = 0;
+    {
+        var results = try walk.collect(gpa, t.root, .{
+            .threads = 1,
+            .respect_git = false,
+            .follow_symlinks = true,
+            .trust_short_getdents = .never,
+        });
+        defer results.deinit();
+        expected = results.entries.len;
+    }
+    // local(1) + 300 + local/link(1, target already visited via root/link or
+    // vice versa: the shm tree is listed exactly once) + link(1) + 300 + 4
+    // subdirs + 1 + 28 + 29 + 300
+    try testing.expectEqual(@as(usize, 3 + 300 + 300 + 4 + 1 + 28 + 29 + 300), expected);
+
+    // Walker A, one worker and the full pool; serial Walker B as well.
+    inline for ([_]u16{ 1, 0 }) |threads| {
+        var results = try walk.collect(gpa, t.root, .{
+            .threads = threads,
+            .respect_git = false,
+            .follow_symlinks = true,
+        });
+        defer results.deinit();
+        try testing.expectEqual(expected, results.entries.len);
+    }
+    var w = try walker.DefaultWalker.init(gpa, t.io, t.root, .{
+        .hidden = .{ .include_dot_entries = false, .include_hidden = true },
+        .follow_symlinks = true,
+    });
+    defer w.deinit();
+    var count: usize = 0;
+    while (try w.next()) |_| count += 1;
+    try testing.expectEqual(expected, count);
+}
