@@ -35,6 +35,11 @@ inline fn isSep(ch: u8) bool {
     return ch == '/' or (is_windows and ch == '\\');
 }
 
+/// True when `s` contains any path separator (see `isSep`).
+inline fn containsSep(s: []const u8) bool {
+    return lastSepPos(s) != null;
+}
+
 /// Find the last path separator in a slice.
 /// On Windows, this checks for both '/' and '\\'.
 fn lastSepPos(s: []const u8) ?usize {
@@ -1081,11 +1086,32 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
     }
     const gitignore_ptr: ?*GitIgnore = if (gitignore_instance) |*gi| gi else null;
 
+    // ZLOB_MATCH_BASENAME: a separator-less pattern matches entry names at
+    // any depth, so it is globbed as `**/<pattern>` with recursion forced on.
+    // The rewrite happens before brace analysis so every downstream path
+    // sees an ordinary recursive pattern. NOCHECK/NOMAGIC fallbacks must
+    // still report the caller's text, so NOCHECK is cleared for the walk and
+    // both are resolved here against `user_pattern`.
+    const user_pattern = pattern_slice;
+    var walk_flags = gf;
+    var basename_pattern: ?[]u8 = null;
+    defer if (basename_pattern) |bp| allocator.free(bp);
+
+    if (gf.match_basename and pattern_slice.len > 0 and !containsSep(pattern_slice)) {
+        const bp = try allocator.alloc(u8, pattern_slice.len + 3);
+        @memcpy(bp[0..3], "**/");
+        @memcpy(bp[3..], pattern_slice);
+        basename_pattern = bp;
+        pattern_slice = bp;
+        walk_flags.doublestar_recursive = true;
+        walk_flags.nocheck = false;
+    }
+
     // Perform the actual globbing
     const result = blk: {
-        if (gf.brace and brace_optimizer.containsBraces(pattern_slice)) {
+        if (walk_flags.brace and brace_optimizer.containsBraces(pattern_slice)) {
             var opt = brace_optimizer.analyzeBracedPattern(allocator, pattern_slice) catch {
-                break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
+                break :blk try globBraceExpand(allocator, pattern_slice, walk_flags, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
             };
             defer opt.deinit();
 
@@ -1095,7 +1121,7 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
                         allocator,
                         pattern_slice,
                         brace_parsed,
-                        gf,
+                        walk_flags,
                         errfunc,
                         pzlob,
                         gitignore_ptr,
@@ -1105,26 +1131,32 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
                     );
                 },
                 .fallback => {
-                    break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
+                    break :blk try globBraceExpand(allocator, pattern_slice, walk_flags, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
                 },
                 .no_braces => {
-                    break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
+                    break :blk try globBraceExpand(allocator, pattern_slice, walk_flags, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
                 },
             }
         }
 
-        break :blk try globSingle(allocator, pattern_slice, null, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
+        break :blk try globSingle(allocator, pattern_slice, null, walk_flags, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
     };
 
     if (has_magic) {
         pzlob.zlo_flags |= ZLOB_MAGCHAR;
     }
 
+    // NOCHECK was deferred for the basename rewrite above: report the
+    // caller's pattern, not the `**/`-prefixed one.
+    if (result == null and gf.nocheck and basename_pattern != null) {
+        return returnPatternAsResult(allocator, user_pattern, gf, pzlob);
+    }
+
     // BSD GLOB_NOMAGIC: if no matches and pattern has no magic characters,
     // return the pattern itself as the sole result (like NOCHECK but only
     // when there are no wildcards). See FreeBSD glob.c err_nomatch().
     if (result == null and gf.nomagic and !has_magic) {
-        return returnPatternAsResult(allocator, pattern_slice, gf, pzlob);
+        return returnPatternAsResult(allocator, user_pattern, gf, pzlob);
     }
 
     return result;

@@ -65,7 +65,7 @@ impl ZlobPattern {
     /// Use this in any caller-driven loop, iterator, or chunked pipeline.
     ///
     /// `flags` must agree with the compile-time flags on the structural bits
-    /// (BRACE / DOUBLESTAR_RECURSIVE / EXTGLOB); debug builds assert this.
+    /// (BRACE / DOUBLESTAR_RECURSIVE / EXTGLOB / MATCH_BASENAME); debug builds assert this.
     /// Behavioral bits (PERIOD / NOESCAPE / etc.) may be flipped per call.
     #[inline]
     pub fn matches(&self, path: &str, flags: ZlobFlags) -> bool {

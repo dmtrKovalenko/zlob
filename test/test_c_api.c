@@ -139,6 +139,46 @@ int main(void) {
     PASS();
   }
 
+  // ZLOB_MATCH_BASENAME - slash-less patterns match names at any depth
+  printf("\nZLOB_MATCH_BASENAME\n");
+  TEST("libc.so* matches basenames at any depth with ZLOB_MATCH_BASENAME");
+  {
+    const char *paths[] = {
+        "hash-glibc/lib/libc.so.6", "libc.so.1", "nix/store/abc-musl/lib/libc.so", "lib/libm.so.6",
+        "libc.so.6.bak/notes.txt",
+    };
+    const size_t path_count = sizeof(paths) / sizeof(paths[0]);
+
+    zlob_t anchored;
+    int result = zlob_match_paths("libc.so*", paths, path_count, 0, &anchored);
+    if (result != 0)
+      FAIL("anchored zlob_match_paths() failed");
+    /* anchored at the root, but `*` crosses `/`: libc.so.1 + libc.so.6.bak/notes.txt */
+    if (anchored.zlo_pathc != 2)
+      FAIL("Expected 2 anchored matches");
+    zlobfree(&anchored);
+
+    zlob_t basename;
+    result = zlob_match_paths("libc.so*", paths, path_count, ZLOB_MATCH_BASENAME, &basename);
+    if (result != 0)
+      FAIL("basename zlob_match_paths() failed");
+    if (basename.zlo_pathc != 3)
+      FAIL("Expected 3 basename matches");
+    zlobfree(&basename);
+
+    zlob_pattern_t *p = zlob_pattern_compile("README.md", ZLOB_MATCH_BASENAME);
+    if (p == NULL)
+      FAIL("zlob_pattern_compile() returned NULL");
+    if (!zlob_pattern_matches(p, "docs/api/README.md", 18, ZLOB_MATCH_BASENAME))
+      FAIL("nested README.md should match");
+    if (zlob_pattern_matches(p, "docs/xREADME.md", 15, ZLOB_MATCH_BASENAME))
+      FAIL("partial component must not match");
+    zlob_pattern_free(p);
+
+    printf("    anchored=2 basename=3 as expected\n");
+  }
+  PASS();
+
   // zlob_match_paths() - Path filtering (no filesystem)
   printf("\nzlob_match_paths() - Path Filtering\n");
   TEST("Filter paths with *.c pattern");

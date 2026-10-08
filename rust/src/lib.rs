@@ -120,6 +120,8 @@
 //! // - PERIOD: Allow wildcards to match leading dots
 //! // - GITIGNORE: Filter results with .gitignore rules
 //! // - ONLYDIR: Match only directories
+//! // - MATCH_BASENAME: a pattern without `/` matches file names at any depth
+//! //   (`foo*` acts like `**/foo*`, as in `find -name` / `rg -g`)
 //! ```
 //!
 //! ## Supported Patterns

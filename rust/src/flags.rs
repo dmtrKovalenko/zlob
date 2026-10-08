@@ -115,6 +115,25 @@ bitflags! {
         /// dir is walked once — never loops, never double-emits a file.
         const FOLLOW_SYMLINKS = ffi::ZLOB_FOLLOW_SYMLINKS;
 
+        /// A pattern with no path separator matches entry *names* at any
+        /// depth, the way `find -name`, gitignore, ripgrep `-g` and
+        /// minimatch's `matchBase` treat them: `foo*` behaves like
+        /// `**/foo*`, `README.md` finds every README.md in the tree, and `*`
+        /// cannot cross a `/`. Patterns containing a separator (including a
+        /// leading `./` or `/`) stay anchored. Not part of `RECOMMENDED`:
+        /// without it `*.c` globs only the current directory, as in a shell.
+        ///
+        /// # Example
+        ///
+        /// ```
+        /// use zlob::{zlob_match_paths, ZlobFlags};
+        /// let paths = ["hash-glibc/lib/libc.so.6", "libc.so.1", "lib/libm.so"];
+        /// let hits = zlob_match_paths("libc.so*", &paths, ZlobFlags::MATCH_BASENAME)?.unwrap();
+        /// assert_eq!(hits.len(), 2);
+        /// # Ok::<(), zlob::ZlobError>(())
+        /// ```
+        const MATCH_BASENAME = ffi::ZLOB_MATCH_BASENAME;
+
         /// Recommended modern defaults for globbing.
         ///
         /// Enables: BRACE, DOUBLESTAR_RECURSIVE, NOSORT, TILDE, TILDE_CHECK
@@ -154,6 +173,7 @@ mod tests {
         assert_eq!(ZlobFlags::DOUBLESTAR_RECURSIVE.bits(), 1 << 25);
         assert_eq!(ZlobFlags::EXTGLOB.bits(), 1 << 26);
         assert_eq!(ZlobFlags::FOLLOW_SYMLINKS.bits(), 1 << 27);
+        assert_eq!(ZlobFlags::MATCH_BASENAME.bits(), 1 << 28);
     }
 
     #[test]
@@ -165,5 +185,6 @@ mod tests {
         assert!(recommended.contains(ZlobFlags::TILDE));
         assert!(recommended.contains(ZlobFlags::TILDE_CHECK));
         assert!(!recommended.contains(ZlobFlags::EXTGLOB));
+        assert!(!recommended.contains(ZlobFlags::MATCH_BASENAME));
     }
 }

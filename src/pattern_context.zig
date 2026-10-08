@@ -92,33 +92,44 @@ pub const PatternContext = struct {
     /// Fast-path matching using detected template
     /// Returns null if no fast path available, otherwise returns match result
     pub inline fn matchTemplate(self: *const PatternContext, string: []const u8) ?bool {
-        return switch (self.template) {
+        return self.matchTemplateAs(self.template, string);
+    }
+
+    /// `matchTemplate` with the template passed in: hand it a comptime value
+    /// (`== self.template`) from a caller that dispatches once outside its
+    /// per-path loop and the switch folds away, leaving a loop body with no
+    /// dispatch in it. A runtime value gives the ordinary switch. (Not an
+    /// `inline else`: that would analyse every prong at every call site and
+    /// blow the compiler's inline-expansion budget in callers of
+    /// `CompiledPattern.matches`.)
+    pub inline fn matchTemplateAs(self: *const PatternContext, template: PatternTemplate, string: []const u8) ?bool {
+        return switch (template) {
             .none => null, // No fast path — most common case, check first
-            .literal => mem.eql(u8, self.pattern, string),
+            .literal => eqlBytesInline(self.pattern, string),
             .star_only => true, // * matches anything
             .star_dot_ext => {
                 // *.ext - just check suffix
                 if (string.len < self.template_suffix.len) return false;
-                return mem.eql(u8, string[string.len - self.template_suffix.len ..], self.template_suffix);
+                return eqlBytesInline(string[string.len - self.template_suffix.len ..], self.template_suffix);
             },
             .prefix_star => {
                 // prefix* - just check prefix
                 if (string.len < self.template_prefix.len) return false;
-                return mem.eql(u8, string[0..self.template_prefix.len], self.template_prefix);
+                return eqlBytesInline(string[0..self.template_prefix.len], self.template_prefix);
             },
             .prefix_star_ext => {
                 // prefix*.ext - check both prefix and suffix
                 const min_len = self.template_prefix.len + self.template_suffix.len;
                 if (string.len < min_len) return false;
-                if (!mem.eql(u8, string[0..self.template_prefix.len], self.template_prefix)) return false;
-                return mem.eql(u8, string[string.len - self.template_suffix.len ..], self.template_suffix);
+                if (!eqlBytesInline(string[0..self.template_prefix.len], self.template_prefix)) return false;
+                return eqlBytesInline(string[string.len - self.template_suffix.len ..], self.template_suffix);
             },
             .bracket_with_affixes => {
                 // prefix[charset]suffix - check prefix, suffix, and single char in bracket
                 const expected_len = self.template_prefix.len + 1 + self.template_suffix.len;
                 if (string.len != expected_len) return false;
-                if (!mem.eql(u8, string[0..self.template_prefix.len], self.template_prefix)) return false;
-                if (!mem.eql(u8, string[string.len - self.template_suffix.len ..], self.template_suffix)) return false;
+                if (!eqlBytesInline(string[0..self.template_prefix.len], self.template_prefix)) return false;
+                if (!eqlBytesInline(string[string.len - self.template_suffix.len ..], self.template_suffix)) return false;
                 // Check the bracket character
                 const bracket_char = string[self.template_prefix.len];
                 if (self.bracket_bitmap) |*bm| {
@@ -129,6 +140,65 @@ pub const PatternContext = struct {
         };
     }
 };
+
+/// Byte-slice equality that stays inline. `mem.eql` lowers to an
+/// out-of-line `eqlBytes` call for runtime lengths, which showed up as a
+/// per-path call in the basename matcher for a 4-byte prefix compare. Lengths
+/// here are pattern-derived, so the size branches are loop-invariant and
+/// predicted; each regime uses two overlapping loads (head + tail) so no
+/// byte loop runs for anything under 32 bytes.
+pub inline fn eqlBytesInline(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    const n = a.len;
+    if (n >= 16) {
+        const V = @Vector(16, u8);
+        var i: usize = 0;
+        while (i + 16 <= n) : (i += 16) {
+            if (@reduce(.Or, @as(V, a[i..][0..16].*) != @as(V, b[i..][0..16].*))) return false;
+        }
+        if (i < n) {
+            return !@reduce(.Or, @as(V, a[n - 16 ..][0..16].*) != @as(V, b[n - 16 ..][0..16].*));
+        }
+        return true;
+    }
+    if (n >= 8) {
+        const x = mem.readInt(u64, a[0..8], .little) ^ mem.readInt(u64, b[0..8], .little);
+        const y = mem.readInt(u64, a[n - 8 ..][0..8], .little) ^ mem.readInt(u64, b[n - 8 ..][0..8], .little);
+        return (x | y) == 0;
+    }
+    if (n >= 4) {
+        const x = mem.readInt(u32, a[0..4], .little) ^ mem.readInt(u32, b[0..4], .little);
+        const y = mem.readInt(u32, a[n - 4 ..][0..4], .little) ^ mem.readInt(u32, b[n - 4 ..][0..4], .little);
+        return (x | y) == 0;
+    }
+    if (n >= 2) {
+        const x = mem.readInt(u16, a[0..2], .little) ^ mem.readInt(u16, b[0..2], .little);
+        const y = mem.readInt(u16, a[n - 2 ..][0..2], .little) ^ mem.readInt(u16, b[n - 2 ..][0..2], .little);
+        return (x | y) == 0;
+    }
+    if (n == 1) return a[0] == b[0];
+    return true;
+}
+
+test "eqlBytesInline agrees with mem.eql for every length and differing position" {
+    var a: [70]u8 = undefined;
+    var b: [70]u8 = undefined;
+    var n: usize = 0;
+    while (n <= a.len) : (n += 1) {
+        for (0..n) |i| {
+            a[i] = @truncate(i *% 31 +% 7);
+            b[i] = a[i];
+        }
+        try std.testing.expect(eqlBytesInline(a[0..n], b[0..n]));
+        if (n > 0) try std.testing.expect(!eqlBytesInline(a[0..n], b[0 .. n - 1]));
+        for (0..n) |d| {
+            b[d] ^= 0x80;
+            try std.testing.expectEqual(mem.eql(u8, a[0..n], b[0..n]), eqlBytesInline(a[0..n], b[0..n]));
+            try std.testing.expect(!eqlBytesInline(a[0..n], b[0..n]));
+            b[d] ^= 0x80;
+        }
+    }
+}
 
 /// Find the closing bracket for a bracket expression, handling ']' as first char being literal
 fn findClosingBracket(pattern: []const u8, bracket_start: usize) ?usize {
@@ -383,71 +453,122 @@ pub inline fn isPathSep(ch: u8) bool {
 ///
 /// On non-Windows targets prefer `lastIndexOfCharSIMD(s, '/')` directly —
 /// it does the same work with one fewer compare per chunk.
-pub fn lastIndexOfAnyTwoSIMD(s: []const u8, a: u8, b: u8) ?usize {
-    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
-    const MaskInt = std.meta.Int(.unsigned, vec_len);
+pub inline fn lastIndexOfAnyTwoSIMD(s: []const u8, a: u8, b: u8) ?usize {
+    return lastIndexOfImpl(s, a, b);
+}
 
-    if (s.len >= vec_len) {
-        const Vec = @Vector(vec_len, u8);
+/// SIMD-accelerated lastIndexOf for a single byte. Returns the index of last
+/// occurrence. Inline: as an out-of-line call it returned the `?usize`
+/// through the stack, and the reload of that optional's tag was the single
+/// hottest instruction of the basename matcher.
+pub inline fn lastIndexOfCharSIMD(s: []const u8, needle: u8) ?usize {
+    return lastIndexOfImpl(s, needle, null);
+}
+
+/// Width of the reverse-scan vector. Deliberately *not*
+/// `suggestVectorLength`: that yields 32/64 on AVX2/AVX-512 hosts, and path
+/// strings are mostly shorter than that, which used to push nearly every
+/// basename lookup onto the scalar byte loop. 16 bytes covers a typical
+/// basename in one compare and is native on every SIMD target we build for.
+const rev_scan_vec_len: usize = 16;
+
+/// Reverse scan for the last byte equal to `a` (or `b`, when given; `b` is
+/// comptime-known null for the single-needle entry point so the extra
+/// compare folds away).
+///
+/// Three regimes, all branch-light:
+/// - len >= 16: 16-byte chunks from the end, then ONE overlapping load of
+///   `s[0..16]` for the head. Any hit in that overlapping chunk is at a
+///   position the chunk loop did not already cover (it found nothing there),
+///   so no masking is needed.
+/// - 8 <= len < 16: two overlapping 8-byte SWAR windows (tail, then head) by
+///   the same argument.
+/// - len < 8: scalar.
+inline fn lastIndexOfImpl(s: []const u8, a: u8, b: ?u8) ?usize {
+    const V = rev_scan_vec_len;
+    const Vec = @Vector(V, u8);
+    const MaskInt = std.meta.Int(.unsigned, V);
+
+    if (s.len >= V) {
         const a_vec: Vec = @splat(a);
-        const b_vec: Vec = @splat(b);
         var i: usize = s.len;
-        while (i >= vec_len) {
-            i -= vec_len;
-            const chunk: Vec = s[i..][0..vec_len].*;
-            const mask = @as(MaskInt, @bitCast(chunk == a_vec)) |
-                @as(MaskInt, @bitCast(chunk == b_vec));
-            if (mask != 0) {
-                return i + vec_len - 1 - @clz(mask);
-            }
+        while (i >= V) {
+            i -= V;
+            const chunk: Vec = s[i..][0..V].*;
+            var mask = @as(MaskInt, @bitCast(chunk == a_vec));
+            if (b) |bb| mask |= @as(MaskInt, @bitCast(chunk == @as(Vec, @splat(bb))));
+            if (mask != 0) return i + V - 1 - @clz(mask);
         }
         if (i > 0) {
-            var j: usize = i;
-            while (j > 0) {
-                j -= 1;
-                if (s[j] == a or s[j] == b) return j;
-            }
+            const chunk: Vec = s[0..V].*;
+            var mask = @as(MaskInt, @bitCast(chunk == a_vec));
+            if (b) |bb| mask |= @as(MaskInt, @bitCast(chunk == @as(Vec, @splat(bb))));
+            if (mask != 0) return V - 1 - @clz(mask);
         }
         return null;
     }
+
+    if (s.len >= 8) {
+        const tail = mem.readInt(u64, s[s.len - 8 ..][0..8], .little);
+        if (lastByteInWord(tail, a, b)) |k| return s.len - 8 + k;
+        const head = mem.readInt(u64, s[0..8], .little);
+        if (lastByteInWord(head, a, b)) |k| return k;
+        return null;
+    }
+
     var j: usize = s.len;
     while (j > 0) {
         j -= 1;
-        if (s[j] == a or s[j] == b) return j;
+        if (s[j] == a) return j;
+        if (b) |bb| if (s[j] == bb) return j;
     }
     return null;
 }
 
-/// SIMD-accelerated lastIndexOf for a single byte. Returns the index of last occurrence.
-pub fn lastIndexOfCharSIMD(s: []const u8, needle: u8) ?usize {
-    const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
-    const MaskInt = std.meta.Int(.unsigned, vec_len);
-
-    if (s.len >= vec_len) {
-        const Vec = @Vector(vec_len, u8);
-        const needle_vec: Vec = @splat(needle);
-        // Start from the end, processing vec_len bytes at a time
-        var i: usize = s.len;
-        while (i >= vec_len) {
-            i -= vec_len;
-            const chunk: Vec = s[i..][0..vec_len].*;
-            const mask = @as(MaskInt, @bitCast(chunk == needle_vec));
-            if (mask != 0) {
-                // Find highest set bit
-                return i + vec_len - 1 - @clz(mask);
-            }
-        }
-        // Handle remainder at start (scan backwards)
-        if (i > 0) {
-            var j: usize = i;
-            while (j > 0) {
-                j -= 1;
-                if (s[j] == needle) return j;
-            }
-        }
-        return null;
+/// Index (0 = lowest-addressed byte of the little-endian word) of the highest
+/// byte equal to `a` or `b`, using the exact (no false positive) zero-byte
+/// test `~(((x & 0x7f..) + 0x7f..) | x) & 0x80..`.
+inline fn lastByteInWord(w: u64, a: u8, b: ?u8) ?usize {
+    const lo: u64 = 0x7f7f7f7f7f7f7f7f;
+    const hi: u64 = 0x8080808080808080;
+    const xa = w ^ (@as(u64, 0x0101010101010101) * a);
+    var z = ~(((xa & lo) + lo) | xa) & hi;
+    if (b) |bb| {
+        const xb = w ^ (@as(u64, 0x0101010101010101) * bb);
+        z |= ~(((xb & lo) + lo) | xb) & hi;
     }
-    return mem.lastIndexOfScalar(u8, s, needle);
+    if (z == 0) return null;
+    return (63 - @as(usize, @clz(z))) / 8;
+}
+
+test "lastIndexOfCharSIMD / lastIndexOfAnyTwoSIMD agree with std for every length and position" {
+    // Covers the scalar (<8), SWAR (8..15), single-chunk (16..31) and
+    // multi-chunk-with-overlapping-head (>=16, non-multiple) regimes,
+    // including needle at index 0, at the end, in the overlap, and absent.
+    var buf: [80]u8 = undefined;
+    var len: usize = 0;
+    while (len <= buf.len) : (len += 1) {
+        const s = buf[0..len];
+        @memset(s, 'x');
+        try std.testing.expectEqual(@as(?usize, null), lastIndexOfCharSIMD(s, '/'));
+        try std.testing.expectEqual(@as(?usize, null), lastIndexOfAnyTwoSIMD(s, '/', '\\'));
+        var pos: usize = 0;
+        while (pos < len) : (pos += 1) {
+            @memset(s, 'x');
+            s[pos] = '/';
+            // a second, earlier needle must not win
+            if (pos > 3) s[pos / 2] = '/';
+            try std.testing.expectEqual(mem.lastIndexOfScalar(u8, s, '/'), lastIndexOfCharSIMD(s, '/'));
+            try std.testing.expectEqual(mem.lastIndexOfScalar(u8, s, '/'), lastIndexOfAnyTwoSIMD(s, '/', '\\'));
+            s[pos] = '\\';
+            try std.testing.expectEqual(mem.lastIndexOfAny(u8, s, "/\\"), lastIndexOfAnyTwoSIMD(s, '/', '\\'));
+            // 0x80-class bytes around the needle exercise the SWAR carry path
+            if (pos + 1 < len) s[pos + 1] = 0xff;
+            if (pos > 0) s[pos - 1] = 0x80;
+            try std.testing.expectEqual(mem.lastIndexOfAny(u8, s, "/\\"), lastIndexOfAnyTwoSIMD(s, '/', '\\'));
+            try std.testing.expectEqual(mem.lastIndexOfScalar(u8, s, '/'), lastIndexOfCharSIMD(s, '/'));
+        }
+    }
 }
 
 pub fn firstWildcardPos(pattern: []const u8, flags: ZlobFlags) usize {
