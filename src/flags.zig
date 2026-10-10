@@ -92,6 +92,7 @@ pub const ZlobFlags = packed struct(u32) {
             .nosort = true,
             .tilde = true,
             .tilde_check = true,
+            .match_basename = true,
         };
     }
 
@@ -238,9 +239,9 @@ test "ZLOB_RECOMMENDED contains expected flags" {
     try testing.expect(flags.nosort);
     try testing.expect(flags.tilde);
     try testing.expect(flags.tilde_check);
+    try testing.expect(flags.match_basename);
 
     try testing.expect(!flags.err);
     try testing.expect(!flags.mark);
     try testing.expect(!flags.gitignore);
-    try testing.expect(!flags.match_basename);
 }

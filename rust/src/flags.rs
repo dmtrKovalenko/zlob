@@ -120,8 +120,9 @@ bitflags! {
         /// minimatch's `matchBase` treat them: `foo*` behaves like
         /// `**/foo*`, `README.md` finds every README.md in the tree, and `*`
         /// cannot cross a `/`. Patterns containing a separator (including a
-        /// leading `./` or `/`) stay anchored. Not part of `RECOMMENDED`:
-        /// without it `*.c` globs only the current directory, as in a shell.
+        /// leading `./` or `/`) stay anchored. Part of `RECOMMENDED`; with
+        /// `ZlobFlags::empty()` (glibc mode) `*.c` globs only the current
+        /// directory.
         ///
         /// # Example
         ///
@@ -136,7 +137,7 @@ bitflags! {
 
         /// Recommended modern defaults for globbing.
         ///
-        /// Enables: BRACE, DOUBLESTAR_RECURSIVE, NOSORT, TILDE, TILDE_CHECK
+        /// Enables: BRACE, DOUBLESTAR_RECURSIVE, NOSORT, TILDE, TILDE_CHECK, MATCH_BASENAME
         ///
         /// # Example
         ///
@@ -184,7 +185,7 @@ mod tests {
         assert!(recommended.contains(ZlobFlags::NOSORT));
         assert!(recommended.contains(ZlobFlags::TILDE));
         assert!(recommended.contains(ZlobFlags::TILDE_CHECK));
+        assert!(recommended.contains(ZlobFlags::MATCH_BASENAME));
         assert!(!recommended.contains(ZlobFlags::EXTGLOB));
-        assert!(!recommended.contains(ZlobFlags::MATCH_BASENAME));
     }
 }
