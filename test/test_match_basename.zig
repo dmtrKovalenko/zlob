@@ -157,6 +157,8 @@ test "basename: extglob alternatives work on the component" {
 }
 
 test "basename: escapes are honoured on the component" {
+    // On Windows `\` is a path separator, so `x\*y` is an anchored pattern there.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const paths = [_][]const u8{ "a/x*y", "a/xzy", "x*y" };
     try expectMatches("x\\*y", BASENAME, &paths, &.{ "a/x*y", "x*y" });
     try expectMatches("x\\*y", BASENAME | zlob_flags.ZLOB_NOESCAPE, &paths, &.{});
