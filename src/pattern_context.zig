@@ -105,31 +105,31 @@ pub const PatternContext = struct {
     pub inline fn matchTemplateAs(self: *const PatternContext, template: PatternTemplate, string: []const u8) ?bool {
         return switch (template) {
             .none => null, // No fast path — most common case, check first
-            .literal => mem.eql(u8, self.pattern, string),
+            .literal => eqlBytesInline(self.pattern, string),
             .star_only => true, // * matches anything
             .star_dot_ext => {
                 // *.ext - just check suffix
                 if (string.len < self.template_suffix.len) return false;
-                return mem.eql(u8, string[string.len - self.template_suffix.len ..], self.template_suffix);
+                return eqlBytesInline(string[string.len - self.template_suffix.len ..], self.template_suffix);
             },
             .prefix_star => {
                 // prefix* - just check prefix
                 if (string.len < self.template_prefix.len) return false;
-                return mem.eql(u8, string[0..self.template_prefix.len], self.template_prefix);
+                return eqlBytesInline(string[0..self.template_prefix.len], self.template_prefix);
             },
             .prefix_star_ext => {
                 // prefix*.ext - check both prefix and suffix
                 const min_len = self.template_prefix.len + self.template_suffix.len;
                 if (string.len < min_len) return false;
-                if (!mem.eql(u8, string[0..self.template_prefix.len], self.template_prefix)) return false;
-                return mem.eql(u8, string[string.len - self.template_suffix.len ..], self.template_suffix);
+                if (!eqlBytesInline(string[0..self.template_prefix.len], self.template_prefix)) return false;
+                return eqlBytesInline(string[string.len - self.template_suffix.len ..], self.template_suffix);
             },
             .bracket_with_affixes => {
                 // prefix[charset]suffix - check prefix, suffix, and single char in bracket
                 const expected_len = self.template_prefix.len + 1 + self.template_suffix.len;
                 if (string.len != expected_len) return false;
-                if (!mem.eql(u8, string[0..self.template_prefix.len], self.template_prefix)) return false;
-                if (!mem.eql(u8, string[string.len - self.template_suffix.len ..], self.template_suffix)) return false;
+                if (!eqlBytesInline(string[0..self.template_prefix.len], self.template_prefix)) return false;
+                if (!eqlBytesInline(string[string.len - self.template_suffix.len ..], self.template_suffix)) return false;
                 // Check the bracket character
                 const bracket_char = string[self.template_prefix.len];
                 if (self.bracket_bitmap) |*bm| {
@@ -140,6 +140,97 @@ pub const PatternContext = struct {
         };
     }
 };
+
+/// Copy of `eqlBytes` from the Zig 0.16.0 standard library, made `inline`.
+/// `std.mem.eql(u8, ...)` is a thin wrapper around it:
+/// https://codeberg.org/ziglang/zig/src/tag/0.16.0/lib/std/mem.zig#L767-L826
+///
+/// Use it instead of `std.mem.eql` in per-path loops. Neither `std.mem.eql`
+/// nor `eqlBytes` is `inline`, and LLVM keeps `std.mem.eql` as an out-of-line
+/// call inside `matchPathsCompiledImpl`, so each prefix or suffix compare of
+/// each path is a function call. `@call(.always_inline, std.mem.eql, ...)`
+/// does not fix it: it inlines `eql` only, and the call to `eqlBytes` (private
+/// to std) stays.
+///
+/// The body is std's, minus `comptime assert(use_vectors_for_comparison)`.
+/// Keep it in sync when the Zig version changes.
+pub inline fn eqlBytesInline(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    if (a.len == 0 or a.ptr == b.ptr) return true;
+
+    if (a.len <= 16) {
+        if (a.len < 4) {
+            const x = (a[0] ^ b[0]) | (a[a.len - 1] ^ b[a.len - 1]) | (a[a.len / 2] ^ b[a.len / 2]);
+            return x == 0;
+        }
+        var x: u32 = 0;
+        for ([_]usize{ 0, a.len - 4, (a.len / 8) * 4, a.len - 4 - ((a.len / 8) * 4) }) |n| {
+            x |= @as(u32, @bitCast(a[n..][0..4].*)) ^ @as(u32, @bitCast(b[n..][0..4].*));
+        }
+        return x == 0;
+    }
+
+    // Figure out the fastest way to scan through the input in chunks.
+    // Uses vectors when supported and falls back to usize/words when not.
+    const Scan = if (std.simd.suggestVectorLength(u8)) |vec_size|
+        struct {
+            pub const size = vec_size;
+            pub const Chunk = @Vector(size, u8);
+            pub inline fn isNotEqual(chunk_a: Chunk, chunk_b: Chunk) bool {
+                return @reduce(.Or, chunk_a != chunk_b);
+            }
+        }
+    else
+        struct {
+            pub const size = @sizeOf(usize);
+            pub const Chunk = usize;
+            pub inline fn isNotEqual(chunk_a: Chunk, chunk_b: Chunk) bool {
+                return chunk_a != chunk_b;
+            }
+        };
+
+    inline for (1..6) |s| {
+        const n = 16 << s;
+        if (n <= Scan.size and a.len <= n) {
+            const V = @Vector(n / 2, u8);
+            var x = @as(V, a[0 .. n / 2].*) ^ @as(V, b[0 .. n / 2].*);
+            x |= @as(V, a[a.len - n / 2 ..][0 .. n / 2].*) ^ @as(V, b[a.len - n / 2 ..][0 .. n / 2].*);
+            const zero: V = @splat(0);
+            return !@reduce(.Or, x != zero);
+        }
+    }
+    // Compare inputs in chunks at a time (excluding the last chunk).
+    for (0..(a.len - 1) / Scan.size) |i| {
+        const a_chunk: Scan.Chunk = @bitCast(a[i * Scan.size ..][0..Scan.size].*);
+        const b_chunk: Scan.Chunk = @bitCast(b[i * Scan.size ..][0..Scan.size].*);
+        if (Scan.isNotEqual(a_chunk, b_chunk)) return false;
+    }
+
+    // Compare the last chunk using an overlapping read (similar to the previous size strategies).
+    const last_a_chunk: Scan.Chunk = @bitCast(a[a.len - Scan.size ..][0..Scan.size].*);
+    const last_b_chunk: Scan.Chunk = @bitCast(b[a.len - Scan.size ..][0..Scan.size].*);
+    return !Scan.isNotEqual(last_a_chunk, last_b_chunk);
+}
+
+test "eqlBytesInline agrees with mem.eql for every length and differing position" {
+    var a: [70]u8 = undefined;
+    var b: [70]u8 = undefined;
+    var n: usize = 0;
+    while (n <= a.len) : (n += 1) {
+        for (0..n) |i| {
+            a[i] = @truncate(i *% 31 +% 7);
+            b[i] = a[i];
+        }
+        try std.testing.expect(eqlBytesInline(a[0..n], b[0..n]));
+        if (n > 0) try std.testing.expect(!eqlBytesInline(a[0..n], b[0 .. n - 1]));
+        for (0..n) |d| {
+            b[d] ^= 0x80;
+            try std.testing.expectEqual(mem.eql(u8, a[0..n], b[0..n]), eqlBytesInline(a[0..n], b[0..n]));
+            try std.testing.expect(!eqlBytesInline(a[0..n], b[0..n]));
+            b[d] ^= 0x80;
+        }
+    }
+}
 
 /// Find the closing bracket for a bracket expression, handling ']' as first char being literal
 fn findClosingBracket(pattern: []const u8, bracket_start: usize) ?usize {
