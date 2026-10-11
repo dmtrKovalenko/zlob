@@ -105,31 +105,31 @@ pub const PatternContext = struct {
     pub inline fn matchTemplateAs(self: *const PatternContext, template: PatternTemplate, string: []const u8) ?bool {
         return switch (template) {
             .none => null, // No fast path — most common case, check first
-            .literal => eqlBytesInline(self.pattern, string),
+            .literal => mem.eql(u8, self.pattern, string),
             .star_only => true, // * matches anything
             .star_dot_ext => {
                 // *.ext - just check suffix
                 if (string.len < self.template_suffix.len) return false;
-                return eqlBytesInline(string[string.len - self.template_suffix.len ..], self.template_suffix);
+                return mem.eql(u8, string[string.len - self.template_suffix.len ..], self.template_suffix);
             },
             .prefix_star => {
                 // prefix* - just check prefix
                 if (string.len < self.template_prefix.len) return false;
-                return eqlBytesInline(string[0..self.template_prefix.len], self.template_prefix);
+                return mem.eql(u8, string[0..self.template_prefix.len], self.template_prefix);
             },
             .prefix_star_ext => {
                 // prefix*.ext - check both prefix and suffix
                 const min_len = self.template_prefix.len + self.template_suffix.len;
                 if (string.len < min_len) return false;
-                if (!eqlBytesInline(string[0..self.template_prefix.len], self.template_prefix)) return false;
-                return eqlBytesInline(string[string.len - self.template_suffix.len ..], self.template_suffix);
+                if (!mem.eql(u8, string[0..self.template_prefix.len], self.template_prefix)) return false;
+                return mem.eql(u8, string[string.len - self.template_suffix.len ..], self.template_suffix);
             },
             .bracket_with_affixes => {
                 // prefix[charset]suffix - check prefix, suffix, and single char in bracket
                 const expected_len = self.template_prefix.len + 1 + self.template_suffix.len;
                 if (string.len != expected_len) return false;
-                if (!eqlBytesInline(string[0..self.template_prefix.len], self.template_prefix)) return false;
-                if (!eqlBytesInline(string[string.len - self.template_suffix.len ..], self.template_suffix)) return false;
+                if (!mem.eql(u8, string[0..self.template_prefix.len], self.template_prefix)) return false;
+                if (!mem.eql(u8, string[string.len - self.template_suffix.len ..], self.template_suffix)) return false;
                 // Check the bracket character
                 const bracket_char = string[self.template_prefix.len];
                 if (self.bracket_bitmap) |*bm| {
@@ -140,65 +140,6 @@ pub const PatternContext = struct {
         };
     }
 };
-
-/// Byte-slice equality that stays inline. `mem.eql` lowers to an
-/// out-of-line `eqlBytes` call for runtime lengths, which showed up as a
-/// per-path call in the basename matcher for a 4-byte prefix compare. Lengths
-/// here are pattern-derived, so the size branches are loop-invariant and
-/// predicted; each regime uses two overlapping loads (head + tail) so no
-/// byte loop runs for anything under 32 bytes.
-pub inline fn eqlBytesInline(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    const n = a.len;
-    if (n >= 16) {
-        const V = @Vector(16, u8);
-        var i: usize = 0;
-        while (i + 16 <= n) : (i += 16) {
-            if (@reduce(.Or, @as(V, a[i..][0..16].*) != @as(V, b[i..][0..16].*))) return false;
-        }
-        if (i < n) {
-            return !@reduce(.Or, @as(V, a[n - 16 ..][0..16].*) != @as(V, b[n - 16 ..][0..16].*));
-        }
-        return true;
-    }
-    if (n >= 8) {
-        const x = mem.readInt(u64, a[0..8], .little) ^ mem.readInt(u64, b[0..8], .little);
-        const y = mem.readInt(u64, a[n - 8 ..][0..8], .little) ^ mem.readInt(u64, b[n - 8 ..][0..8], .little);
-        return (x | y) == 0;
-    }
-    if (n >= 4) {
-        const x = mem.readInt(u32, a[0..4], .little) ^ mem.readInt(u32, b[0..4], .little);
-        const y = mem.readInt(u32, a[n - 4 ..][0..4], .little) ^ mem.readInt(u32, b[n - 4 ..][0..4], .little);
-        return (x | y) == 0;
-    }
-    if (n >= 2) {
-        const x = mem.readInt(u16, a[0..2], .little) ^ mem.readInt(u16, b[0..2], .little);
-        const y = mem.readInt(u16, a[n - 2 ..][0..2], .little) ^ mem.readInt(u16, b[n - 2 ..][0..2], .little);
-        return (x | y) == 0;
-    }
-    if (n == 1) return a[0] == b[0];
-    return true;
-}
-
-test "eqlBytesInline agrees with mem.eql for every length and differing position" {
-    var a: [70]u8 = undefined;
-    var b: [70]u8 = undefined;
-    var n: usize = 0;
-    while (n <= a.len) : (n += 1) {
-        for (0..n) |i| {
-            a[i] = @truncate(i *% 31 +% 7);
-            b[i] = a[i];
-        }
-        try std.testing.expect(eqlBytesInline(a[0..n], b[0..n]));
-        if (n > 0) try std.testing.expect(!eqlBytesInline(a[0..n], b[0 .. n - 1]));
-        for (0..n) |d| {
-            b[d] ^= 0x80;
-            try std.testing.expectEqual(mem.eql(u8, a[0..n], b[0..n]), eqlBytesInline(a[0..n], b[0..n]));
-            try std.testing.expect(!eqlBytesInline(a[0..n], b[0..n]));
-            b[d] ^= 0x80;
-        }
-    }
-}
 
 /// Find the closing bracket for a bracket expression, handling ']' as first char being literal
 fn findClosingBracket(pattern: []const u8, bracket_start: usize) ?usize {
