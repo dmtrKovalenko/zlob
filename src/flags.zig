@@ -31,6 +31,7 @@ pub const ZLOB_GITIGNORE = c.ZLOB_GITIGNORE;
 pub const ZLOB_DOUBLESTAR_RECURSIVE = c.ZLOB_DOUBLESTAR_RECURSIVE;
 pub const ZLOB_EXTGLOB = c.ZLOB_EXTGLOB;
 pub const ZLOB_FOLLOW_SYMLINKS = c.ZLOB_FOLLOW_SYMLINKS;
+pub const ZLOB_PARALLEL = c.ZLOB_PARALLEL;
 pub const ZLOB_RECOMMENDED = c.ZLOB_RECOMMENDED;
 
 // Error codes
@@ -77,9 +78,10 @@ pub const ZlobFlags = packed struct(u32) {
     doublestar_recursive: bool = false,
     extglob: bool = false,
     follow_symlinks: bool = false,
+    parallel: bool = false,
 
     // fill the rest of 32 bits
-    _padding: u4 = 0,
+    _padding: u3 = 0,
 
     pub fn recommended() ZlobFlags {
         return ZlobFlags{
@@ -138,6 +140,7 @@ pub const ZlobFlags = packed struct(u32) {
         std.debug.assert((ZlobFlags{ .doublestar_recursive = true }).toU32() == ZLOB_DOUBLESTAR_RECURSIVE);
         std.debug.assert((ZlobFlags{ .extglob = true }).toU32() == ZLOB_EXTGLOB);
         std.debug.assert((ZlobFlags{ .follow_symlinks = true }).toU32() == ZLOB_FOLLOW_SYMLINKS);
+        std.debug.assert((ZlobFlags{ .parallel = true }).toU32() == ZLOB_PARALLEL);
     }
 };
 

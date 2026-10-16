@@ -30,6 +30,11 @@ pub fn scanDir(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!voi
     if (comptime !supported) unreachable;
     const want_stat = sh.options.meta.any();
     const only_inode = sh.options.meta.toInt() == (MetaMask{ .inode = true }).toInt();
+    // The first record of a listing is "." on every in-kernel filesystem; its
+    // d_ino is the directory's own inode as seen from *inside*, which the
+    // follow_symlinks path compares against the parent listing's d_ino to
+    // detect a btrfs subvolume / mount crossing without a statx.
+    var first_record = true;
 
     while (true) {
         // Short by 8 so the word-at-a-time name scan below stays in bounds.
@@ -72,6 +77,10 @@ pub fn scanDir(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!voi
             }
 
             const name = name_area[0..name_len];
+            if (first_record) {
+                first_record = false;
+                if (name.len == 1 and name[0] == '.') w.dot_ino = d_ino;
+            }
             if (name.len == 0) continue;
             if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
 
@@ -106,9 +115,29 @@ pub fn scanDir(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!voi
                 }
             }
 
-            try worker.appendScratch(sh, w, .{ .name = name, .kind = kind, .meta = meta });
+            try worker.appendScratch(sh, w, .{
+                .name = name,
+                .kind = kind,
+                .meta = meta,
+                // DT_UNKNOWN entries were resolved by statx above; their d_ino
+                // is still the listing's, but leave the cycle key to the
+                // slow path rather than trust an exotic filesystem.
+                .ino = if (d_type != DT_UNKNOWN) d_ino else 0,
+            });
         }
+
+        // On a greedy-fill filesystem a return that left room for one more
+        // maximal record means the directory is exhausted: skip the call that
+        // would only confirm it with 0.
+        if (dirent.shortReadIsEof(len, w.io_buf.len - 8) and sh.trust_short.load(.monotonic)) return;
     }
+}
+
+/// See `dirent.trustShortReaddir`; re-exported so worker.zig needs no direct
+/// dependency on the Linux-only dirent module.
+pub fn trustShortReaddir(fd: posix.fd_t) bool {
+    if (comptime !supported) return false;
+    return dirent.trustShortReaddir(fd);
 }
 
 /// Translate the caller's requested fields into a statx mask, so each entry's

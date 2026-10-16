@@ -205,10 +205,20 @@ pub const DT_DIR = std.c.DT.DIR;
 /// Falls back to heap-allocated arrays when the inline capacity is exceeded.
 pub const ResultsList = struct {
     const INLINE_CAP = 32;
+    /// Bytes reserved per expected result by initWithCapacity: a typical
+    /// repo-relative path plus its NUL. Reserving up front turns the byte
+    /// buffer's many small reallocs (each a copy + fresh page faults) into
+    /// one or two doublings.
+    const BYTES_PER_RESULT = 48;
+    /// Smallest byte-buffer growth step once the reserve is exhausted.
+    const MIN_BYTES_GROWTH = 4096;
 
-    /// Heap-allocated record buffers (null when using inline)
-    heap_offsets: ?[*]usize = null,
-    heap_lengths: ?[*]usize = null,
+    /// Heap-allocated record buffers (null when using inline). Offsets and
+    /// lengths are u32: paths are far shorter, and the byte buffer is
+    /// capped at 4 GiB (addPath fails past it), so this halves the record
+    /// traffic per result.
+    heap_offsets: ?[*]u32 = null,
+    heap_lengths: ?[*]u32 = null,
 
     count: usize = 0,
     capacity: usize = INLINE_CAP,
@@ -219,29 +229,34 @@ pub const ResultsList = struct {
     bytes: std.ArrayList(u8) = .empty,
     // Inline record buffers for small result sets - avoids heap allocation
     // for the records of <=32 results
-    inline_offsets: [INLINE_CAP]usize = undefined,
-    inline_lengths: [INLINE_CAP]usize = undefined,
+    inline_offsets: [INLINE_CAP]u32 = undefined,
+    inline_lengths: [INLINE_CAP]u32 = undefined,
 
     /// Initialize with inline (stack) record capacity.
     pub fn init(allocator: Allocator) ResultsList {
         return .{ .allocator = allocator };
     }
 
-    /// Initialize with pre-allocated record capacity.
+    /// Initialize with pre-allocated record capacity, plus BYTES_PER_RESULT
+    /// bytes of path storage per record.
     /// If requested capacity <= INLINE_CAP, uses the inline buffer (no heap alloc).
     /// Otherwise allocates on the heap.
     pub fn initWithCapacity(allocator: Allocator, capacity: usize) Allocator.Error!ResultsList {
         if (capacity <= INLINE_CAP) {
             return init(allocator);
         }
-        const ho = try allocator.alloc(usize, capacity);
+        const ho = try allocator.alloc(u32, capacity);
         errdefer allocator.free(ho);
-        const hl = try allocator.alloc(usize, capacity);
+        const hl = try allocator.alloc(u32, capacity);
+        errdefer allocator.free(hl);
+        var bytes: std.ArrayList(u8) = .empty;
+        try bytes.ensureTotalCapacityPrecise(allocator, capacity * BYTES_PER_RESULT);
         return .{
             .heap_offsets = ho.ptr,
             .heap_lengths = hl.ptr,
             .capacity = capacity,
             .allocator = allocator,
+            .bytes = bytes,
         };
     }
 
@@ -250,13 +265,13 @@ pub const ResultsList = struct {
     }
 
     /// Get pointer to current offsets storage
-    inline fn offsetsPtr(self: *ResultsList) [*]usize {
-        return self.heap_offsets orelse @as([*]usize, @ptrCast(&self.inline_offsets));
+    inline fn offsetsPtr(self: *ResultsList) [*]u32 {
+        return self.heap_offsets orelse @as([*]u32, @ptrCast(&self.inline_offsets));
     }
 
     /// Get pointer to current lengths storage
-    inline fn lengthsPtr(self: *ResultsList) [*]usize {
-        return self.heap_lengths orelse @as([*]usize, @ptrCast(&self.inline_lengths));
+    inline fn lengthsPtr(self: *ResultsList) [*]u32 {
+        return self.heap_lengths orelse @as([*]u32, @ptrCast(&self.inline_lengths));
     }
 
     pub fn deinit(self: *ResultsList) void {
@@ -271,9 +286,9 @@ pub const ResultsList = struct {
     /// inline to heap if needed.
     fn grow(self: *ResultsList, min_capacity: usize) Allocator.Error!void {
         const new_cap = @max(min_capacity, self.capacity * 2);
-        const new_offsets = try self.allocator.alloc(usize, new_cap);
+        const new_offsets = try self.allocator.alloc(u32, new_cap);
         errdefer self.allocator.free(new_offsets);
-        const new_lengths = try self.allocator.alloc(usize, new_cap);
+        const new_lengths = try self.allocator.alloc(u32, new_cap);
         // Copy existing data
         if (self.count > 0) {
             @memcpy(new_offsets[0..self.count], self.offsetsPtr()[0..self.count]);
@@ -296,11 +311,20 @@ pub const ResultsList = struct {
             try self.grow(self.capacity + 1);
         }
         const off = self.bytes.items.len;
-        try self.bytes.ensureUnusedCapacity(self.allocator, path_len + 1);
-        self.bytes.items.len += path_len + 1;
+        const needed = off + path_len + 1;
+        // u32 records: the byte buffer cannot address past 4 GiB.
+        if (needed > std.math.maxInt(u32)) return error.OutOfMemory;
+        if (needed > self.bytes.capacity) {
+            // Geometric growth with a floor, so a list that outgrows its
+            // reserve reallocates a handful of times, not once per few
+            // hundred results.
+            const new_cap = @max(needed, @max(self.bytes.capacity * 2, MIN_BYTES_GROWTH));
+            try self.bytes.ensureTotalCapacityPrecise(self.allocator, new_cap);
+        }
+        self.bytes.items.len = needed;
         self.bytes.items[off + path_len] = 0;
-        self.offsetsPtr()[self.count] = off;
-        self.lengthsPtr()[self.count] = path_len;
+        self.offsetsPtr()[self.count] = @intCast(off);
+        self.lengthsPtr()[self.count] = @intCast(path_len);
         self.count += 1;
         return self.bytes.items[off..][0..path_len];
     }
@@ -320,6 +344,23 @@ pub const ResultsList = struct {
 
     pub fn len(self: *const ResultsList) usize {
         return self.count;
+    }
+
+    /// Bulk-append every path of `other` (records and bytes copied wholesale,
+    /// offsets rebased). `other` is left untouched.
+    pub fn appendAll(self: *ResultsList, other: *ResultsList) Allocator.Error!void {
+        const n = other.count;
+        if (n == 0) return;
+        if (self.count + n > self.capacity) try self.grow(self.count + n);
+        const base = self.bytes.items.len;
+        // Offsets are u32; refuse to silently truncate past 4 GiB of paths.
+        if (base + other.bytes.items.len > std.math.maxInt(u32)) return error.OutOfMemory;
+        try self.bytes.appendSlice(self.allocator, other.bytes.items);
+        const src_off = other.offsetsPtr()[0..n];
+        const dst_off = self.offsetsPtr()[self.count..][0..n];
+        for (dst_off, src_off) |*d, o| d.* = @intCast(base + o);
+        @memcpy(self.lengthsPtr()[self.count..][0..n], other.lengthsPtr()[0..n]);
+        self.count += n;
     }
 
     /// View of the i-th path's bytes. Invalidated by any subsequent addPath.
@@ -653,7 +694,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
         return null;
     }
 
-    return finalizeResults(allocator, &result_paths, flags, pzlob);
+    return finalizeResults(allocator, &result_paths, flags, pzlob, false);
 }
 
 /// One path component of a wildcard-dirs pattern, with its match state
@@ -724,6 +765,9 @@ fn expandWildcardComponents(
             .err_callback = errfunc,
             .abort_on_error = flags.err,
             .report_path = current_dir,
+            // A parent may have recursed into a DT_UNKNOWN entry that turns
+            // out to be a file; ENOTDIR then just means "no match" (glibc).
+            .ignore_not_dir = true,
         }) catch return error.Aborted;
         if (!opened) return;
         defer iter.close();
@@ -732,7 +776,9 @@ fn expandWildcardComponents(
 
         while (iter.next()) |entry| {
             const name = entry.name;
-            if (!is_final and entry.kind != .directory) continue;
+            // .unknown (DT_UNKNOWN filesystems) may be a directory: recurse and
+            // let the child open decide instead of silently dropping it.
+            if (!is_final and entry.kind != .directory and entry.kind != .unknown) continue;
 
             const matches = if (has_extglob_pattern) blk: {
                 break :blk fnmatch_impl.matchExtglob(component.text, name);
@@ -805,9 +851,35 @@ fn expandWildcardComponents(
     }
 }
 
-fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
+/// True when a component after the pattern's literal prefix could climb out
+/// of the start directory: a `..` component, or a wildcard component that
+/// starts with '.' (POSIX: `.*` matches `..`). Conservative: any ".." text or
+/// any component starting with '.' after the first wildcard/brace counts.
+fn patternMayEscapeStartDir(pattern: []const u8) bool {
+    const first_magic = std.mem.indexOfAny(u8, pattern, "*?[{") orelse return false;
+    const tail = pattern[first_magic..];
+    if (std.mem.indexOf(u8, tail, "..") != null) return true;
+    var i: usize = 0;
+    while (i < tail.len) : (i += 1) {
+        if (tail[i] == '.' and (i == 0 or tail[i - 1] == '/' or tail[i - 1] == '{' or tail[i - 1] == ','))
+            return true;
+    }
+    return false;
+}
+
+fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider_in: walker.AltFs) !?void {
     var effective_pattern = pattern;
     var flags = flags_in;
+
+    // Linux getdents: one short-read-is-EOF verdict per start directory,
+    // probed on the first directory this call opens and reused by every
+    // directory below it (see walker.TrustCache). Withheld when the pattern
+    // could climb out of the start directory, which the probe never examined.
+    var trust_cache = walker.TrustCache{};
+    var fs_provider = fs_provider_in;
+    if (builtin.os.tag == .linux and !fs_provider.isAltDirFunc() and !patternMayEscapeStartDir(pattern)) {
+        fs_provider.trust = &trust_cache;
+    }
 
     if (pattern.len > 0 and isSep(pattern[pattern.len - 1])) {
         flags.onlydir = true;
@@ -1410,6 +1482,15 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     var all_results = ResultsList.initWithCapacity(allocator, 8192) catch ResultsList.init(allocator);
     defer all_results.deinit();
 
+    // A single walk can emit results already in strcmp order (sorted DFS),
+    // replacing the global sort in finalizeResults. Braced prefixes run
+    // several walks whose sets interleave, so they keep the global sort.
+    // Under follow_symlinks the visited-set cycle check makes the result set
+    // depend on traversal order (which alias of a shared target dir wins), so
+    // keep the unsorted walk there to preserve the exact same set.
+    var walk_sorted = pre_ds_count == 0 and !flags.nosort and !flags.follow_symlinks and
+        walker.DefaultWalker.supports_sorted;
+
     // Handle pre-doublestar components (braces BEFORE **)
     // e.g., "{src,lib}/**/*.rs" - need to find matching dirs first, then recurse into each
     if (pre_ds_count > 0) {
@@ -1428,9 +1509,15 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
             base_dir,
             fs_provider,
         );
+    } else if (flags.parallel and base_dir == null and !fs_provider.isAltDirFunc() and gitignore_filter == null and
+        try globRecursiveWalkParallel(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc))
+    {
+        // ZLOB_PARALLEL: the parallel walker filled all_results in worker
+        // completion order; finalizeResults sorts it like any unsorted walk.
+        walk_sorted = false;
     } else {
         // Use unified walker for both simple (**/*.txt) and complex (**/foo/*.txt) patterns
-        try globRecursiveWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc, io, base_dir, fs_provider);
+        try globRecursiveWalk(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc, io, base_dir, fs_provider, walk_sorted);
     }
 
     if (all_results.len() == 0) {
@@ -1438,7 +1525,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
     }
 
     // Note: sorting is now handled inside finalizeResults using pre-computed lengths
-    return finalizeResults(allocator, &all_results, flags, pzlob);
+    return finalizeResults(allocator, &all_results, flags, pzlob, walk_sorted);
 }
 
 /// Handle non-recursive patterns with braced directory components
@@ -1531,7 +1618,7 @@ fn globWithBracedComponents(
         const root = base_dir orelse std.Io.Dir.cwd();
         _ = root.statFile(io, start_dir, .{}) catch return null;
         try all_results.appendPath(start_dir);
-        return finalizeResults(allocator, &all_results, flags, pzlob);
+        return finalizeResults(allocator, &all_results, flags, pzlob, false);
     }
 
     // Convert remaining BracedComponents to ComponentMatcher format
@@ -1567,7 +1654,7 @@ fn globWithBracedComponents(
     }
 
     // Note: sorting is now handled inside finalizeResults using pre-computed lengths
-    return finalizeResults(allocator, &all_results, flags, pzlob);
+    return finalizeResults(allocator, &all_results, flags, pzlob, false);
 }
 
 const BracedComponentMatcher = struct {
@@ -1656,13 +1743,15 @@ fn walkBracedComponents(
     const opened = walker.DirIterator.openHandledInto(&iter, io, current_dir, base_dir, hidden_config, fs_provider, .{
         .err_callback = errfunc,
         .abort_on_error = flags.err,
+        // See expandWildcardComponents: a DT_UNKNOWN parent entry may be a file.
+        .ignore_not_dir = true,
     }) catch return error.Aborted;
     if (!opened) return;
     defer iter.close();
 
     while (iter.next()) |entry| {
         // Note: Hidden file filtering is now done at iterator level
-        if (!is_final and entry.kind != .directory) continue;
+        if (!is_final and entry.kind != .directory and entry.kind != .unknown) continue;
 
         if (matcher.matchesWithFlags(entry.name, flags.extglob)) {
             if (is_final and directories_only and entry.kind != .directory) continue;
@@ -1706,8 +1795,9 @@ fn globRecursiveWithBracedPrefix(
 ) !void {
     // If we've matched all pre-doublestar components, start the recursive walk
     if (component_idx >= pre_ds_components.len) {
-        // Use unified walker for both simple and complex patterns
-        try globRecursiveWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc, io, base_dir, fs_provider);
+        // Use unified walker for both simple and complex patterns. The merged
+        // result set is sorted globally afterwards, so walk unsorted.
+        try globRecursiveWalk(allocator, rec_pattern, current_dir, flags, results, info, errfunc, io, base_dir, fs_provider, false);
         return;
     }
 
@@ -1762,9 +1852,13 @@ fn globRecursiveWithBracedPrefix(
     }
 }
 
-fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: ZlobFlags, pzlob: *zlob_t) !?void {
+/// `presorted`: the results already arrive in strcmp order (a sorted walk),
+/// so the global sort is skipped. Only the new set is ever sorted here, so
+/// this is safe under ZLOB_APPEND too.
+fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: ZlobFlags, pzlob: *zlob_t, presorted: bool) !?void {
     const offs = dooffsSlots(flags, pzlob);
     const new_count = results.len();
+    const need_sort = !flags.nosort and !presorted;
 
     // ZLOB_APPEND - merge with existing results. The emit format keeps all
     // owned strings in one buffer, so import the old set's bytes then the new
@@ -1789,7 +1883,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
 
         try combined.emit(offs, pzlob);
 
-        if (!flags.nosort and new_count > 0) {
+        if (need_sort and new_count > 0) {
             sorting.sortPaths(@ptrCast(pzlob.zlo_pathv + offs + old_count), pzlob.zlo_pathlen + old_count, new_count);
         }
         return;
@@ -1797,7 +1891,7 @@ fn finalizeResults(allocator: std.mem.Allocator, results: *ResultsList, flags: Z
 
     try results.emit(offs, pzlob);
 
-    if (!flags.nosort) {
+    if (need_sort) {
         sorting.sortPaths(@ptrCast(pzlob.zlo_pathv + offs), pzlob.zlo_pathlen, new_count);
     }
     return;
@@ -1814,6 +1908,7 @@ fn globRecursiveWalk(
     io: Io,
     base_dir: ?std.Io.Dir,
     fs_provider: walker.AltFs,
+    sorted: bool,
 ) !void {
     const has_dir_components = rec_pattern.dir_components.len > 0;
 
@@ -1858,6 +1953,10 @@ fn globRecursiveWalk(
         .hidden = hidden_config,
         .follow_symlinks = flags.follow_symlinks,
         .fs = fs_provider,
+        // Sorted DFS: results come out in strcmp order of the full paths the
+        // loop below builds (constant start_dir prefix, '/' mark on dirs).
+        .sorted = sorted,
+        .sort_marks_dirs = flags.mark,
     };
 
     if (rec_pattern.gitignore_filter) |gi| {
@@ -1879,6 +1978,41 @@ fn globRecursiveWalk(
 
     // Determine if we need to prepend start_dir to paths
     const use_dirname = start_dir.len > 0 and !mem.eql(u8, start_dir, ".");
+
+    // Fast path for the common "**/<file pattern>" shape: no dir_components
+    // to check against the parent path, no gitignore, files only. The walker
+    // offers each basename straight out of its dirent buffer and only a match
+    // gets a path assembled, directly in the results' byte buffer. Everything
+    // else goes through the generic next() loop below.
+    if (!has_dir_components and rec_pattern.gitignore_filter == null and !info.directories_only) {
+        const prefix: []const u8 = if (use_dirname) start_dir else "";
+        const plain_suffix = rec_pattern.file_pattern_contexts == null and
+            rec_pattern.file_alternatives == null and
+            !file_pattern_is_extglob and
+            pattern_ctx.single_suffix_matcher != null;
+        if (plain_suffix) {
+            // "*.c" and friends: the whole predicate inlines to a tail compare.
+            var sink = RecursiveSuffixSink{
+                .results = results,
+                .prefix = prefix,
+                .matcher = pattern_ctx.single_suffix_matcher.?,
+            };
+            try dir_walker.walkInto(&sink);
+        } else {
+            var sink = RecursiveMatchSink{
+                .results = results,
+                .prefix = prefix,
+                .rec_pattern = rec_pattern,
+                .pattern_ctx = &pattern_ctx,
+                .enable_extglob = enable_extglob,
+                .file_pattern_is_extglob = file_pattern_is_extglob,
+                .file_alt_extglob_mask = file_alt_extglob_mask,
+            };
+            try dir_walker.walkInto(&sink);
+        }
+        return;
+    }
+
     while (dir_walker.next() catch null) |entry| {
         const is_dir = entry.kind == .directory;
         if (is_dir and !info.directories_only) continue;
@@ -1903,20 +2037,14 @@ fn globRecursiveWalk(
             }
         }
 
-        const matches = if (rec_pattern.file_pattern_contexts) |contexts| blk: {
-            if (enable_extglob and rec_pattern.file_alternatives != null) {
-                break :blk matchWithAlternativesPrecomputedExtglob(entry.basename, rec_pattern.file_alternatives.?, contexts, file_alt_extglob_mask);
-            }
-            const multi_suffix_ptr = if (rec_pattern.multi_suffix_matcher) |*ms| ms else null;
-            break :blk matchWithAlternativesPrecomputed(entry.basename, contexts, multi_suffix_ptr);
-        } else if (rec_pattern.file_alternatives) |alts|
-            matchWithAlternativesExtglob(entry.basename, alts, enable_extglob)
-        else if (file_pattern_is_extglob) blk: {
-            break :blk fnmatch_impl.matchExtglob(rec_pattern.file_pattern, entry.basename);
-        } else if (pattern_ctx.single_suffix_matcher) |sufxi_matcher|
-            sufxi_matcher.matchSuffix(entry.basename)
-        else
-            fnmatch_impl.fnmatchWithContext(&pattern_ctx, entry.basename, .{});
+        const matches = matchRecursiveBasename(
+            entry.basename,
+            rec_pattern,
+            &pattern_ctx,
+            enable_extglob,
+            file_pattern_is_extglob,
+            file_alt_extglob_mask,
+        );
 
         if (matches) {
             if (info.directories_only and !is_dir) continue;
@@ -1941,6 +2069,335 @@ fn globRecursiveWalk(
             }
         }
     }
+}
+
+/// The file-pattern chain of globRecursiveWalk, shared by its generic loop
+/// and RecursiveMatchSink so the two cannot drift apart.
+inline fn matchRecursiveBasename(
+    name: []const u8,
+    rec_pattern: *const RecursivePattern,
+    pattern_ctx: *const PatternContext,
+    enable_extglob: bool,
+    file_pattern_is_extglob: bool,
+    file_alt_extglob_mask: u64,
+) bool {
+    if (rec_pattern.file_pattern_contexts) |contexts| {
+        if (enable_extglob and rec_pattern.file_alternatives != null) {
+            return matchWithAlternativesPrecomputedExtglob(name, rec_pattern.file_alternatives.?, contexts, file_alt_extglob_mask);
+        }
+        const multi_suffix_ptr = if (rec_pattern.multi_suffix_matcher) |*ms| ms else null;
+        return matchWithAlternativesPrecomputed(name, contexts, multi_suffix_ptr);
+    }
+    if (rec_pattern.file_alternatives) |alts| {
+        return matchWithAlternativesExtglob(name, alts, enable_extglob);
+    }
+    if (file_pattern_is_extglob) {
+        return fnmatch_impl.matchExtglob(rec_pattern.file_pattern, name);
+    }
+    if (pattern_ctx.single_suffix_matcher) |*sufxi_matcher| {
+        return sufxi_matcher.matchSuffix(name);
+    }
+    return fnmatch_impl.fnmatchWithContext(pattern_ctx, name, .{});
+}
+
+/// Write "<prefix>/<dir_rel>/<name>" (omitting empty parts) into `results`.
+/// The walker's sink contract hands us the parent path and the basename
+/// separately, so the full path is assembled once, in its final place.
+inline fn emitRecursiveMatch(results: *ResultsList, prefix: []const u8, dir_rel: []const u8, name: []const u8) Allocator.Error!void {
+    const prefix_part = prefix.len + @intFromBool(prefix.len > 0);
+    const dir_part = dir_rel.len + @intFromBool(dir_rel.len > 0);
+    const dst = try results.addPath(prefix_part + dir_part + name.len);
+    if (prefix.len > 0) {
+        @memcpy(dst[0..prefix.len], prefix);
+        dst[prefix.len] = '/';
+    }
+    if (dir_rel.len > 0) {
+        @memcpy(dst[prefix_part..][0..dir_rel.len], dir_rel);
+        dst[prefix_part + dir_rel.len] = '/';
+    }
+    @memcpy(dst[prefix_part + dir_part ..][0..name.len], name);
+}
+
+/// walkInto sink for "**/*.ext": the predicate is one tail compare.
+const RecursiveSuffixSink = struct {
+    results: *ResultsList,
+    prefix: []const u8,
+    matcher: suffix_match.SingleSuffixMatcher,
+
+    pub inline fn wantFile(self: *const RecursiveSuffixSink, name: []const u8, _: walker.EntryKind) bool {
+        return self.matcher.matchSuffix(name);
+    }
+
+    pub inline fn emitFile(self: *RecursiveSuffixSink, dir_rel: []const u8, name: []const u8) Allocator.Error!void {
+        return emitRecursiveMatch(self.results, self.prefix, dir_rel, name);
+    }
+};
+
+/// walkInto sink for every other file pattern of a "**/<pattern>" glob.
+const RecursiveMatchSink = struct {
+    results: *ResultsList,
+    prefix: []const u8,
+    rec_pattern: *const RecursivePattern,
+    pattern_ctx: *const PatternContext,
+    enable_extglob: bool,
+    file_pattern_is_extglob: bool,
+    file_alt_extglob_mask: u64,
+
+    pub inline fn wantFile(self: *const RecursiveMatchSink, name: []const u8, _: walker.EntryKind) bool {
+        return matchRecursiveBasename(
+            name,
+            self.rec_pattern,
+            self.pattern_ctx,
+            self.enable_extglob,
+            self.file_pattern_is_extglob,
+            self.file_alt_extglob_mask,
+        );
+    }
+
+    pub inline fn emitFile(self: *RecursiveMatchSink, dir_rel: []const u8, name: []const u8) Allocator.Error!void {
+        return emitRecursiveMatch(self.results, self.prefix, dir_rel, name);
+    }
+};
+
+// ============================================================================
+// ZLOB_PARALLEL: recursive `**` globs over the parallel walker
+// ============================================================================
+
+/// Worker threads used by ZLOB_PARALLEL recursive globs. Four is the
+/// break-even-safe default: on the kernel tree t4 is never slower than t1
+/// above ~2k entries while t16 loses below ~4k. 0 = walker default (CPU
+/// count, capped at 16).
+var glob_parallel_threads: u16 = 4;
+
+pub fn setGlobParallelThreads(n: u16) void {
+    @atomicStore(u16, &glob_parallel_threads, n, .monotonic);
+}
+
+fn getGlobParallelThreads() u16 {
+    return @atomicLoad(u16, &glob_parallel_threads, .monotonic);
+}
+
+/// A C errfunc carries no context, so a parallel walk can't hand each worker
+/// a per-call closure. Instead one process-wide slot holds the errfunc of the
+/// parallel glob in flight and a trampoline serializes calls through a mutex.
+/// A second concurrent parallel glob that also needs an errfunc simply takes
+/// the serial path (see `acquireParallelErrfunc`).
+var par_errfunc_mutex: std.Io.Mutex = .init;
+var par_errfunc_slot = std.atomic.Value(usize).init(0);
+
+inline fn parErrfuncIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn parallelErrfuncTrampoline(epath: [*:0]const u8, eerrno: c_int) callconv(.c) c_int {
+    par_errfunc_mutex.lockUncancelable(parErrfuncIo());
+    defer par_errfunc_mutex.unlock(parErrfuncIo());
+    const raw = par_errfunc_slot.load(.acquire);
+    if (raw == 0) return 0;
+    const cb: walker.ErrCallbackFn = @ptrFromInt(raw);
+    return cb(epath, eerrno);
+}
+
+/// Returns false when the slot is busy (another parallel glob with an errfunc
+/// is running); the caller then falls back to the serial walker.
+fn acquireParallelErrfunc(errfunc: zlob_errfunc_t) bool {
+    const cb = errfunc orelse return true;
+    return par_errfunc_slot.cmpxchgStrong(0, @intFromPtr(cb), .acq_rel, .acquire) == null;
+}
+
+fn releaseParallelErrfunc(errfunc: zlob_errfunc_t) void {
+    if (errfunc == null) return;
+    // Take the mutex so a trampoline call already past its load can't run
+    // the errfunc after we return to the caller.
+    par_errfunc_mutex.lockUncancelable(parErrfuncIo());
+    defer par_errfunc_mutex.unlock(parErrfuncIo());
+    par_errfunc_slot.store(0, .release);
+}
+
+const ParallelGlobSink = struct {
+    lists: []ResultsList,
+    failed: []bool,
+    rec_pattern: *const RecursivePattern,
+    info: *const PatternInfo,
+    pattern_ctx: PatternContext,
+    dir_contexts: []const PatternContext,
+    start_dir: []const u8,
+    use_dirname: bool,
+    enable_extglob: bool,
+    file_pattern_is_extglob: bool,
+    file_alt_extglob_mask: u64,
+    mark: bool,
+
+    fn visit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
+        const self: *ParallelGlobSink = @ptrCast(@alignCast(ctx.?));
+        const rec_pattern = self.rec_pattern;
+        const is_dir = entry.kind == .directory;
+        // report_dirs already excludes directories unless directories_only.
+        const rel_path = entry.relativePath();
+
+        if (rec_pattern.dir_components.len > 0) {
+            const last_slash = mem.lastIndexOf(u8, rel_path, "/") orelse return .cont;
+            const parent_path = rel_path[0..last_slash];
+            if (!matchDirComponents(parent_path, rec_pattern.dir_components, rec_pattern.dir_component_alternatives, self.dir_contexts, self.enable_extglob)) {
+                return .cont;
+            }
+        }
+
+        const matches = matchRecursiveBasename(
+            entry.basename(),
+            rec_pattern,
+            &self.pattern_ctx,
+            self.enable_extglob,
+            self.file_pattern_is_extglob,
+            self.file_alt_extglob_mask,
+        );
+        if (!matches) return .cont;
+        if (self.info.directories_only and !is_dir) return .cont;
+
+        const needs_mark = self.mark and is_dir;
+        const base_path_len = if (self.use_dirname) self.start_dir.len + 1 + rel_path.len else rel_path.len;
+        const alloc_len = if (needs_mark) base_path_len + 1 else base_path_len;
+
+        const list = &self.lists[entry.worker_id];
+        const path_buf = list.addPath(alloc_len) catch {
+            self.failed[entry.worker_id] = true;
+            return .stop;
+        };
+        if (self.use_dirname) {
+            @memcpy(path_buf[0..self.start_dir.len], self.start_dir);
+            path_buf[self.start_dir.len] = '/';
+            @memcpy(path_buf[self.start_dir.len + 1 ..][0..rel_path.len], rel_path);
+        } else {
+            @memcpy(path_buf[0..rel_path.len], rel_path);
+        }
+        if (needs_mark) path_buf[base_path_len] = '/';
+        return .cont;
+    }
+};
+
+/// ZLOB_PARALLEL path of `globRecursiveWalk`: same per-entry matching, but the
+/// tree is enumerated by the work-stealing parallel walker (`walk.run`) and
+/// each worker appends into its own ResultsList (no locking); the lists are
+/// concatenated into `results` afterwards. Returns false (without touching
+/// `results`) when the parallel path can't be used and the caller should run
+/// the serial walker instead.
+fn globRecursiveWalkParallel(
+    allocator: std.mem.Allocator,
+    rec_pattern: *const RecursivePattern,
+    start_dir: []const u8,
+    flags: ZlobFlags,
+    results: *ResultsList,
+    info: *const PatternInfo,
+    errfunc: zlob_errfunc_t,
+) !bool {
+    const has_dir_components = rec_pattern.dir_components.len > 0;
+    const pattern_ctx = PatternContext.init(rec_pattern.file_pattern);
+    const enable_extglob = flags.extglob;
+
+    var dir_component_contexts: [32]PatternContext = undefined;
+    if (has_dir_components) {
+        for (rec_pattern.dir_components, 0..) |comp, i| {
+            dir_component_contexts[i] = PatternContext.init(comp);
+        }
+    }
+
+    var pattern_wants_hidden = pattern_ctx.starts_with_dot;
+    if (has_dir_components and !pattern_wants_hidden) {
+        for (rec_pattern.dir_components) |comp| {
+            if (comp.len > 0 and comp[0] == '.') {
+                pattern_wants_hidden = true;
+                break;
+            }
+        }
+    }
+
+    const opts = walk.Options{
+        .threads = getGlobParallelThreads(),
+        // Same limit as the serial walker's WalkerConfig.max_depth default, so
+        // both paths report identical sets on trees deeper than that. The
+        // serial walker lists directories at depth <= max_depth (so entries
+        // up to max_depth + 1); the parallel one lists at entry depth <
+        // max_depth. Hence the +1.
+        .max_depth = walker.WalkerConfig.default_max_depth + 1,
+        .follow_symlinks = flags.follow_symlinks,
+        .include_hidden = flags.period or pattern_wants_hidden,
+        .respect_git = false,
+        .skip_git_dir = false,
+        .report_dirs = info.directories_only,
+        .pattern = null,
+        .err_callback = if (errfunc != null) &parallelErrfuncTrampoline else null,
+        .abort_on_error = flags.err,
+    };
+    const n_workers = walk.effectiveThreads(&opts);
+    // A single worker only adds the walker's thread/merge overhead on top of
+    // the serial walk (measured +6.7% at t1); let the caller run serially.
+    if (n_workers <= 1) return false;
+
+    if (!acquireParallelErrfunc(errfunc)) return false;
+    defer releaseParallelErrfunc(errfunc);
+
+    const lists = try allocator.alloc(ResultsList, n_workers);
+    defer allocator.free(lists);
+    for (lists) |*l| l.* = ResultsList.init(allocator);
+    defer for (lists) |*l| l.deinit();
+    const failed = try allocator.alloc(bool, n_workers);
+    defer allocator.free(failed);
+    @memset(failed, false);
+
+    var sink = ParallelGlobSink{
+        .lists = lists,
+        .failed = failed,
+        .rec_pattern = rec_pattern,
+        .info = info,
+        .pattern_ctx = pattern_ctx,
+        .dir_contexts = dir_component_contexts[0..rec_pattern.dir_components.len],
+        .start_dir = start_dir,
+        .use_dirname = start_dir.len > 0 and !mem.eql(u8, start_dir, "."),
+        .enable_extglob = enable_extglob,
+        .file_pattern_is_extglob = enable_extglob and fnmatch_impl.containsExtglob(rec_pattern.file_pattern),
+        .file_alt_extglob_mask = if (enable_extglob) altExtglobMask(rec_pattern.file_alternatives) else 0,
+        .mark = flags.mark,
+    };
+
+    // The serial walker's root is start_dir (or cwd when empty/"."); the
+    // parallel walker takes "" for cwd and joins root + "/" + rel itself.
+    const root: []const u8 = if (sink.use_dirname) start_dir else "";
+    const rules = walk.run(allocator, root, opts, .{ .context = @ptrCast(&sink), .visit = &ParallelGlobSink.visit }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // Serial path maps every walker failure to Aborted (only reachable
+        // with ZLOB_ERR / a non-zero errfunc return).
+        else => return error.Aborted,
+    };
+    rules.deinit();
+    allocator.destroy(rules);
+
+    for (failed) |f| if (f) return error.OutOfMemory;
+
+    var total_count: usize = 0;
+    var total_bytes: usize = 0;
+    var non_empty: usize = 0;
+    var last_non_empty: usize = 0;
+    for (lists, 0..) |*l, i| {
+        if (l.count == 0) continue;
+        non_empty += 1;
+        last_non_empty = i;
+        total_count += l.count;
+        total_bytes += l.bytes.items.len;
+    }
+    if (total_count == 0) return true;
+
+    if (non_empty == 1 and results.count == 0) {
+        // Single producer (t1 or a shallow tree): adopt its list outright.
+        results.deinit();
+        results.* = lists[last_non_empty];
+        lists[last_non_empty] = ResultsList.init(allocator);
+        return true;
+    }
+
+    if (results.count + total_count > results.capacity) try results.grow(results.count + total_count);
+    try results.bytes.ensureUnusedCapacity(allocator, total_bytes);
+    for (lists) |*l| try results.appendAll(l);
+    return true;
 }
 
 fn matchDirComponents(
@@ -2051,6 +2508,9 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
     const opened = walker.DirIterator.openHandledInto(&iter, io, dirname, base_dir, hidden_config, fs_provider, .{
         .err_callback = errfunc,
         .abort_on_error = flags.err,
+        // "file/*" is a plain non-match for glibc (ENOTDIR from opendir is
+        // ignored in glob_in_dir), not a read error.
+        .ignore_not_dir = true,
     }) catch return error.Aborted;
     if (!opened) return null;
     defer iter.close();
@@ -2128,7 +2588,7 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
         return null;
     }
 
-    return finalizeResults(allocator, &names, flags, pzlob);
+    return finalizeResults(allocator, &names, flags, pzlob, false);
 }
 
 /// Result of a glob operation containing matched paths.

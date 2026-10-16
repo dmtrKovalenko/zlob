@@ -125,6 +125,19 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
+If you use the parallel walker (`zlob.walk`), opt out of Zig std's default
+256 KiB thread-local signal stack in your root module. `std.Thread` instantiates
+it for every spawned thread and glibc zeroes it inside `pthread_create`, which
+costs ~64 page faults and a `sigaltstack` syscall per worker on every walk
+(measured 25-35% of wall time on small trees at 16 threads):
+
+```zig
+pub const std_options: std.Options = .{
+    .signal_stack_size = null,
+    .enable_segfault_handler = false,
+};
+```
+
 ## Rust
 
 zlob is also shared as an officially supported rust crate, find it on [crates.io](https://crates.io/crates/zlob) and read the [rust docs](https://docs.rs/zlob/1.4.2/zlob/)

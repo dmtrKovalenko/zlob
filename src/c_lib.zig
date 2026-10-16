@@ -69,9 +69,13 @@ pub export fn zlobfree(pzlob: *zlob_t) callconv(.c) void {
     zlob_impl.globfreeInternal(allocator, pzlob);
 }
 
+/// Worker threads for ZLOB_PARALLEL recursive globs (default 4; 0 = CPU count, capped).
+pub export fn zlob_set_threads(threads: c_uint) callconv(.c) void {
+    zlob_impl.setGlobParallelThreads(@intCast(@min(threads, 1024)));
+}
+
 /// Glob within a specific base directory.
 /// base_path must be an absolute path (starts with '/'), otherwise returns zlob_flags.ZLOB_ABORTED.
-/// This is the C-compatible version of globAt().
 pub export fn zlob_at(
     base_path: [*:0]const u8,
     pattern: [*:0]const u8,
@@ -800,11 +804,13 @@ fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
 }
 
 inline fn fillCWalkEntry(out: *zlob_walk_entry_t, e: *const walk.Entry) void {
+    const no_meta = walk.Metadata{};
+    const m: *const walk.Metadata = e.meta orelse &no_meta;
     out.* = .{
         .path = @ptrCast(e.path.ptr),
         .path_len = e.path.len,
         .relative_offset = e.relative_offset,
-        .basename_offset = @intCast(e.path.len - e.basename.len),
+        .basename_offset = e.basename_offset,
         .kind = switch (e.kind) {
             .file => 1,
             .directory => 2,
@@ -813,17 +819,17 @@ inline fn fillCWalkEntry(out: *zlob_walk_entry_t, e: *const walk.Entry) void {
         },
         .depth = e.depth,
         .worker_id = e.worker_id,
-        .meta_valid = e.meta.valid.toInt(),
-        .size = e.meta.size,
-        .mtime_ns = e.meta.mtime_ns,
-        .atime_ns = e.meta.atime_ns,
-        .ctime_ns = e.meta.ctime_ns,
-        .btime_ns = e.meta.btime_ns,
-        .inode = e.meta.inode,
-        .nlink = e.meta.nlink,
-        .mode = e.meta.mode,
-        .uid = e.meta.uid,
-        .gid = e.meta.gid,
+        .meta_valid = m.valid.toInt(),
+        .size = m.size,
+        .mtime_ns = m.mtime_ns,
+        .atime_ns = m.atime_ns,
+        .ctime_ns = m.ctime_ns,
+        .btime_ns = m.btime_ns,
+        .inode = m.inode,
+        .nlink = m.nlink,
+        .mode = m.mode,
+        .uid = m.uid,
+        .gid = m.gid,
     };
 }
 
@@ -899,8 +905,24 @@ pub export fn zlob_ignore_rules_free(rules: ?*anyopaque) void {
     allocator.destroy(typed);
 }
 
+/// `collectAs` adapter: workers materialize `zlob_walk_entry_t` records
+/// directly into their shards, so the C result array is the walker's own
+/// merged array (no `Entry[]` kept alive, no second fill pass). Metadata is
+/// copied into the record, so the walker keeps no metadata array either.
+const CWalkAdapter = struct {
+    pub const Out = zlob_walk_entry_t;
+    pub const retain_meta = false;
+    pub const convert = fillCWalkEntry;
+    pub inline fn path(o: *const zlob_walk_entry_t) []const u8 {
+        return o.path[0..o.path_len];
+    }
+    pub inline fn relativePath(o: *const zlob_walk_entry_t) []const u8 {
+        return o.path[o.relative_offset..o.path_len];
+    }
+};
+
 const WalkResultHolder = struct {
-    results: walk.WalkerResult,
+    results: walk.CollectResult(zlob_walk_entry_t),
 };
 
 pub export fn zlob_walk_collect(
@@ -911,7 +933,7 @@ pub export fn zlob_walk_collect(
     out.* = .{ .entries = null, .count = 0, ._storage = null };
 
     const root_slice = mem.sliceTo(root, 0);
-    var results = walk.collect(allocator, root_slice, walkOptionsFromC(options)) catch |err|
+    var results = walk.collectAs(allocator, root_slice, walkOptionsFromC(options), CWalkAdapter) catch |err|
         return switch (err) {
             error.Aborted => zlob_flags.ZLOB_ABORTED,
             error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
@@ -920,36 +942,17 @@ pub export fn zlob_walk_collect(
             error.NameTooLong => zlob_flags.ZLOB_NAME_TOO_LONG,
         };
 
-    if (results.entries.len == 0) {
-        // Keep a holder even with no entries so the caller can still query the
-        // (always-retained) reusable ignore rules.
-        const holder = allocator.create(WalkResultHolder) catch {
-            results.deinit();
-            return zlob_flags.ZLOB_NOSPACE;
-        };
-        holder.* = .{ .results = results };
-        out.* = .{ .entries = null, .count = 0, ._storage = @ptrCast(holder) };
-        return 0;
-    }
-
+    // Keep a holder even with no entries so the caller can still query the
+    // (always-retained) reusable ignore rules.
     const holder = allocator.create(WalkResultHolder) catch {
         results.deinit();
         return zlob_flags.ZLOB_NOSPACE;
     };
     holder.* = .{ .results = results };
 
-    const centries = allocator.alloc(zlob_walk_entry_t, results.entries.len) catch {
-        holder.results.deinit();
-        allocator.destroy(holder);
-        return zlob_flags.ZLOB_NOSPACE;
-    };
-    for (holder.results.entries, centries) |*e, *ce| {
-        fillCWalkEntry(ce, e);
-    }
-
     out.* = .{
-        .entries = centries.ptr,
-        .count = centries.len,
+        .entries = if (results.entries.len == 0) null else results.entries.ptr,
+        .count = results.entries.len,
         ._storage = @ptrCast(holder),
     };
     return 0;
@@ -957,9 +960,7 @@ pub export fn zlob_walk_collect(
 
 pub export fn zlob_walk_result_free(result: ?*zlob_walk_result_t) void {
     const r = result orelse return;
-    if (r.entries) |entries| {
-        allocator.free(entries[0..r.count]);
-    }
+    // `entries` is owned by the holder's CollectResult (freed by its deinit).
     if (r._storage) |storage| {
         const holder: *WalkResultHolder = @ptrCast(@alignCast(storage));
         holder.results.deinit();

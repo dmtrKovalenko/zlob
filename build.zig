@@ -589,6 +589,29 @@ pub fn build(b: *std.Build) void {
             const bench_brace_step = b.step("bench-brace", "Benchmark brace pattern optimizations");
             bench_brace_step.dependOn(&bench_brace_cmd.step);
 
+            // Walk benchmark harness (A/B perf work): bench_walk <root> <mode> [iters] [threads]
+            const bench_walk = b.addExecutable(.{
+                .name = "bench_walk",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/bench_walk.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "zlob", .module = mod },
+                        .{ .name = "c_lib", .module = c_lib_mod },
+                        .{ .name = "zlob_flags", .module = flags_mod },
+                    },
+                }),
+            });
+            b.installArtifact(bench_walk);
+
+            const bench_walk_cmd = b.addRunArtifact(bench_walk);
+            bench_walk_cmd.step.dependOn(b.getInstallStep());
+            if (b.args) |a| bench_walk_cmd.addArgs(a);
+            const bench_walk_step = b.step("bench-walk", "Walk benchmark harness: bench-walk -- <root> <mode> [iters] [threads]");
+            bench_walk_step.dependOn(&bench_walk_cmd.step);
+
             // Compare walker backends
             const compare_walker = b.addExecutable(.{
                 .name = "compare_walker",

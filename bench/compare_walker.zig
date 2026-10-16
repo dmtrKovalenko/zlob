@@ -4,6 +4,13 @@
 const std = @import("std");
 const walker_mod = @import("walker");
 
+// Root-module opt-out for per-worker signal-stack setup; see README.md.
+pub const std_options: std.Options = .{
+    .signal_stack_size = null,
+    .enable_segfault_handler = false,
+    .allow_stack_tracing = false,
+};
+
 pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;

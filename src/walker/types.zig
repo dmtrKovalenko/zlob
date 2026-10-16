@@ -144,25 +144,36 @@ pub const Metadata = struct {
     valid: MetaMask = .{},
 };
 
-/// A reported filesystem entry. Slices are valid only for the duration of the
-/// `run` visitor callback; `collect` returns owned copies.
+/// A reported filesystem entry. Slices and the `meta` pointer are valid only
+/// for the duration of the `run` visitor callback; `collect` returns owned
+/// copies (paths in `WalkerResult.chunks`, metadata in `WalkerResult.metas`).
+///
+/// Kept small on purpose (40 bytes): every reported entry moves through the
+/// per-worker sink, the final gather and the optional sort, so the 72-byte
+/// `Metadata` lives out of line and is only materialized when requested.
 pub const Entry = struct {
     /// Full path: walk root joined with the relative path. NUL-terminated at
     /// `path.len` for zero-cost C interop.
     path: []const u8,
+    /// Per-entry metadata, or null when `Options.meta` is empty.
+    meta: ?*const Metadata,
     /// Offset into `path` where the root-relative part starts.
     relative_offset: u32,
-    /// Basename (slice into `path`).
-    basename: []const u8,
-    kind: EntryKind,
+    /// Offset into `path` where the basename starts (see `basename`).
+    basename_offset: u32,
     /// Depth below the root: direct children of the root have depth 1.
     depth: u16,
     /// Index of the current worker id
     worker_id: u16 = 0,
-    meta: Metadata,
+    kind: EntryKind,
 
     pub inline fn relativePath(self: *const Entry) []const u8 {
         return self.path[self.relative_offset..];
+    }
+
+    /// Basename (slice into `path`).
+    pub inline fn basename(self: *const Entry) []const u8 {
+        return self.path[self.basename_offset..];
     }
 };
 
@@ -172,6 +183,10 @@ pub const RawEntry = struct {
     name: []const u8,
     kind: EntryKind,
     meta: Metadata,
+    /// Inode number as reported by the parent's directory listing (Linux
+    /// `d_ino`), 0 when unknown. Only consumed under `follow_symlinks`, where
+    /// it keys the cycle set without a statx per real directory.
+    ino: u64 = 0,
 };
 
 pub const VisitAction = enum(c_int) {
@@ -189,9 +204,18 @@ pub const Visitor = struct {
     visit: *const fn (context: ?*anyopaque, entry: *const Entry) VisitAction,
 };
 
+pub const TrustShortGetdents = enum(u8) { auto, never };
+
 pub const Options = struct {
     /// Worker thread count. 0 = one per CPU (capped). 1 = caller thread only.
     threads: u16 = 0,
+    /// Stack size in bytes for each helper worker thread. 0 = 1 MiB
+    /// (`thread.DEFAULT_STACK_SIZE`). Small stacks let glibc's stack cache
+    /// reuse them across walks instead of mmap/munmap-ing 16 MiB per thread
+    /// per walk. The walker itself needs very little stack; raise this only
+    /// when a `Visitor`/sink callback running on worker threads needs more.
+    /// Values below 512 KiB are clamped up (glibc refuses them).
+    thread_stack_size: usize = 0,
     /// Maximum entry depth to yield/descend (root children = 1). 0 = unlimited.
     max_depth: u16 = 0,
     /// Descend into symlinked directories (cycles are detected and broken).
@@ -208,8 +232,11 @@ pub const Options = struct {
     /// Report directory entries (directories are traversed either way).
     report_dirs: bool = true,
     /// Glob filter: only entries whose root-relative path matches are reported
-    /// (e.g. "**/*.rs", "src/**", "*.{c,h}"). Traversal is narrowed too:
-    /// directories outside the pattern's literal prefix are pruned unopened.
+    /// (e.g. "**/*.rs", "src/**", "src/*/*.{c,h}"). Standard pathname
+    /// semantics: `*`, `?` and `[...]` stay within one path component, so
+    /// "*.c" matches only at the root; `**` spans any number of components.
+    /// Traversal is narrowed too: directories outside the pattern's literal
+    /// prefix are pruned unopened.
     pattern: ?[]const u8 = null,
     /// Flags for compiling/matching `pattern`. Default: brace + recursive `**`.
     pattern_flags: ZlobFlags = .{ .brace = true, .doublestar_recursive = true },
@@ -224,6 +251,12 @@ pub const Options = struct {
     meta: MetaMask = .{},
     /// Sort collected results by path (`collect` only).
     sort: bool = false,
+    /// Linux: skip the EOF-confirming getdents64 call per directory when the
+    /// root's filesystem is known to fill buffers greedily (ext4, btrfs, xfs,
+    /// tmpfs, f2fs) and no other filesystem is mounted below it. `.never`
+    /// always issues the extra call. Env `ZLOB_TRUST_SHORT_GETDENTS=0` also
+    /// disables it process-wide (libc builds).
+    trust_short_getdents: TrustShortGetdents = .auto,
     err_callback: ?ErrCallbackFn = null,
     abort_on_error: bool = false,
     /// Io used for queue synchronization and by the std_fs fallback backend.
