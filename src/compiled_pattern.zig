@@ -43,9 +43,12 @@ pub inline fn containsPathSep(pattern: []const u8) bool {
 /// ZLOB_MATCH_BASENAME applies to a pattern only when the *caller's* pattern
 /// has no separator at all. The check runs on the raw text so a leading `./`
 /// (stripped later) still anchors the pattern to the base, giving callers an
-/// escape hatch for a root-only literal while the flag is on.
+/// escape hatch for a root-only literal while the flag is on. `.` and `..`
+/// name the current and parent directory, not entries to look for at any
+/// depth, so they stay anchored.
 pub inline fn basenameModeFor(raw_pattern: []const u8, flags: ZlobFlags) bool {
-    return flags.match_basename and raw_pattern.len > 0 and !containsPathSep(raw_pattern);
+    return flags.match_basename and raw_pattern.len > 0 and !containsPathSep(raw_pattern) and
+        !mem.eql(u8, raw_pattern, ".") and !mem.eql(u8, raw_pattern, "..");
 }
 
 /// True when `path` ends with the single component `name` — i.e. the tail of

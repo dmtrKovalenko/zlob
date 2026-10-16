@@ -179,6 +179,15 @@ test "basename: escapes in brace alternatives follow fnmatch" {
     try expectMatches("{*\\a.y,x}", BRACE, &names, &.{ "\\a.y", "a.y", "xa.y" });
 }
 
+test "basename: . and .. stay anchored" {
+    const flags = ZlobFlags{ .match_basename = true };
+    for ([_][]const u8{ ".", "..", "./", "../" }) |p| {
+        var compiled = try zlob.compilePattern(testing.allocator, p, flags);
+        defer compiled.deinit();
+        try testing.expectEqual(zlob.CompiledPatternKind.literal, std.meta.activeTag(compiled.body));
+    }
+}
+
 test "basename: at-mode strips the base and never matches through the base name" {
     const paths = [_][]const u8{
         "/home/u/proj/README.md",
@@ -376,6 +385,19 @@ test "basename fs: NOCHECK/NOMAGIC report the caller's pattern, not the rewritte
     try t.expectGlob("missing*", BASENAME | NOCHECK, &.{"missing*"});
     try t.expectGlob("missing.txt", BASENAME | zlob_flags.ZLOB_NOMAGIC, &.{"missing.txt"});
     try t.expectGlob("b.txt", BASENAME | NOCHECK, &.{"a/b.txt"});
+}
+
+test "basename fs: . and .. name the base and its parent, not entries at any depth" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var t = try FsTree.init(&.{"a/b.txt"});
+    defer t.deinit();
+
+    for ([_][]const u8{ ".", ".." }) |p| {
+        const anchored = try t.globSorted(p, 0);
+        defer FsTree.free(anchored);
+        try t.expectGlob(p, BASENAME, anchored);
+        try testing.expectEqual(@as(usize, 1), anchored.len);
+    }
 }
 
 test "basename fs: MAGCHAR output flag reflects the user's pattern" {

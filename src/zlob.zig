@@ -35,11 +35,6 @@ inline fn isSep(ch: u8) bool {
     return ch == '/' or (is_windows and ch == '\\');
 }
 
-/// True when `s` contains any path separator (see `isSep`).
-inline fn containsSep(s: []const u8) bool {
-    return lastSepPos(s) != null;
-}
-
 /// Find the last path separator in a slice.
 /// On Windows, this checks for both '/' and '\\'.
 fn lastSepPos(s: []const u8) ?usize {
@@ -1114,7 +1109,7 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
     var basename_pattern: ?[]u8 = null;
     defer if (basename_pattern) |bp| allocator.free(bp);
 
-    if (gf.match_basename and pattern_slice.len > 0 and !containsSep(pattern_slice)) {
+    if (compiled_pattern.basenameModeFor(pattern_slice, gf)) {
         const bp = try allocator.alloc(u8, pattern_slice.len + 3);
         @memcpy(bp[0..3], "**/");
         @memcpy(bp[3..], pattern_slice);
