@@ -615,19 +615,19 @@ pub const CompiledPattern = struct {
                 },
                 .star_dot_ext => {
                     return path.len >= suffix.len and
-                        mem.eql(u8, path[path.len - suffix.len ..], suffix);
+                        pattern_context_mod.eqlBytesInline(path[path.len - suffix.len ..], suffix);
                 },
                 .prefix_star => {
                     const name = getBasenameNormalized(path);
                     return name.len >= prefix.len and
-                        mem.eql(u8, name[0..prefix.len], prefix);
+                        pattern_context_mod.eqlBytesInline(name[0..prefix.len], prefix);
                 },
                 .prefix_star_ext => {
                     if (path.len < suffix.len or
-                        !mem.eql(u8, path[path.len - suffix.len ..], suffix)) return false;
+                        !pattern_context_mod.eqlBytesInline(path[path.len - suffix.len ..], suffix)) return false;
                     const name = getBasenameNormalized(path);
                     return name.len >= prefix.len + suffix.len and
-                        mem.eql(u8, name[0..prefix.len], prefix);
+                        pattern_context_mod.eqlBytesInline(name[0..prefix.len], prefix);
                 },
                 .bracket_with_affixes, .none => {
                     // required_last_char comes from the extglob-unaware
