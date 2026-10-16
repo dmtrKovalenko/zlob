@@ -592,6 +592,102 @@ mod tests {
     }
 
     #[test]
+    fn test_match_paths_match_basename_slashless_pattern_matches_any_depth() {
+        let paths = [
+            "hash-glibc/lib/libc.so.6",
+            "libc.so.1",
+            "nix/store/abc-musl/lib/libc.so",
+            "lib/libm.so.6",
+            "libc.so.6.bak/notes.txt",
+        ];
+
+        // Anchored at the root, but `*` crosses `/`, so the directory whose
+        // name starts with the literal drags its contents along.
+        let anchored = zlob_match_paths("libc.so*", &paths, ZlobFlags::empty())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            anchored.to_strings(),
+            vec!["libc.so.1", "libc.so.6.bak/notes.txt"]
+        );
+
+        let basename = zlob_match_paths("libc.so*", &paths, ZlobFlags::MATCH_BASENAME)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            basename.to_strings(),
+            vec![
+                "hash-glibc/lib/libc.so.6",
+                "libc.so.1",
+                "nix/store/abc-musl/lib/libc.so",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_match_paths_match_basename_keeps_separator_patterns_anchored() {
+        let paths = ["src/main.rs", "crates/a/src/main.rs", "main.rs"];
+
+        let with_sep = zlob_match_paths("src/main.rs", &paths, ZlobFlags::MATCH_BASENAME)
+            .unwrap()
+            .unwrap();
+        assert_eq!(with_sep.to_strings(), vec!["src/main.rs"]);
+
+        let dot_slash = zlob_match_paths("./main.rs", &paths, ZlobFlags::MATCH_BASENAME)
+            .unwrap()
+            .unwrap();
+        assert_eq!(dot_slash.to_strings(), vec!["main.rs"]);
+
+        let literal = zlob_match_paths("main.rs", &paths, ZlobFlags::MATCH_BASENAME)
+            .unwrap()
+            .unwrap();
+        assert_eq!(literal.len(), 3);
+    }
+
+    #[test]
+    fn test_match_paths_match_basename_star_does_not_cross_directories() {
+        let paths = ["a/foo/b.txt", "a/foo.txt", "foo"];
+
+        // Without the flag `*` crosses `/`, so the directory component matches too.
+        let crossing = zlob_match_paths("*foo*", &paths, ZlobFlags::empty())
+            .unwrap()
+            .unwrap();
+        assert_eq!(crossing.len(), 3);
+
+        let names_only = zlob_match_paths("*foo*", &paths, ZlobFlags::MATCH_BASENAME)
+            .unwrap()
+            .unwrap();
+        assert_eq!(names_only.to_strings(), vec!["a/foo.txt", "foo"]);
+    }
+
+    #[test]
+    fn test_match_paths_match_basename_with_braces_and_compiled_pattern() {
+        use crate::ZlobPattern;
+
+        let paths = [
+            "src/lib.rs",
+            "src/deep/mod.rs",
+            "build/out.o",
+            "Cargo.toml",
+            "x/Cargo.toml",
+        ];
+        let flags = ZlobFlags::MATCH_BASENAME | ZlobFlags::BRACE;
+
+        let hits = zlob_match_paths("{lib,mod}.rs", &paths, flags)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits.to_strings(), vec!["src/deep/mod.rs", "src/lib.rs"]);
+
+        let pattern = ZlobPattern::compile("Cargo.toml", flags).unwrap();
+        assert!(pattern.matches("x/Cargo.toml", flags));
+        assert!(pattern.matches("Cargo.toml", flags));
+        assert!(!pattern.matches("x/Cargo.tomlx", flags));
+        assert!(!pattern.matches("xCargo.toml", flags));
+        let idx = pattern.match_indices(&paths, flags).unwrap();
+        assert_eq!(idx.as_slice(), &[3, 4]);
+    }
+
+    #[test]
     fn test_match_paths_at_200_random_rs_paths() {
         let base_path = "/workspace/my-project";
 

@@ -15,6 +15,8 @@ const isPathSep = glob.isPathSep;
 const containsExtglob = glob.containsExtglob;
 const fnmatch_mod = glob.fnmatch;
 const PatternContext = glob.PatternContext;
+const pattern_context_mod = glob.pattern_context;
+const PatternTemplate = pattern_context_mod.PatternTemplate;
 const ZlobFlags = glob.ZlobFlags;
 const ZlobResults = glob.ZlobResults;
 
@@ -28,6 +30,39 @@ inline fn stripDotSlash(raw_pattern: []const u8) []const u8 {
         return raw_pattern[2..];
     }
     return raw_pattern;
+}
+
+/// True when `pattern` contains a path separator (`/`, plus `\\` on Windows).
+pub inline fn containsPathSep(pattern: []const u8) bool {
+    if (comptime path_sep_is_windows) {
+        return mem.indexOfAny(u8, pattern, "/\\") != null;
+    }
+    return indexOfCharSIMD(pattern, '/') != null;
+}
+
+/// ZLOB_MATCH_BASENAME applies to a pattern only when the *caller's* pattern
+/// has no separator at all. The check runs on the raw text so a leading `./`
+/// (stripped later) still anchors the pattern to the base, giving callers an
+/// escape hatch for a root-only literal while the flag is on. `.` and `..`
+/// name the current and parent directory, not entries to look for at any
+/// depth, so they stay anchored.
+pub inline fn basenameModeFor(raw_pattern: []const u8, flags: ZlobFlags) bool {
+    return flags.match_basename and raw_pattern.len > 0 and !containsPathSep(raw_pattern) and
+        !mem.eql(u8, raw_pattern, ".") and !mem.eql(u8, raw_pattern, "..");
+}
+
+/// True when `path` ends with the single component `name` — i.e. the tail of
+/// `path` equals `name` and is either the whole path or preceded by a
+/// separator. `name` must not contain a separator. This is the basename
+/// literal test without ever scanning for the last `/`: cost is O(name.len)
+/// instead of O(path.len), with a one-byte last-char reject up front.
+pub inline fn endsWithComponent(path: []const u8, name: []const u8) bool {
+    std.debug.assert(name.len > 0);
+    if (path.len < name.len or path.len == 0) return false;
+    if (path[path.len - 1] != name[name.len - 1]) return false;
+    const start = path.len - name.len;
+    if (start != 0 and !isPathSep(path[start - 1])) return false;
+    return mem.eql(u8, path[start..], name);
 }
 
 pub const PatternSegments = struct {
@@ -486,6 +521,15 @@ pub const CompiledPatternKind = enum(u8) {
     general_prefilter_fast,
     /// General pattern with 5+ byte suffix prefilter.
     general_prefilter_generic,
+    /// ZLOB_MATCH_BASENAME: separator-less literal, matched against the last
+    /// path component only.
+    basename_literal,
+    /// ZLOB_MATCH_BASENAME: separator-less wildcard pattern, matched against
+    /// the last path component through the PatternContext fast paths.
+    basename_general,
+    /// ZLOB_MATCH_BASENAME: brace-expanded alternatives, each matched against
+    /// the last path component.
+    basename_brace,
 };
 
 pub const CompiledPattern = struct {
@@ -510,6 +554,117 @@ pub const CompiledPattern = struct {
         general_no_prefilter: PatternSegments,
         general_prefilter_fast: GeneralPrefilterFast,
         general_prefilter_generic: GeneralPrefilterGeneric,
+        /// Sub-slice of `pattern_storage` (no separators to collapse).
+        basename_literal: []const u8,
+        basename_general: BasenameMatcher,
+        basename_brace: BasenameBrace,
+    };
+
+    /// One separator-less pattern matched against a single path component.
+    /// `ctx` carries the template fast paths (`prefix*`, `*.ext`,
+    /// `prefix*.ext`, `[set]`, literal) so the common shapes never reach the
+    /// general fnmatch loop.
+    pub const BasenameMatcher = struct {
+        ctx: PatternContext,
+        /// `flags.extglob` and the pattern uses extglob syntax. Precomputed so
+        /// the per-path loop does not rescan the pattern.
+        is_extglob: bool,
+        /// Dispatch template for `matchPathAs`. PatternContext is not
+        /// extglob-aware (it would call `app.@(js|ts)` a literal and demand a
+        /// trailing `)`), so an extglob pattern is forced to `.none`.
+        template: PatternTemplate,
+
+        pub fn init(pattern: []const u8, flags: ZlobFlags) BasenameMatcher {
+            const ctx = PatternContext.init(pattern);
+            const is_extglob = flags.extglob and containsExtglob(pattern);
+            return .{
+                .ctx = ctx,
+                .is_extglob = is_extglob,
+                .template = if (is_extglob) .none else ctx.template,
+            };
+        }
+
+        /// Match an already-isolated entry name.
+        pub inline fn matchName(self: *const BasenameMatcher, name: []const u8, flags: ZlobFlags) bool {
+            if (self.is_extglob) return fnmatch_mod.matchExtglob(self.ctx.pattern, name);
+            return fnmatch_mod.fnmatchWithContext(&self.ctx, name, .{ .noescape = flags.noescape });
+        }
+
+        /// Match the last component of `path`.
+        pub inline fn matchPath(self: *const BasenameMatcher, path: []const u8, flags: ZlobFlags) bool {
+            return self.matchPathAs(self.template, path, flags);
+        }
+
+        /// `matchPath` with the template passed in (`template ==
+        /// self.template`). The batch loop passes a comptime value so it can
+        /// dispatch once and run a body with no switch in it; `matchPath`
+        /// passes the runtime field. Every shape rejects on the path's tail
+        /// bytes before paying for the separator scan: the pattern has no
+        /// separator, so a suffix it requires can only lie inside the
+        /// basename, and the last byte of the path *is* the last byte of its
+        /// basename.
+        pub inline fn matchPathAs(self: *const BasenameMatcher, template: PatternTemplate, path: []const u8, flags: ZlobFlags) bool {
+            const prefix = self.ctx.template_prefix;
+            const suffix = self.ctx.template_suffix;
+            switch (template) {
+                // `*` matches every component, the empty one included.
+                .star_only => return true,
+                .literal => {
+                    if (self.ctx.pattern.len == 0) return getBasenameNormalized(path).len == 0;
+                    return endsWithComponent(path, self.ctx.pattern);
+                },
+                .star_dot_ext => {
+                    return path.len >= suffix.len and
+                        mem.eql(u8, path[path.len - suffix.len ..], suffix);
+                },
+                .prefix_star => {
+                    const name = getBasenameNormalized(path);
+                    return name.len >= prefix.len and
+                        mem.eql(u8, name[0..prefix.len], prefix);
+                },
+                .prefix_star_ext => {
+                    if (path.len < suffix.len or
+                        !mem.eql(u8, path[path.len - suffix.len ..], suffix)) return false;
+                    const name = getBasenameNormalized(path);
+                    return name.len >= prefix.len + suffix.len and
+                        mem.eql(u8, name[0..prefix.len], prefix);
+                },
+                .bracket_with_affixes, .none => {
+                    // required_last_char comes from the extglob-unaware
+                    // PatternContext (it would demand the `)` of `@(js|ts)`).
+                    if (!self.is_extglob) {
+                        if (self.ctx.required_last_char) |required_last| {
+                            if (path.len == 0 or path[path.len - 1] != required_last) return false;
+                        }
+                    }
+                    return self.matchName(getBasenameNormalized(path), flags);
+                },
+            }
+        }
+    };
+
+    pub const BasenameBrace = struct {
+        /// Owned slices, each allocated via `allocator.dupe` inside `expandBraces`.
+        expanded: [][]u8,
+        /// One matcher per expanded[i]; borrows into expanded[i].
+        alts: []BasenameMatcher,
+        /// Every alternative is a plain literal (`{main,helper}.zig`): skip the
+        /// separator scan and test each one from the end of the path.
+        all_literal: bool,
+
+        pub inline fn matchPath(self: *const BasenameBrace, path: []const u8, flags: ZlobFlags) bool {
+            if (self.all_literal) {
+                for (self.alts) |*alt| {
+                    if (endsWithComponent(path, alt.ctx.pattern)) return true;
+                }
+                return false;
+            }
+            const name = getBasenameNormalized(path);
+            for (self.alts) |*alt| {
+                if (alt.matchName(name, flags)) return true;
+            }
+            return false;
+        }
     };
 
     pub const BraceGeneral = struct {
@@ -566,6 +721,15 @@ pub const CompiledPattern = struct {
             if (stripped.len > literal_buf.len) return null;
             const normalized = utils.normalizeSlashes(stripped, literal_buf);
 
+            if (basenameModeFor(raw_pattern, flags)) {
+                return CompiledPattern{
+                    .allocator = undefined,
+                    .flags = flags,
+                    .pattern_storage = normalized,
+                    .body = .{ .basename_literal = normalized },
+                };
+            }
+
             return CompiledPattern{
                 .allocator = undefined,
                 .flags = flags,
@@ -608,16 +772,29 @@ pub const CompiledPattern = struct {
             .general_no_prefilter => |*ps| ps.deinit(),
             .general_prefilter_fast => |*g| g.segments.deinit(),
             .general_prefilter_generic => |*g| g.segments.deinit(),
+            .basename_literal, .basename_general => {},
+            .basename_brace => |*bb| {
+                self.allocator.free(bb.alts);
+                for (bb.expanded) |e| self.allocator.free(e);
+                self.allocator.free(bb.expanded);
+            },
         }
         self.allocator.free(self.pattern_storage);
         self.* = undefined;
     }
 
-    /// Match a single path against this compiled pattern
-    pub inline fn matches(self: *const CompiledPattern, path: []const u8, runtime_flags: ZlobFlags) bool {
+    /// Match a single path against this compiled pattern.
+    ///
+    /// Deliberately not `inline`: the body is a 12-way switch over every
+    /// matcher shape, and forcing it into each call site made a function with
+    /// a handful of `matches` calls exceed the compiler's inline-expansion
+    /// budget. Callers are the C ABI (one site) and the walker's per-entry
+    /// filter, where a direct call is noise next to the directory read.
+    pub fn matches(self: *const CompiledPattern, path: []const u8, runtime_flags: ZlobFlags) bool {
         std.debug.assert(self.flags.brace == runtime_flags.brace);
         std.debug.assert(self.flags.doublestar_recursive == runtime_flags.doublestar_recursive);
         std.debug.assert(self.flags.extglob == runtime_flags.extglob);
+        std.debug.assert(self.flags.match_basename == runtime_flags.match_basename);
 
         // Transient scratch for Windows path normalisation. POSIX comptime-elides.
         var path_scratch: [MAX_PATTERN_LEN]u8 = undefined;
@@ -628,6 +805,10 @@ pub const CompiledPattern = struct {
                 const norm = utils.normalizePathSeparators(path, &path_scratch);
                 return mem.eql(u8, norm, normalized);
             },
+
+            .basename_literal => |name| return endsWithComponent(path, name),
+            .basename_general => |*bm| return bm.matchPath(path, runtime_flags),
+            .basename_brace => |*bb| return bb.matchPath(path, runtime_flags),
 
             .single_suffix_fast => |*m| return m.matchSuffix(path),
             .single_suffix_generic => |*m| return m.match(path),
@@ -686,6 +867,9 @@ fn transferSingleAlternative(
 }
 
 fn compileImpl(allocator: Allocator, raw_pattern: []const u8, flags: ZlobFlags) !CompiledPattern {
+    // Decided on the caller's text: a leading "./" counts as a separator.
+    const basename_mode = basenameModeFor(raw_pattern, flags);
+
     // Strip leading "./" — paths are relative to cwd / base by default.
     const stripped = if (raw_pattern.len >= 2 and raw_pattern[0] == '.' and raw_pattern[1] == '/')
         raw_pattern[2..]
@@ -720,7 +904,7 @@ fn compileImpl(allocator: Allocator, raw_pattern: []const u8, flags: ZlobFlags) 
         // non-brace compile.
         if (expanded_const.len == 1) {
             pattern_storage = transferSingleAlternative(allocator, pattern_storage, &expanded_const);
-            return compileNonBrace(allocator, pattern_storage, flags);
+            return compileNonBrace(allocator, pattern_storage, flags, basename_mode);
         }
 
         // Cast to mutable-owned slice form for storage.
@@ -739,6 +923,30 @@ fn compileImpl(allocator: Allocator, raw_pattern: []const u8, flags: ZlobFlags) 
                 .flags = flags,
                 .pattern_storage = pattern_storage,
                 .body = .{ .multi_suffix = ms_result.matcher },
+            };
+        }
+
+        // Basename mode: no alternative can contain a separator (braces never
+        // introduce one), so every alternative is a per-component matcher.
+        if (basename_mode) {
+            var alts = try allocator.alloc(CompiledPattern.BasenameMatcher, expanded.len);
+            errdefer allocator.free(alts);
+            var all_literal = true;
+            for (expanded, 0..) |exp, i| {
+                alts[i] = CompiledPattern.BasenameMatcher.init(exp, flags);
+                // `.literal` template already excludes wildcards and escapes;
+                // an empty alternative (`{a,}`) can't be tested from the end.
+                if (alts[i].is_extglob or alts[i].ctx.template != .literal or exp.len == 0) all_literal = false;
+            }
+            return CompiledPattern{
+                .allocator = allocator,
+                .flags = flags,
+                .pattern_storage = pattern_storage,
+                .body = .{ .basename_brace = .{
+                    .expanded = expanded,
+                    .alts = alts,
+                    .all_literal = all_literal,
+                } },
             };
         }
 
@@ -782,10 +990,10 @@ fn compileImpl(allocator: Allocator, raw_pattern: []const u8, flags: ZlobFlags) 
         };
     }
 
-    return compileNonBrace(allocator, pattern_storage, flags);
+    return compileNonBrace(allocator, pattern_storage, flags, basename_mode);
 }
 
-fn compileNonBrace(allocator: Allocator, pattern_storage: []u8, flags: ZlobFlags) !CompiledPattern {
+fn compileNonBrace(allocator: Allocator, pattern_storage: []u8, flags: ZlobFlags, basename_mode: bool) !CompiledPattern {
     const has_extglob = flags.extglob and containsExtglob(pattern_storage);
 
     // Literal fast path — no wildcards, no extglob.
@@ -794,6 +1002,14 @@ fn compileNonBrace(allocator: Allocator, pattern_storage: []u8, flags: ZlobFlags
         // is always <= len, so we can write back into pattern_storage and
         // store the literal as a sub-slice without a second allocation.
         const literal = utils.normalizeSlashes(pattern_storage, pattern_storage);
+        if (basename_mode) {
+            return CompiledPattern{
+                .allocator = allocator,
+                .flags = flags,
+                .pattern_storage = pattern_storage,
+                .body = .{ .basename_literal = literal },
+            };
+        }
         return CompiledPattern{
             .allocator = allocator,
             .flags = flags,
@@ -828,6 +1044,18 @@ fn compileNonBrace(allocator: Allocator, pattern_storage: []u8, flags: ZlobFlags
             .flags = flags,
             .pattern_storage = pattern_storage,
             .body = .{ .single_suffix_generic = suffix_match.SuffixMatch.new(suffix) },
+        };
+    }
+
+    // Basename mode: the whole pattern is one component, so a single
+    // PatternContext replaces segmentation (`*.ext` shapes were already
+    // taken above — a suffix match over the full path is the same test).
+    if (basename_mode) {
+        return CompiledPattern{
+            .allocator = allocator,
+            .flags = flags,
+            .pattern_storage = pattern_storage,
+            .body = .{ .basename_general = CompiledPattern.BasenameMatcher.init(pattern_storage, flags) },
         };
     }
 
@@ -891,7 +1119,10 @@ pub fn ListOf(comptime kind: CollectorKind) type {
 }
 
 /// Single inline push site — `kind` is comptime so the unused branch is
-/// fully eliminated by the optimiser.
+/// fully eliminated by the optimiser. Every caller reserves `paths.len`
+/// slots up front, so the common case is a capacity-checked store; the
+/// growing `append` (an out-of-line call) only runs if that reservation
+/// failed and the list fell back to an empty one.
 inline fn collectPush(
     comptime kind: CollectorKind,
     list: *ListOf(kind),
@@ -899,8 +1130,12 @@ inline fn collectPush(
     path: []const u8,
 ) !void {
     switch (kind) {
-        .slices => try list.append(path),
-        .indices => try list.append(idx),
+        .slices => {
+            if (list.items.len < list.capacity) list.appendAssumeCapacity(path) else try list.append(path);
+        },
+        .indices => {
+            if (list.items.len < list.capacity) list.appendAssumeCapacity(idx) else try list.append(idx);
+        },
     }
 }
 
@@ -923,6 +1158,30 @@ inline fn runMultiSuffix(
             if (path.len < path_offset) continue;
         }
         if (ms.matchAny(getBasenameNormalized(path))) {
+            try collectPush(collector, out, base_index + i, path);
+        }
+    }
+}
+
+/// Per-template basename loop; `template` is comptime so the per-path body
+/// contains no dispatch (`runMultiSuffix` exists for the same reason).
+inline fn runBasenameGeneral(
+    comptime template: PatternTemplate,
+    comptime collector: CollectorKind,
+    comptime at: bool,
+    bm: *const CompiledPattern.BasenameMatcher,
+    paths: []const []const u8,
+    path_offset: usize,
+    flags: ZlobFlags,
+    out: *ListOf(collector),
+    base_index: usize,
+) !void {
+    for (paths, 0..) |path, i| {
+        if (comptime at) {
+            if (path.len < path_offset) continue;
+        }
+        const relative_path = if (comptime at) path[path_offset..] else path;
+        if (bm.matchPathAs(template, relative_path, flags)) {
             try collectPush(collector, out, base_index + i, path);
         }
     }
@@ -966,6 +1225,7 @@ pub fn matchPathsCompiledImpl(
         std.debug.assert(compiled.flags.brace == flags.brace);
         std.debug.assert(compiled.flags.doublestar_recursive == flags.doublestar_recursive);
         std.debug.assert(compiled.flags.extglob == flags.extglob);
+        std.debug.assert(compiled.flags.match_basename == flags.match_basename);
         if (comptime !at) std.debug.assert(path_offset == 0);
     }
 
@@ -991,6 +1251,41 @@ pub fn matchPathsCompiledImpl(
 
         .multi_suffix => |*ms| try runMultiSuffix(collector, at, ms, paths, path_offset, out, base_index),
         .recursive_multi_suffix => |*ms| try runMultiSuffix(collector, at, ms, paths, path_offset, out, base_index),
+
+        // Basename arms work on the relative slice so a path equal to the
+        // base (empty relative part) can never match through the base dir's
+        // own name. No separator normalisation is needed: only the last
+        // component is inspected and `endsWithComponent`/
+        // `getBasenameNormalized` already accept both separators.
+        .basename_literal => |name| {
+            for (paths, 0..) |path, i| {
+                if (comptime at) {
+                    if (path.len < path_offset) continue;
+                }
+                const relative_path = if (comptime at) path[path_offset..] else path;
+                if (endsWithComponent(relative_path, name)) {
+                    try collectPush(collector, out, base_index + i, path);
+                }
+            }
+        },
+
+        // Dispatch on the template once; each prong is its own loop with a
+        // straight-line body (see `BasenameMatcher.matchPathAs`).
+        .basename_general => |*bm| switch (bm.template) {
+            inline else => |t| try runBasenameGeneral(t, collector, at, bm, paths, path_offset, flags, out, base_index),
+        },
+
+        .basename_brace => |*bb| {
+            for (paths, 0..) |path, i| {
+                if (comptime at) {
+                    if (path.len < path_offset) continue;
+                }
+                const relative_path = if (comptime at) path[path_offset..] else path;
+                if (bb.matchPath(relative_path, flags)) {
+                    try collectPush(collector, out, base_index + i, path);
+                }
+            }
+        },
 
         .brace_general => |*bg| {
             const inner_flags = flags.without(.{ .brace = true, .nocheck = true });

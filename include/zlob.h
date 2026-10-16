@@ -108,6 +108,14 @@ typedef struct {
  * them). A (dev,ino) visited-set breaks cycles, so each physical dir is walked
  * once — never loops, never double-emits a file. */
 #define ZLOB_FOLLOW_SYMLINKS      (1 << 27)
+/* A pattern with no path separator matches entry *names* at any depth, the
+ * way `find -name`, gitignore, ripgrep `-g` and minimatch's `matchBase`
+ * treat them: "foo*" behaves like "foo*" preceded by a recursive double-star
+ * component, "README.md" finds every README.md in the tree, and `*` cannot
+ * cross a `/`. Patterns containing a separator (including a leading "./" or
+ * "/") are unchanged and stay anchored. Not part of ZLOB_RECOMMENDED: without
+ * it "*.c" globs only the current directory, as in every shell. */
+#define ZLOB_MATCH_BASENAME       (1 << 28)
 
 /* Recommended modern defaults for globbing:
  * - BRACE: Brace expansion {a,b,c}
@@ -230,7 +238,7 @@ void zlob_indices_free(zlob_indices_t *out);
  * @param pattern  Null-terminated glob pattern string. Copied internally —
  *                 the caller may free `pattern` immediately after this call.
  * @param flags    ZLOB_* flags. Structural bits (BRACE/DOUBLESTAR_RECURSIVE/
- *                 EXTGLOB) are baked in.
+ *                 EXTGLOB/MATCH_BASENAME) are baked in.
  *
  * @return         Pointer to a freshly-allocated zlob_pattern_t, or NULL on
  *                 out-of-memory.
@@ -260,8 +268,8 @@ void zlob_pattern_free(zlob_pattern_t *p);
  * @param path       Path to test (does NOT need to be null-terminated).
  * @param path_len   Length of `path` in bytes.
  * @param flags      ZLOB_* flags. Must agree with compile-time flags on
- *                   the structural bits (BRACE/DOUBLESTAR_RECURSIVE/EXTGLOB);
- *                   debug builds assert this.
+ *                   the structural bits (BRACE/DOUBLESTAR_RECURSIVE/EXTGLOB/
+ *                   MATCH_BASENAME); debug builds assert this.
  *
  * @return           1 if the path matches, 0 otherwise.
  */

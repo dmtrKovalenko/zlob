@@ -647,8 +647,7 @@ fn globWithWildcardDirsOptimized(allocator: std.mem.Allocator, pattern: []const 
 
     if (result_paths.len() == 0) {
         if (flags.nocheck) {
-            ResultsList.emitSingle(allocator, pzlob, dooffsSlots(flags, pzlob), pattern, false) catch return error.OutOfMemory;
-            return;
+            return returnPatternAsResult(allocator, pattern, flags, pzlob) catch return error.OutOfMemory;
         }
         return null;
     }
@@ -805,7 +804,20 @@ fn expandWildcardComponents(
     }
 }
 
-fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
+/// Glob one (brace-free or single-walk braced) pattern. ZLOB_NOCHECK is
+/// resolved here, once, against the pattern exactly as the caller wrote it:
+/// the inner matchers only ever see their own slice of it (a filename
+/// pattern after the directory split, say), so letting them synthesize the
+/// fallback returned `none*` for `dir/none*`. glibc returns the full pattern.
+fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
+    const result = try globSingleInner(allocator, pattern, brace_parsed, flags.without(.{ .nocheck = true }), errfunc, pzlob, gitignore_filter, io, base_dir, fs_provider);
+    if (result == null and flags.nocheck) {
+        return returnPatternAsResult(allocator, pattern, flags, pzlob);
+    }
+    return result;
+}
+
+fn globSingleInner(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?*const brace_optimizer.BracedPattern, flags_in: ZlobFlags, errfunc: zlob_errfunc_t, pzlob: *zlob_t, gitignore_filter: ?*GitIgnore, io: Io, base_dir: ?std.Io.Dir, fs_provider: walker.AltFs) !?void {
     var effective_pattern = pattern;
     var flags = flags_in;
 
@@ -994,9 +1006,14 @@ fn globSingle(allocator: std.mem.Allocator, pattern: []const u8, brace_parsed: ?
     return globInSingleDirWithFnmatch(allocator, filename_pattern, dirname, flags, errfunc, pzlob, info.directories_only, gitignore_filter, brace_parsed, io, base_dir, fs_provider);
 }
 
+/// ZLOB_NOCHECK / ZLOB_NOMAGIC fallback: the pattern itself becomes the sole
+/// new result. Goes through `finalizeResults` so ZLOB_APPEND merges it into
+/// the caller's existing set instead of replacing (and leaking) it.
 fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, flags: ZlobFlags, pzlob: *zlob_t) !?void {
-    try ResultsList.emitSingle(allocator, pzlob, dooffsSlots(flags, pzlob), pattern, false);
-    return;
+    var single = ResultsList.init(allocator);
+    defer single.deinit();
+    try single.appendPath(pattern);
+    return finalizeResults(allocator, &single, flags, pzlob);
 }
 
 const expandTilde = utils.expandTilde;
@@ -1081,11 +1098,32 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
     }
     const gitignore_ptr: ?*GitIgnore = if (gitignore_instance) |*gi| gi else null;
 
+    // ZLOB_MATCH_BASENAME: a separator-less pattern matches entry names at
+    // any depth, so it is globbed as `**/<pattern>` with recursion forced on.
+    // The rewrite happens before brace analysis so every downstream path
+    // sees an ordinary recursive pattern. NOCHECK/NOMAGIC fallbacks must
+    // still report the caller's text, so NOCHECK is cleared for the walk and
+    // both are resolved here against `user_pattern`.
+    const user_pattern = pattern_slice;
+    var walk_flags = gf;
+    var basename_pattern: ?[]u8 = null;
+    defer if (basename_pattern) |bp| allocator.free(bp);
+
+    if (compiled_pattern.basenameModeFor(pattern_slice, gf)) {
+        const bp = try allocator.alloc(u8, pattern_slice.len + 3);
+        @memcpy(bp[0..3], "**/");
+        @memcpy(bp[3..], pattern_slice);
+        basename_pattern = bp;
+        pattern_slice = bp;
+        walk_flags.doublestar_recursive = true;
+        walk_flags.nocheck = false;
+    }
+
     // Perform the actual globbing
     const result = blk: {
-        if (gf.brace and brace_optimizer.containsBraces(pattern_slice)) {
+        if (walk_flags.brace and brace_optimizer.containsBraces(pattern_slice)) {
             var opt = brace_optimizer.analyzeBracedPattern(allocator, pattern_slice) catch {
-                break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
+                break :blk try globBraceExpand(allocator, pattern_slice, walk_flags, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
             };
             defer opt.deinit();
 
@@ -1095,7 +1133,7 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
                         allocator,
                         pattern_slice,
                         brace_parsed,
-                        gf,
+                        walk_flags,
                         errfunc,
                         pzlob,
                         gitignore_ptr,
@@ -1105,26 +1143,32 @@ fn globInternalSlice(allocator: std.mem.Allocator, pattern: []const u8, flags: c
                     );
                 },
                 .fallback => {
-                    break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
+                    break :blk try globBraceExpand(allocator, pattern_slice, walk_flags, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
                 },
                 .no_braces => {
-                    break :blk try globBraceExpand(allocator, pattern_slice, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
+                    break :blk try globBraceExpand(allocator, pattern_slice, walk_flags, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
                 },
             }
         }
 
-        break :blk try globSingle(allocator, pattern_slice, null, gf, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
+        break :blk try globSingle(allocator, pattern_slice, null, walk_flags, errfunc, pzlob, gitignore_ptr, io, base_dir, fs_provider);
     };
 
     if (has_magic) {
         pzlob.zlo_flags |= ZLOB_MAGCHAR;
     }
 
+    // NOCHECK was deferred for the basename rewrite above: report the
+    // caller's pattern, not the `**/`-prefixed one.
+    if (result == null and gf.nocheck and basename_pattern != null) {
+        return returnPatternAsResult(allocator, user_pattern, gf, pzlob);
+    }
+
     // BSD GLOB_NOMAGIC: if no matches and pattern has no magic characters,
     // return the pattern itself as the sole result (like NOCHECK but only
     // when there are no wildcards). See FreeBSD glob.c err_nomatch().
     if (result == null and gf.nomagic and !has_magic) {
-        return returnPatternAsResult(allocator, pattern_slice, gf, pzlob);
+        return returnPatternAsResult(allocator, user_pattern, gf, pzlob);
     }
 
     return result;
@@ -1157,7 +1201,9 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
         temp_pzlob.zlo_pathv = null;
         temp_pzlob.zlo_offs = 0;
 
-        _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true }), errfunc, &temp_pzlob, gitignore_filter, io, base_dir, fs_provider);
+        // NOCHECK applies to the whole braced pattern (below), not to each
+        // alternative: an alternative that matches nothing adds nothing.
+        _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true, .nocheck = true }), errfunc, &temp_pzlob, gitignore_filter, io, base_dir, fs_provider);
 
         // Copy each path's bytes into the shared buffer, then release the
         // sub-glob's result set.
@@ -1172,8 +1218,7 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
 
     if (all_results.len() == 0) {
         if (flags.nocheck) {
-            try ResultsList.emitSingle(allocator, pzlob, dooffsSlots(flags, pzlob), pattern, false);
-            return;
+            return returnPatternAsResult(allocator, pattern, flags, pzlob);
         }
         return null;
     }
@@ -2122,8 +2167,7 @@ fn globInSingleDirWithFnmatch(allocator: std.mem.Allocator, pattern: []const u8,
 
     if (names.len() == 0) {
         if (flags.nocheck) {
-            ResultsList.emitSingle(allocator, pzlob, dooffsSlots(flags, pzlob), pattern, false) catch return error.OutOfMemory;
-            return;
+            return returnPatternAsResult(allocator, pattern, flags, pzlob) catch return error.OutOfMemory;
         }
         return null;
     }

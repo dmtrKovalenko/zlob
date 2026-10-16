@@ -18,6 +18,7 @@ const Options = struct {
     no_gitignore: bool = false,
     hidden: bool = false,
     dirs_only: bool = false,
+    basename: bool = false,
     count_only: bool = false,
     show_help: bool = false,
     show_version: bool = false,
@@ -61,6 +62,8 @@ fn printHelp(w: *Io.Writer, program_name: []const u8) void {
         \\    -H, --hidden         Include hidden files (match files starting with '.')
         \\    -c, --count          Print only the count of matched files
         \\    -d, --dirs-only      Only match directories
+        \\    -b, --basename       A pattern without '/' matches file names at any depth
+        \\                         ('foo*' acts like '**/foo*', as in find -name / rg -g)
         \\    -m, --mark           Append '/' to directory names
         \\    -E, --no-escape      Treat backslash as literal character
         \\    -s, --sorted         Sort results alphabetically (default: unsorted)
@@ -124,6 +127,8 @@ fn parseArgs(args_iter: *std.process.Args.Iterator, stderr: *Io.Writer) !Options
                 opts.count_only = true;
             } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dirs-only")) {
                 opts.dirs_only = true;
+            } else if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--basename")) {
+                opts.basename = true;
             } else {
                 stderr.print("error: unknown option '{s}'\n", .{arg}) catch {};
                 stderr.print("For more information, try '--help'\n", .{}) catch {};
@@ -187,12 +192,19 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
+    const sep_chars = if (builtin.os.tag == .windows) "/\\" else "/";
+
     var full_pattern: []const u8 = undefined;
     if (opts.path) |path| {
         // Combine path and pattern: trim trailing separators (/ on all platforms, \ on Windows)
-        const sep_chars = if (builtin.os.tag == .windows) "/\\" else "/";
         const trimmed_path = std.mem.trimEnd(u8, path, sep_chars);
-        full_pattern = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ trimmed_path, pattern });
+        // Joining adds a separator, which would turn off ZLOB_MATCH_BASENAME
+        // for the pattern; spell the equivalent recursive form out instead.
+        const needs_basename_join = opts.basename and std.mem.indexOfAny(u8, pattern, sep_chars) == null;
+        full_pattern = if (needs_basename_join)
+            try std.fmt.allocPrint(allocator, "{s}/**/{s}", .{ trimmed_path, pattern })
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ trimmed_path, pattern });
     } else {
         full_pattern = pattern;
     }
@@ -206,6 +218,7 @@ pub fn main(init: std.process.Init) !void {
     flags.noescape = opts.no_escape;
     flags.period = opts.hidden;
     flags.onlydir = opts.dirs_only;
+    flags.match_basename = opts.basename;
     flags.nomagic = false; // always enable magic, since we require a pattern argument
     _ = &flags; // suppress unused warning if match accepts anytype
 

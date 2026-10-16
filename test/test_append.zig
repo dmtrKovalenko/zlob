@@ -297,3 +297,47 @@ test "ZLOB_APPEND - combined with ZLOB_NOSORT" {
 
     c_lib.zlobfree(&pzlob);
 }
+
+test "ZLOB_APPEND - NOCHECK fallback keeps the earlier results" {
+    const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    try std.Io.Dir.cwd().createDirPath(io, "test_append_nocheck/sub");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_append_nocheck") catch {};
+    var test_dir = try std.Io.Dir.cwd().openDir(io, "test_append_nocheck", .{});
+    defer test_dir.close(io);
+    try test_dir.writeFile(io, .{ .sub_path = "a.txt", .data = "" });
+    try test_dir.writeFile(io, .{ .sub_path = "sub/b.txt", .data = "" });
+
+    var pzlob: c_lib.zlob_t = undefined;
+    defer c_lib.zlobfree(&pzlob);
+
+    const first = try allocator.dupeZ(u8, "test_append_nocheck/*.txt");
+    defer allocator.free(first);
+    try testing.expectEqual(@as(c_int, 0), c_lib.zlob(first.ptr, 0, null, &pzlob));
+    try testing.expectEqual(@as(usize, 1), pzlob.zlo_pathc);
+
+    // Every NOCHECK fallback (plain, wildcard dir, basename rewrite) must
+    // append the pattern as written rather than replace the set.
+    const cases = [_]struct { pattern: [:0]const u8, flags: c_int }{
+        .{ .pattern = "test_append_nocheck/none*", .flags = zlob_flags.ZLOB_APPEND | zlob_flags.ZLOB_NOCHECK },
+        .{ .pattern = "test_append_nocheck/*/none*", .flags = zlob_flags.ZLOB_APPEND | zlob_flags.ZLOB_NOCHECK },
+        .{ .pattern = "nothing-here*", .flags = zlob_flags.ZLOB_APPEND | zlob_flags.ZLOB_NOCHECK | zlob_flags.ZLOB_MATCH_BASENAME },
+    };
+    var expected: usize = 1;
+    for (cases) |case| {
+        try testing.expectEqual(@as(c_int, 0), c_lib.zlob(case.pattern.ptr, case.flags, null, &pzlob));
+        expected += 1;
+        try testing.expectEqual(expected, pzlob.zlo_pathc);
+        try testing.expectEqualStrings("test_append_nocheck/a.txt", std.mem.sliceTo(pzlob.zlo_pathv[0], 0));
+        try testing.expectEqualStrings(case.pattern, std.mem.sliceTo(pzlob.zlo_pathv[expected - 1], 0));
+        try testing.expectEqual(case.pattern.len, pzlob.zlo_pathlen[expected - 1]);
+    }
+
+    // A real match after the fallbacks still appends normally.
+    const last = try allocator.dupeZ(u8, "b.txt");
+    defer allocator.free(last);
+    try testing.expectEqual(@as(c_int, 0), c_lib.zlob(last.ptr, zlob_flags.ZLOB_APPEND | zlob_flags.ZLOB_MATCH_BASENAME, null, &pzlob));
+    try testing.expectEqual(expected + 1, pzlob.zlo_pathc);
+    try testing.expectEqualStrings("test_append_nocheck/sub/b.txt", std.mem.sliceTo(pzlob.zlo_pathv[expected], 0));
+}

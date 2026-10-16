@@ -55,7 +55,10 @@ pub inline fn fnmatchWithContext(ctx: *const PatternContext, string: []const u8,
         return result;
     }
 
-    if (ctx.pattern.len == string.len and !ctx.has_wildcards) {
+    // A wildcard-free pattern only gets here when it has a backslash (the
+    // `.literal` template took the rest), so a raw compare is right only
+    // when backslash is not an escape.
+    if (flags.noescape and ctx.pattern.len == string.len and !ctx.has_wildcards) {
         return simdEqual(ctx.pattern, string);
     }
 

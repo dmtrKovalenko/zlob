@@ -169,7 +169,57 @@ pub fn main() !void {
     try benchmarkWithBrace(allocator, "Mixed *.{{c,rs,zig}} (2,3,4 bytes) - medium", "*.{c,rs,zig}", medium_paths);
     try benchmarkWithBrace(allocator, "Mixed *.{{c,rs,zig}} (2,3,4 bytes) - large", "*.{c,rs,zig}", large_paths);
 
+    // 10. ZLOB_MATCH_BASENAME vs the explicit `**/` spelling it replaces
+    std.debug.print("\n--- Basename mode (ZLOB_MATCH_BASENAME) vs explicit **/ ---\n", .{});
+    try benchmarkWithFlags(allocator, "**/helper.zig (DP) - large", "**/helper.zig", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "helper.zig (basename literal) - large", "helper.zig", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
+    try benchmarkWithFlags(allocator, "**/help* (DP) - large", "**/help*", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "help* (basename prefix) - large", "help*", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
+    try benchmarkWithFlags(allocator, "**/help*.zig (DP) - large", "**/help*.zig", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "help*.zig (basename prefix+ext) - large", "help*.zig", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
+    try benchmarkWithFlags(allocator, "**/test[0-9].zig (DP) - large", "**/test[0-9].zig", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "test[0-9].zig (basename bracket) - large", "test[0-9].zig", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
+    try benchmarkWithFlags(allocator, "**/{main,helper}.zig (DP brace) - large", "**/{main,helper}.zig", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "{main,helper}.zig (basename brace) - large", "{main,helper}.zig", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
+    try benchmarkWithFlags(allocator, "*.zig (suffix, flag off) - large", "*.zig", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "*.zig (suffix, flag on) - large", "*.zig", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
+
     std.debug.print("\n", .{});
+}
+
+fn benchmarkWithFlags(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    pattern: []const u8,
+    paths: []const []const u8,
+    flags: zlob.ZlobFlags,
+) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    for (0..WARMUP_ITERATIONS) |_| {
+        var result = try zlob.matchPaths(allocator, pattern, paths, flags);
+        result.deinit();
+    }
+
+    const start = std.Io.Timestamp.now(io, .awake);
+    for (0..ITERATIONS) |_| {
+        var result = try zlob.matchPaths(allocator, pattern, paths, flags);
+        result.deinit();
+    }
+    const end = std.Io.Timestamp.now(io, .awake);
+
+    const total_ns: u64 = @intCast(start.durationTo(end).nanoseconds);
+    const avg_ns = total_ns / ITERATIONS;
+
+    std.debug.print("{s:50} | {d:8} ns/op | {d:6} matches\n", .{
+        name,
+        avg_ns,
+        blk: {
+            var result = try zlob.matchPaths(allocator, pattern, paths, flags);
+            defer result.deinit();
+            break :blk result.len();
+        },
+    });
 }
 
 // Generate realistic file paths for testing
