@@ -164,6 +164,21 @@ test "basename: escapes are honoured on the component" {
     try expectMatches("x\\*y", BASENAME | zlob_flags.ZLOB_NOESCAPE, &paths, &.{});
 }
 
+test "basename: escapes in brace alternatives follow fnmatch" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    // `\a` is an escaped `a`. A wildcard-free alternative of the same length
+    // as the name, and a `*suffix` alternative, used to compare the raw text.
+    const paths = [_][]const u8{ "d/\\a.so", "d/\\a.y", "d/a.so", "d/a.y", "d/b.y", "d/xa.y" };
+    try expectMatches("{\\a.so,x}", BASENAME | BRACE, &paths, &.{"d/a.so"});
+    try expectMatches("{\\a.so,x}", BASENAME | BRACE | zlob_flags.ZLOB_NOESCAPE, &paths, &.{"d/\\a.so"});
+    try expectMatches("{*\\a.y,x}", BASENAME | BRACE, &paths, &.{ "d/\\a.y", "d/a.y", "d/xa.y" });
+    try expectMatches("{*\\a.y,x}", BASENAME | BRACE | zlob_flags.ZLOB_NOESCAPE, &paths, &.{"d/\\a.y"});
+
+    const names = [_][]const u8{ "\\a.so", "\\a.y", "a.so", "a.y", "b.y", "xa.y" };
+    try expectMatches("{\\a.so,x}", BRACE, &names, &.{"a.so"});
+    try expectMatches("{*\\a.y,x}", BRACE, &names, &.{ "\\a.y", "a.y", "xa.y" });
+}
+
 test "basename: at-mode strips the base and never matches through the base name" {
     const paths = [_][]const u8{
         "/home/u/proj/README.md",

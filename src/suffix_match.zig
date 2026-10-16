@@ -11,6 +11,8 @@ pub fn check_simple_star_sufix(pattern: []const u8) struct { ?SingleSuffixMatche
 
     const suffix = pattern[1..];
     if (glob.hasWildcardsBasic(suffix)) return .{ null, null };
+    // A raw byte compare would treat `\` as a literal; leave escapes to fnmatch.
+    if (std.mem.indexOfScalar(u8, suffix, '\\') != null) return .{ null, null };
 
     const suffix_matcher = SuffixMatch{ .suffix = suffix, .suffix_len = @intCast(suffix.len) };
 
