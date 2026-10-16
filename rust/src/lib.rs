@@ -12,8 +12,7 @@
 //! ```no_run
 //! use zlob::{zlob, ZlobFlags};
 //!
-//! // RECOMMENDED enables: brace expansion, recursive **, tilde expansion, no sorting,
-//! // and basename matching (`foo*` finds foo.rs at any depth)
+//! // RECOMMENDED enables: brace expansion, recursive **, tilde expansion, no sorting
 //! if let Some(result) = zlob("**/*.rs", ZlobFlags::RECOMMENDED)? {
 //!     for path in &result {
 //!         println!("{}", path);

@@ -172,17 +172,17 @@ pub fn main() !void {
     // 10. ZLOB_MATCH_BASENAME vs the explicit `**/` spelling it replaces
     std.debug.print("\n--- Basename mode (ZLOB_MATCH_BASENAME) vs explicit **/ ---\n", .{});
     try benchmarkWithFlags(allocator, "**/helper.zig (DP) - large", "**/helper.zig", large_paths, zlob.ZlobFlags.recommended());
-    try benchmarkWithFlags(allocator, "helper.zig (basename literal) - large", "helper.zig", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "helper.zig (basename literal) - large", "helper.zig", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
     try benchmarkWithFlags(allocator, "**/help* (DP) - large", "**/help*", large_paths, zlob.ZlobFlags.recommended());
-    try benchmarkWithFlags(allocator, "help* (basename prefix) - large", "help*", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "help* (basename prefix) - large", "help*", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
     try benchmarkWithFlags(allocator, "**/help*.zig (DP) - large", "**/help*.zig", large_paths, zlob.ZlobFlags.recommended());
-    try benchmarkWithFlags(allocator, "help*.zig (basename prefix+ext) - large", "help*.zig", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "help*.zig (basename prefix+ext) - large", "help*.zig", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
     try benchmarkWithFlags(allocator, "**/test[0-9].zig (DP) - large", "**/test[0-9].zig", large_paths, zlob.ZlobFlags.recommended());
-    try benchmarkWithFlags(allocator, "test[0-9].zig (basename bracket) - large", "test[0-9].zig", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "test[0-9].zig (basename bracket) - large", "test[0-9].zig", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
     try benchmarkWithFlags(allocator, "**/{main,helper}.zig (DP brace) - large", "**/{main,helper}.zig", large_paths, zlob.ZlobFlags.recommended());
-    try benchmarkWithFlags(allocator, "{main,helper}.zig (basename brace) - large", "{main,helper}.zig", large_paths, zlob.ZlobFlags.recommended());
-    try benchmarkWithFlags(allocator, "*.zig (suffix, flag off) - large", "*.zig", large_paths, zlob.ZlobFlags.recommended().without(.{ .match_basename = true }));
-    try benchmarkWithFlags(allocator, "*.zig (suffix, flag on) - large", "*.zig", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "{main,helper}.zig (basename brace) - large", "{main,helper}.zig", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
+    try benchmarkWithFlags(allocator, "*.zig (suffix, flag off) - large", "*.zig", large_paths, zlob.ZlobFlags.recommended());
+    try benchmarkWithFlags(allocator, "*.zig (suffix, flag on) - large", "*.zig", large_paths, zlob.ZlobFlags.recommended().with(.{ .match_basename = true }));
 
     std.debug.print("\n", .{});
 }

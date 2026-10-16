@@ -73,9 +73,7 @@ The easiest way is to look at `include/zlob.h` it exposes the same API as POSIX 
 #include "zlob.h"
 
 glob_t globbuf;
-// ZLOB_RECOMMENDED is the set of settings we recommend, see below. It includes
-// basename matching, so "*.c" finds every .c file in the tree; pass "./*.c" or
-// flags 0 for the current directory only.
+// recommended flag is default set of settings we recommended, see below
 int ret = zlob("*.c", ZLOB_RECOMMENDED, NULL, &globbuf);
 
 if (ret == 0) {
@@ -162,7 +160,6 @@ Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behave li
 - `ZLOB_BRACE` - enable support for `{a,b}` patterns
 - `ZLOB_TILDE` - expand `~` to the home directory
 - `ZLOB_TILDE_CHECK` - checks the user exists when expanding `~user` and returns error if it doesn't
-- `ZLOB_MATCH_BASENAME` - a pattern with no `/` matches file names at any depth, as `find -name`, gitignore, `rg -g` and minimatch's `matchBase` do (see [Basename matching](#basename-matching))
 
 ### Not included in ZLOB_RECOMMENDED
 
@@ -171,6 +168,7 @@ Behavior is controlled using zlob flags. `ZLOB_RECOMMENDED` makes zlob behave li
 - `ZLOB_EXTGLOB` - enable support for bash extglob patterns like `@(pattern-list)`, `!(pattern-list)`, `?(pattern-list)`, `*(pattern-list)` and `+(pattern-list)`
 
 - `ZLOB_FOLLOW_SYMLINKS` - follow symlinked directories when recursing with `**` (see [Symlinks and `**`](#symlinks-and-) below)
+- `ZLOB_MATCH_BASENAME` - a pattern with no `/` matches file *names* at any depth, the way `find -name`, gitignore, `rg -g` and minimatch's `matchBase` treat them (see [Basename matching](#basename-matching) below)
 - `ZLOB_NOCHECK` - if no matches found return the pattern itself as the only result
 - `ZLOB_NOMAGIC` - if the pattern contains no special characters return the pattern itself as the only result
 - `ZLOB_NOESCAPE` - disable backslash escaping
@@ -265,7 +263,7 @@ Entry counts agree with `walkdir` and `ignore` exactly on the same trees.
 
 ## Basename matching
 
-With flags `0` a pattern is matched against the whole base-relative path: `foo*` only sees entries in the top directory and `main.c` is one exact path. `ZLOB_MATCH_BASENAME` (part of `ZLOB_RECOMMENDED`) matches a pattern that contains no `/` against the last path component at any depth instead. `find -name`, gitignore rules, `rg -g`, `fd -g` and minimatch's `matchBase` use the same rule:
+By default a pattern is matched against the whole (base-relative) path, so `foo*` only sees entries in the top directory and `main.c` is one exact path. With `ZLOB_MATCH_BASENAME` a pattern that contains no `/` is instead matched against the last path component at any depth, which is what `find -name`, gitignore rules, `rg -g`, `fd -g` and minimatch's `matchBase` all do:
 
 | Pattern (with `ZLOB_MATCH_BASENAME`) | Matches                                   | Does not match        |
 | ------------------------------------ | ----------------------------------------- | --------------------- |
@@ -275,10 +273,10 @@ With flags `0` a pattern is matched against the whole base-relative path: `foo*`
 | `*foo*`                              | `a/foo.txt`                               | `a/foo/b.txt`         |
 | `src/*.c`, `./main.c`, `/etc/*`      | unchanged: anything with a `/` stays anchored to the base |
 
-- `*`, `?` and `[...]` never cross a `/` under this flag because they only see one component. Without the flag `*` crosses `/` in `zlob_match_paths`.
-- The filesystem API (`zlob()`, `zlob_at()`) globs such patterns as `**/pattern`: the whole tree below the base is walked and the hidden-file rules of `**` apply (`ZLOB_PERIOD` to enter dot directories). `ZLOB_NOCHECK` returns the pattern as you wrote it.
-- The in-memory APIs (`zlob_match_paths*`, `zlob_pattern_*`) never look at parent components, so a hidden ancestor does not block a match. A literal is checked from the end of the path without scanning it, `prefix*`, `prefix*.ext` and `[set]` go through the single-component template matchers, and `*.ext` was already a basename test.
-- To list only the current directory with `ZLOB_RECOMMENDED`, write `./*.c`, or clear the bit.
+- `*`, `?` and `[...]` never cross a `/` under this flag because they only ever see one component; without the flag `*` crosses `/` in `zlob_match_paths`.
+- The filesystem API (`zlob()`, `zlob_at()`) globs such patterns as `**/pattern`, so the whole tree below the base is walked and the usual hidden-file rules of `**` apply (`ZLOB_PERIOD` to enter dot directories). `ZLOB_NOCHECK` still returns the pattern as you wrote it.
+- The in-memory APIs (`zlob_match_paths*`, `zlob_pattern_*`) do not look at parent components at all, so a hidden ancestor does not block a match and the mode is as cheap as a suffix compare: a literal is checked from the end of the path without scanning it, `prefix*` / `prefix*.ext` / `[set]` go through the single-component template matchers, and `*.ext` is already a basename test.
+- Not included in `ZLOB_RECOMMENDED`: with it `zlob("*.c", ...)` would recurse into every subdirectory instead of listing the current one like a shell.
 
 ## Symlinks and `**`
 

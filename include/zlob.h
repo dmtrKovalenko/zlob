@@ -113,8 +113,8 @@ typedef struct {
  * treat them: "foo*" behaves like "foo*" preceded by a recursive double-star
  * component, "README.md" finds every README.md in the tree, and `*` cannot
  * cross a `/`. Patterns containing a separator (including a leading "./" or
- * "/") are unchanged and stay anchored. Part of ZLOB_RECOMMENDED; with
- * flags=0 (glibc-compatible mode) "*.c" globs only the current directory. */
+ * "/") are unchanged and stay anchored. Not part of ZLOB_RECOMMENDED: without
+ * it "*.c" globs only the current directory, as in every shell. */
 #define ZLOB_MATCH_BASENAME       (1 << 28)
 
 /* Recommended modern defaults for globbing:
@@ -123,11 +123,9 @@ typedef struct {
  * - NOSORT: Skip sorting for performance
  * - TILDE: Home directory expansion ~
  * - TILDE_CHECK: Error if ~user not found
- * - MATCH_BASENAME: "foo*" matches names at any depth, like find -name / rg -g
  */
 #define ZLOB_RECOMMENDED                                                                           \
-  (ZLOB_BRACE | ZLOB_DOUBLESTAR_RECURSIVE | ZLOB_NOSORT | ZLOB_TILDE | ZLOB_TILDE_CHECK |          \
-   ZLOB_MATCH_BASENAME)
+  (ZLOB_BRACE | ZLOB_DOUBLESTAR_RECURSIVE | ZLOB_NOSORT | ZLOB_TILDE | ZLOB_TILDE_CHECK)
 
 /* Error codes returned by zlob() */
 #define ZLOB_NOSPACE           1 /* Out of memory */
