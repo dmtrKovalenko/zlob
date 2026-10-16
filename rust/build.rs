@@ -116,8 +116,10 @@ fn main() {
         }));
 
     // Give clang the target triple so integer/pointer widths match the target.
+    // The triple must be one libclang can parse — Rust micro-arch suffixes
+    // like the `gc` in `riscv64gc-...` are not valid clang arch names.
     if target != host {
-        builder = builder.clang_arg(format!("--target={}", target));
+        builder = builder.clang_arg(format!("--target={}", rust_target_to_clang(&target)));
     }
 
     let bindings = builder.generate().unwrap_or_else(|e| {
@@ -255,6 +257,31 @@ fn main() {
     println!("cargo:rustc-link-lib=static=zlob");
 }
 
+/// Map a Rust target triple to one libclang accepts.
+///
+/// Rust bakes micro-architecture extensions into the arch component (the `gc`
+/// in `riscv64gc`, `imac` in `riscv32imac`, …) that clang's target parser does
+/// not recognise, so passing the Rust triple straight to `--target=` makes
+/// libclang fail with "unknown target triple". bindgen only needs the base ISA
+/// to fix integer/pointer widths and the builtin `__riscv`/`__riscv_xlen`
+/// macros, so collapse the arch component to its clang-known base and leave the
+/// vendor/os/env components untouched.
+fn rust_target_to_clang(target: &str) -> String {
+    match target.split_once('-') {
+        Some((arch, rest)) => {
+            let clang_arch = if arch.starts_with("riscv32") {
+                "riscv32"
+            } else if arch.starts_with("riscv64") {
+                "riscv64"
+            } else {
+                arch
+            };
+            format!("{}-{}", clang_arch, rest)
+        }
+        None => target.to_string(),
+    }
+}
+
 fn rust_target_to_zig(target: &str) -> &'static str {
     match target {
         // Linux - GNU
@@ -273,6 +300,7 @@ fn rust_target_to_zig(target: &str) -> &'static str {
         "i686-unknown-linux-musl" => "x86-linux-musl",
         "armv7-unknown-linux-musleabihf" => "arm-linux-musleabihf",
         "armv7-unknown-linux-musleabi" => "arm-linux-musleabi",
+        "riscv64gc-unknown-linux-musl" => "riscv64-linux-musl",
         // macOS
         "x86_64-apple-darwin" => "x86_64-macos",
         "aarch64-apple-darwin" => "aarch64-macos",
