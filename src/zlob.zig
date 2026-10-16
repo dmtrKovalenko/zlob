@@ -1201,7 +1201,9 @@ fn globBraceExpand(allocator: std.mem.Allocator, pattern: []const u8, flags: Zlo
         temp_pzlob.zlo_pathv = null;
         temp_pzlob.zlo_offs = 0;
 
-        _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true }), errfunc, &temp_pzlob, gitignore_filter, io, base_dir, fs_provider);
+        // NOCHECK applies to the whole braced pattern (below), not to each
+        // alternative: an alternative that matches nothing adds nothing.
+        _ = try globSingle(allocator, exp_slice, null, flags.without(.{ .append = true, .nocheck = true }), errfunc, &temp_pzlob, gitignore_filter, io, base_dir, fs_provider);
 
         // Copy each path's bytes into the shared buffer, then release the
         // sub-glob's result set.
