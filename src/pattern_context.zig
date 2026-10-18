@@ -237,7 +237,7 @@ fn findClosingBracket(pattern: []const u8, bracket_start: usize) ?usize {
     var i = bracket_start + 1; // Skip '['
 
     // Skip negation marker
-    if (i < pattern.len and pattern[i] == '!') {
+    if (i < pattern.len and (pattern[i] == '!' or pattern[i] == '^')) {
         i += 1;
     }
 
@@ -368,7 +368,7 @@ fn compileBracketBitmap(pattern: []const u8, bracket_start: usize) ?BracketBitma
     var pi = bracket_start + 1; // Skip '['
 
     // Check for negation
-    if (pi < pattern.len and pattern[pi] == '!') {
+    if (pi < pattern.len and (pattern[pi] == '!' or pattern[pi] == '^')) {
         bitmap.negated = true;
         pi += 1;
     }
