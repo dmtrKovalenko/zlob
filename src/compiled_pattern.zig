@@ -356,6 +356,8 @@ pub fn matchSinglePath(
         return fnmatch_mod.fnmatch(pattern_segments.original_pattern, path, .{ .noescape = !enable_escapes });
     }
 
+    if (mem.endsWith(u8, pattern_segments.original_pattern, "/") and !mem.endsWith(u8, path, "/")) return false;
+
     var component_buffer: [MAX_PATH_COMPONENTS][]const u8 = undefined;
     const path_components = splitPathComponentsNormalized(path, &component_buffer) orelse return false;
     const pattern_is_absolute = pattern_segments.segments.len > 0 and pattern_segments.segments[0].len == 0;
