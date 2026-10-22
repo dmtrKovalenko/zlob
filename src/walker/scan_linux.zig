@@ -83,7 +83,8 @@ pub fn scanDir(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!voi
             };
 
             var meta = Metadata{};
-            if (want_stat or d_type == DT_UNKNOWN) {
+            const metadata_deferred = want_stat and !only_inode and d_type != DT_UNKNOWN;
+            if (d_type == DT_UNKNOWN or (want_stat and only_inode)) {
                 if (only_inode and d_type != DT_UNKNOWN) {
                     meta.inode = d_ino;
                     meta.valid.inode = true;
@@ -106,9 +107,23 @@ pub fn scanDir(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!voi
                 }
             }
 
-            try worker.appendScratch(sh, w, .{ .name = name, .kind = kind, .meta = meta });
+            try worker.appendScratch(sh, w, .{
+                .name = name,
+                .kind = kind,
+                .meta = meta,
+                .metadata_deferred = metadata_deferred,
+            });
         }
     }
+}
+
+pub fn readMetadata(fd: posix.fd_t, name: [*:0]const u8, want: MetaMask, mask: StatxMask) Metadata {
+    if (comptime !supported) unreachable;
+    var meta = Metadata{};
+    var stx: linux.Statx = undefined;
+    const rc = linux.statx(fd, name, linux.AT.SYMLINK_NOFOLLOW, mask, &stx);
+    if (linux.errno(rc) == .SUCCESS) fillMeta(&meta, &stx, want);
+    return meta;
 }
 
 /// Translate the caller's requested fields into a statx mask, so each entry's
