@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
 const queue_mod = @import("queue.zig");
 const scan = @import("scan.zig");
+const scan_linux = @import("scan_linux.zig");
 const win = @import("scan_windows.zig");
 const gitignore_mod = @import("../gitignore.zig");
 const compiled_pattern = @import("../compiled_pattern.zig");
@@ -185,6 +186,7 @@ pub const Scratch = struct {
     name_off: u32,
     name_len: u32,
     kind: EntryKind,
+    metadata_deferred: bool = false,
 };
 
 pub const Worker = struct {
@@ -267,6 +269,7 @@ pub inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: types.RawEn
         .name_off = off,
         .name_len = @intCast(name.len),
         .kind = raw.kind,
+        .metadata_deferred = raw.metadata_deferred,
     });
     // Metadata rides in the parallel list only when the caller asked for it;
     // processDir indexes it by entry position.
@@ -370,7 +373,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     for (w.entries.items, 0..) |se, i| {
         const name = w.names.items[se.name_off..][0..se.name_len];
         const meta: Metadata = if (want_meta) w.metas.items[i] else .{};
-        try processEntry(sh, w, handle, name, se.kind, meta, ignore, prefix_len, entry_depth, may_descend, &child_ref, &handle_consumed);
+        try processEntry(sh, w, handle, name, se.kind, meta, se.metadata_deferred, ignore, prefix_len, entry_depth, may_descend, &child_ref, &handle_consumed);
     }
 }
 
@@ -381,6 +384,7 @@ fn processEntry(
     name: []const u8,
     entry_kind: EntryKind,
     meta: Metadata,
+    metadata_deferred: bool,
     cur_ignore: ?*IgnoreNode,
     prefix_len: usize,
     entry_depth: u16,
@@ -433,6 +437,12 @@ fn processEntry(
         if (sh.pattern) |cp| report = cp.matches(relative_path, opts.pattern_flags);
     }
     if (report) {
+        var reported_meta = meta;
+        if (comptime backend == .linux_getdents) {
+            if (metadata_deferred) {
+                reported_meta = scan_linux.readMetadata(handle, @ptrCast(basename.ptr), opts.meta, sh.statx_mask);
+            }
+        }
         var entry = Entry{
             .path = full,
             .relative_offset = sh.root_prefix_len,
@@ -440,7 +450,7 @@ fn processEntry(
             .kind = entry_kind,
             .depth = entry_depth,
             .worker_id = @intCast(w.id),
-            .meta = meta,
+            .meta = reported_meta,
         };
         action = sh.sink(sh.sink_ctx, w.id, &entry);
         if (action == .stop) {

@@ -172,6 +172,8 @@ pub const RawEntry = struct {
     name: []const u8,
     kind: EntryKind,
     meta: Metadata,
+    /// Linux can fetch known-type entries' metadata after ignore filtering.
+    metadata_deferred: bool = false,
 };
 
 pub const VisitAction = enum(c_int) {
