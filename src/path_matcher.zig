@@ -124,7 +124,7 @@ fn matchSegmentsSimple(
             const tail = pattern_segments[pat_idx + 1 ..];
             var tail_has_double_star = false;
             for (tail) |seg| {
-                if (seg.len == 2 and seg[0] == '*' and seg[1] == '*') {
+                if (isDoubleStarSegment(seg)) {
                     tail_has_double_star = true;
                     break;
                 }

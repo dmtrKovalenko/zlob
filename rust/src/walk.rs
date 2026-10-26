@@ -817,6 +817,49 @@ mod tests {
         assert!(main_rs.inode().unwrap() != 0);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn metadata_for_files_and_directories_matches_filesystem() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = make_tree();
+        for requested in [
+            WalkMetadata::SIZE | WalkMetadata::MTIME | WalkMetadata::INODE,
+            WalkMetadata::INODE,
+        ] {
+            for threads in [1, 4] {
+                let results = WalkBuilder::new(dir.path())
+                    .unwrap()
+                    .options(WalkFlags::RECOMMENDED | WalkFlags::SORT)
+                    .threads(threads)
+                    .metadata(requested)
+                    .collect()
+                    .unwrap();
+                let mut actual = Vec::new();
+                let mut expected = Vec::new();
+                for entry in results.iter() {
+                    let stat = fs::symlink_metadata(entry.path()).unwrap();
+                    actual.push((entry.size(), entry.modified_ns(), entry.inode()));
+                    expected.push((
+                        requested.contains(WalkMetadata::SIZE).then_some(stat.len()),
+                        requested
+                            .contains(WalkMetadata::MTIME)
+                            .then_some(stat.mtime() * 1_000_000_000 + stat.mtime_nsec()),
+                        Some(stat.ino()),
+                    ));
+                }
+                assert_eq!(actual, expected);
+                assert_eq!(
+                    results
+                        .iter()
+                        .map(|entry| entry.relative_path_lossy().into_owned())
+                        .collect::<Vec<_>>(),
+                    vec!["Cargo.toml", "src", "src/main.rs"]
+                );
+            }
+        }
+    }
+
     #[test]
     fn parallel_run_visits_everything() {
         let dir = make_tree();

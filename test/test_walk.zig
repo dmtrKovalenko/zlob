@@ -531,10 +531,16 @@ test "walk follow_symlinks: descends links, breaks cycles, never re-walks root" 
 
     // Without follow: links are reported but never descended.
     {
-        var results = try walk.collect(testing.allocator, walk_root, .{ .threads = 1, .sort = true });
+        var results = try walk.collect(testing.allocator, walk_root, .{
+            .threads = 1,
+            .sort = true,
+            .meta = .{ .size = true },
+        });
         defer results.deinit();
         try testing.expectEqual(@as(usize, 3), results.entries.len); // a.txt, back, link
         try testing.expectEqual(walk.EntryKind.sym_link, findEntry(&results, "link").?.kind);
+        try testing.expect(findEntry(&results, "link").?.meta.valid.size);
+        try testing.expectEqual(@as(u64, "../outside".len), findEntry(&results, "link").?.meta.size);
         try testing.expect(findEntry(&results, "link/o.txt") == null);
     }
 
@@ -545,10 +551,13 @@ test "walk follow_symlinks: descends links, breaks cycles, never re-walks root" 
             .threads = 1,
             .sort = true,
             .follow_symlinks = true,
+            .meta = .{ .size = true },
         });
         defer results.deinit();
 
         try testing.expect(findEntry(&results, "link/o.txt") != null);
+        try testing.expect(findEntry(&results, "link").?.meta.valid.size);
+        try testing.expectEqual(@as(u64, "../outside".len), findEntry(&results, "link").?.meta.size);
         // outside/ was already visited via link, so the cycle link is
         // reported but not descended.
         try testing.expect(findEntry(&results, "link/self") != null);
