@@ -2,46 +2,6 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
-// Minimal self-contained headers for bindgen. They rely only on clang's
-// builtin target macros (__SIZE_TYPE__, __INTxx_TYPE__), so the widths always
-// match the compilation target without needing any libc/sysroot.
-const STDDEF_STUB: &str = "#pragma once\ntypedef __SIZE_TYPE__ size_t;\n";
-const STDINT_STUB: &str = "#pragma once\n\
-typedef __INT8_TYPE__ int8_t;\n\
-typedef __INT16_TYPE__ int16_t;\n\
-typedef __INT32_TYPE__ int32_t;\n\
-typedef __INT64_TYPE__ int64_t;\n\
-typedef __UINT8_TYPE__ uint8_t;\n\
-typedef __UINT16_TYPE__ uint16_t;\n\
-typedef __UINT32_TYPE__ uint32_t;\n\
-typedef __UINT64_TYPE__ uint64_t;\n\
-typedef __INTPTR_TYPE__ intptr_t;\n\
-typedef __UINTPTR_TYPE__ uintptr_t;\n";
-
-#[derive(Debug)]
-struct BindgenCallbacks {
-    out_dir: PathBuf,
-}
-
-impl bindgen::callbacks::ParseCallbacks for BindgenCallbacks {
-    fn header_file(&self, filename: &str) {
-        self.include_file(filename);
-    }
-
-    fn include_file(&self, filename: &str) {
-        // becuase we have to write libclang header for docs generation, but because we write it on
-        // every build we invalidate the cargo builds on our own, so we want to avoid listing those
-        // files in rerun-if-changed intrinsic
-        if !std::path::Path::new(filename).starts_with(&self.out_dir) {
-            println!("cargo:rerun-if-changed={filename}");
-        }
-    }
-
-    fn read_env_var(&self, key: &str) {
-        println!("cargo:rerun-if-env-changed={key}");
-    }
-}
-
 fn main() {
     // docs.rs sets this env var; skip native build since Zig isn't available there
     if env::var("DOCS_RS").is_ok() {
@@ -94,45 +54,6 @@ fn main() {
     );
 
     let target = env::var("TARGET").unwrap();
-    let host = env::var("HOST").unwrap();
-
-    // zlob.h only needs size_t and the fixed-width integer types.
-    // Instead of relying on the target's libc/toolchain headers which will be missing
-    // in case of real cross compilation and docs generation
-    let stub_dir = out_dir.join("bindgen-stubs");
-    std::fs::create_dir_all(&stub_dir).expect("create bindgen stub dir");
-    std::fs::write(stub_dir.join("stddef.h"), STDDEF_STUB).expect("write stddef stub");
-    std::fs::write(stub_dir.join("stdint.h"), STDINT_STUB).expect("write stdint stub");
-
-    let mut builder = bindgen::Builder::default()
-        .header(header_path.to_str().unwrap())
-        .clang_arg("-nostdinc")
-        .clang_arg(format!("-I{}", stub_dir.display()))
-        .use_core()
-        .generate_comments(false)
-        .default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
-        .parse_callbacks(Box::new(BindgenCallbacks {
-            out_dir: out_dir.clone(),
-        }));
-
-    // Give clang the target triple so integer/pointer widths match the target.
-    // The triple must be one libclang can parse — Rust micro-arch suffixes
-    // like the `gc` in `riscv64gc-...` are not valid clang arch names.
-    if target != host {
-        builder = builder.clang_arg(format!("--target={}", rust_target_to_clang(&target)));
-    }
-
-    let bindings = builder.generate().unwrap_or_else(|e| {
-        panic!(
-            "Unable to generate bindings from {}: {:?}",
-            header_path.display(),
-            e
-        )
-    });
-
-    bindings
-        .write_to_file(out_dir.join("zlob_bindings.rs"))
-        .expect("Couldn't write bindings!");
 
     let zig = env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
     let zig_version = Command::new(&zig)
@@ -255,31 +176,6 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}/lib", out_dir.display());
     println!("cargo:rustc-link-lib=static=zlob");
-}
-
-/// Map a Rust target triple to one libclang accepts.
-///
-/// Rust bakes micro-architecture extensions into the arch component (the `gc`
-/// in `riscv64gc`, `imac` in `riscv32imac`, …) that clang's target parser does
-/// not recognise, so passing the Rust triple straight to `--target=` makes
-/// libclang fail with "unknown target triple". bindgen only needs the base ISA
-/// to fix integer/pointer widths and the builtin `__riscv`/`__riscv_xlen`
-/// macros, so collapse the arch component to its clang-known base and leave the
-/// vendor/os/env components untouched.
-fn rust_target_to_clang(target: &str) -> String {
-    match target.split_once('-') {
-        Some((arch, rest)) => {
-            let clang_arch = if arch.starts_with("riscv32") {
-                "riscv32"
-            } else if arch.starts_with("riscv64") {
-                "riscv64"
-            } else {
-                arch
-            };
-            format!("{}-{}", clang_arch, rest)
-        }
-        None => target.to_string(),
-    }
 }
 
 fn rust_target_to_zig(target: &str) -> &'static str {
