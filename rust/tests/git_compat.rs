@@ -527,6 +527,22 @@ fn curated_patterns_match_git() {
     );
 }
 
+#[test]
+fn recursive_star_runs_with_nested_directory_negation_match_git() {
+    if !git_available() {
+        eprintln!("skipping: `git` not on PATH");
+        return;
+    }
+    let fixture = make_fixture();
+    for stars in ["**", "***", "****"] {
+        let spec = [
+            (String::new(), format!("{stars}/d*/{stars}")),
+            ("a".to_owned(), format!("!{stars}/")),
+        ];
+        assert_eq!(compare(fixture.path(), &spec), Ok(()));
+    }
+}
+
 // perform randomized fuzzy testing for compatibility between our walker and git itself via ls-files
 proptest! {
     #![proptest_config(ProptestConfig {
