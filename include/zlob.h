@@ -352,10 +352,10 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
 
 /* Walk behavior flags (zlob_walk_options_t.flags). All-zero options give a
  * plain walkdir-style traversal: hidden files included, .gitignore not
- * consulted, directories reported. */
-#define ZLOB_WALK_GITIGNORE   (1u << 0) /* honor (nested) .gitignore + .ignore, plus each
-                                         * repository's $GIT_DIR/info/exclude and git's
-                                         * core.excludesFile; also skips .git */
+ * consulted, directories reported. Inside every repository the walk meets,
+ * ZLOB_WALK_GITIGNORE also honors $GIT_DIR/info/exclude and git's
+ * core.excludesFile, below the .gitignore next to .git (git precedence). */
+#define ZLOB_WALK_GITIGNORE   (1u << 0) /* honor (nested) .gitignore + .ignore; also skips .git */
 #define ZLOB_WALK_SKIP_HIDDEN (1u << 1) /* skip dotfiles and don't descend into dot-dirs */
 #define ZLOB_WALK_FOLLOW_SYMLINKS (1u << 2)
 #define ZLOB_WALK_NO_REPORT_DIRS  (1u << 3) /* yield only non-directory entries */
