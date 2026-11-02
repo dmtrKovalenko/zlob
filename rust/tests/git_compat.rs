@@ -12,6 +12,11 @@ use common::{git_available, git_ignored_paths, git_init, git_kept};
 use zlob::walk::{WalkBuilder, WalkFlags};
 use zlob::{ZlobFlags, zlob};
 
+/// The reference git runs with global and system config scrubbed (see
+/// `common::scrubbed`), so the walker must not read the developer's
+/// `core.excludesFile` either.
+const SCRUBBED: WalkFlags = WalkFlags::GITIGNORE.union(WalkFlags::NO_GIT_GLOBAL);
+
 const DIRS: &[&str] = &[
     "a",
     "a/b",
@@ -367,7 +372,7 @@ fn gitignore_case() -> impl Strategy<Value = Vec<(String, String)>> {
 fn zlob_rules_ignored(root: &Path, paths: &[String], threads: usize) -> BTreeSet<String> {
     let results = WalkBuilder::new(root)
         .unwrap()
-        .options(WalkFlags::GITIGNORE)
+        .options(SCRUBBED)
         .threads(threads)
         .collect()
         .unwrap();
@@ -391,7 +396,7 @@ const THREAD_COUNTS: &[usize] = &[1, 2, 4, 8];
 fn zlob_kept(root: &Path, threads: usize) -> BTreeSet<String> {
     WalkBuilder::new(root)
         .unwrap()
-        .options(WalkFlags::GITIGNORE)
+        .options(SCRUBBED)
         .threads(threads)
         .collect()
         .unwrap()
@@ -524,6 +529,156 @@ fn curated_patterns_match_git() {
         failures.len(),
         cases.len(),
         failures.join("")
+    );
+}
+
+/// `$GIT_DIR/info/exclude` and `core.excludesFile` are part of git's ignore
+/// stack (below the repo root `.gitignore`), so the walker reads them too --
+/// in the main checkout and in a linked worktree, whose `.git` is a pointer
+/// file and whose exclude lives behind `commondir`.
+/// https://github.com/dmtrKovalenko/fff/pull/983, /pull/878
+#[test]
+fn info_exclude_and_core_excludes_file_match_git() {
+    if !git_available() {
+        eprintln!("skipping: `git` not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("main");
+    fs::create_dir_all(root.join("excluded")).unwrap();
+    fs::create_dir_all(root.join("build")).unwrap();
+    for f in [
+        "a.log",
+        "keep.log",
+        "keep.rs",
+        "excluded/b.txt",
+        "scratch.tmp",
+        "keep.tmp",
+        "build/out.o",
+    ] {
+        fs::write(root.join(f), "x").unwrap();
+    }
+    // root .gitignore negations outrank both exclude files
+    fs::write(root.join(".gitignore"), "!keep.log\n!keep.tmp\n").unwrap();
+    git_init(&root);
+    fs::write(root.join(".git/info/exclude"), "excluded/\n*.log\n").unwrap();
+    let excludes = dir.path().join("excludes-file");
+    fs::write(&excludes, "*.tmp\nbuild/\n").unwrap();
+
+    // Real git, with only the repository config in play (the shared helpers
+    // blank core.excludesFile on the command line, which would override the
+    // repo setting under test).
+    let git = |args: &[&str], cwd: &Path| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("failed to spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed in {cwd:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let git_kept = |cwd: &Path| -> BTreeSet<String> {
+        git(&["ls-files", "--others", "--exclude-standard"], cwd)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    let walk_kept = |base: &Path| -> BTreeSet<String> {
+        WalkBuilder::new(base)
+            .unwrap()
+            .options(WalkFlags::GITIGNORE | WalkFlags::NO_REPORT_DIRS)
+            .threads(1)
+            .collect()
+            .unwrap()
+            .iter()
+            .map(|e| e.relative_path().to_string_lossy().into_owned())
+            // `ls-files --others` lists untracked files only; keep.rs gets
+            // committed below so the worktree can be created.
+            .filter(|p| p != ".git" && p != "keep.rs")
+            .collect()
+    };
+    git(
+        &["config", "core.excludesFile", excludes.to_str().unwrap()],
+        &root,
+    );
+
+    let expected = BTreeSet::from([
+        ".gitignore".to_string(),
+        "keep.log".to_string(),
+        "keep.tmp".to_string(),
+    ]);
+    let untracked = |mut set: BTreeSet<String>| {
+        set.remove("keep.rs");
+        set
+    };
+    assert_eq!(
+        untracked(git_kept(&root)),
+        expected,
+        "sanity: git's own verdict"
+    );
+    assert_eq!(walk_kept(&root), expected, "main checkout");
+
+    // Linked worktree: `git worktree add` writes `.git` as a `gitdir:` file
+    // and `<gitdir>/commondir` back to the main repository.
+    git(&["add", "keep.rs"], &root);
+    git(&["commit", "-q", "-m", "init"], &root);
+    let wt = dir.path().join("wt");
+    git(
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "wt"],
+        &root,
+    );
+    fs::create_dir_all(wt.join("excluded")).unwrap();
+    fs::create_dir_all(wt.join("build")).unwrap();
+    for f in [
+        "a.log",
+        "keep.log",
+        "excluded/b.txt",
+        "scratch.tmp",
+        "keep.tmp",
+        "build/out.o",
+        "new.rs",
+    ] {
+        fs::write(wt.join(f), "x").unwrap();
+    }
+    fs::write(wt.join(".gitignore"), "!keep.log\n!keep.tmp\n").unwrap();
+    let expected_wt = BTreeSet::from([
+        ".gitignore".to_string(),
+        "keep.log".to_string(),
+        "keep.tmp".to_string(),
+        "new.rs".to_string(),
+    ]);
+    assert_eq!(git_kept(&wt), expected_wt, "sanity: git in the worktree");
+    assert_eq!(walk_kept(&wt), expected_wt, "linked worktree");
+
+    // A relative core.excludesFile is anchored at each worktree's root (git
+    // runs from there), not at the process cwd: the shared config names a
+    // different file in each checkout.
+    git(&["config", "core.excludesFile", "local-ignore"], &root);
+    fs::write(root.join("local-ignore"), "*.tmp\nlocal-ignore\n").unwrap();
+    fs::write(wt.join("local-ignore"), "build/\nlocal-ignore\n").unwrap();
+    for (base, label) in [(&root, "main, relative"), (&wt, "worktree, relative")] {
+        let git_view = untracked(git_kept(base));
+        assert_eq!(walk_kept(base), git_view, "{label}");
+    }
+    let main_view = walk_kept(&root);
+    let wt_view = walk_kept(&wt);
+    assert!(
+        main_view.contains("build/out.o") && !main_view.contains("scratch.tmp"),
+        "sanity: main applies its own local-ignore, got {main_view:?}"
+    );
+    assert!(
+        wt_view.contains("scratch.tmp") && !wt_view.contains("build/out.o"),
+        "sanity: the worktree applies its own local-ignore, got {wt_view:?}"
     );
 }
 

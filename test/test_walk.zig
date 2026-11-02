@@ -851,3 +851,151 @@ test "isIgnoredResolved: overflow beyond the directory-chain limit falls back an
     try expectFastEqualsSlow(&rules, "d/d/d/keep", false);
     try expectFastEqualsSlow(&rules, "d/d/d/dead", false);
 }
+
+// ---------------------------------------------------------------------------
+// Repository exclude files: $GIT_DIR/info/exclude and core.excludesFile
+// (https://github.com/dmtrKovalenko/fff/pull/983, /pull/878)
+// ---------------------------------------------------------------------------
+
+test "walk honors .git/info/exclude below the root .gitignore" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("info_exclude");
+    defer t.deinit();
+
+    try t.mkdir(".git");
+    try t.mkdir(".git/info");
+    try t.mkdir("src");
+    try t.mkdir("excluded");
+    try t.mkdir("sub");
+    // info/exclude: prunes a directory and a suffix; a comment line like the
+    // `git init` template is harmless.
+    try t.write(".git/info/exclude", "# git ls-files --others --exclude-from=.git/info/exclude\nexcluded/\n*.log\n");
+    // The repo root .gitignore outranks info/exclude (gitignore(5)), so its
+    // negation re-includes keep.log.
+    try t.write(".gitignore", "!keep.log\n");
+    try t.write("src/a.txt", "");
+    try t.write("excluded/b.txt", "");
+    try t.write("keep.log", "");
+    try t.write("drop.log", "");
+    try t.write("sub/nested.log", "");
+    try t.write("sub/nested.txt", "");
+
+    // git_global off so a developer's own ~/.config/git/ignore can't leak in.
+    var results = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .sort = true, .git_global = false });
+    defer results.deinit();
+    try testing.expect(findEntry(&results, "src/a.txt") != null);
+    try testing.expect(findEntry(&results, "excluded") == null);
+    try testing.expect(findEntry(&results, "excluded/b.txt") == null);
+    try testing.expect(findEntry(&results, "drop.log") == null);
+    try testing.expect(findEntry(&results, "sub/nested.log") == null);
+    try testing.expect(findEntry(&results, "sub/nested.txt") != null);
+    try testing.expect(findEntry(&results, "keep.log") != null);
+
+    // The rules surface through the reusable IgnoreRules (watcher path).
+    const rules = results.ignore_rules;
+    try testing.expect(rules.isIgnoredPath("excluded"));
+    try testing.expect(rules.isIgnoredPath("excluded/b.txt"));
+    try testing.expect(rules.isIgnoredPath("drop.log"));
+    try testing.expect(!rules.isIgnoredPath("keep.log"));
+    try testing.expect(!rules.isIgnoredPath("src/a.txt"));
+
+    // Opt out: info/exclude is not consulted, .gitignore still is.
+    var off = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .git_exclude = false, .git_global = false });
+    defer off.deinit();
+    try testing.expect(findEntry(&off, "excluded/b.txt") != null);
+    try testing.expect(findEntry(&off, "drop.log") != null);
+
+    // Parallel walk agrees with the serial one.
+    var par = try walk.collect(testing.allocator, t.root, .{ .threads = 4, .sort = true, .git_global = false });
+    defer par.deinit();
+    try testing.expectEqual(results.entries.len, par.entries.len);
+    for (results.entries, par.entries) |*a, *b| try testing.expectEqualStrings(a.relativePath(), b.relativePath());
+}
+
+test "walk honors info/exclude of a linked worktree through commondir" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("info_exclude_worktree");
+    defer t.deinit();
+
+    // main checkout with a worktree registered under .git/worktrees/wt
+    try t.mkdir("main");
+    try t.mkdir("main/.git");
+    try t.mkdir("main/.git/info");
+    try t.mkdir("main/.git/worktrees");
+    try t.mkdir("main/.git/worktrees/wt");
+    try t.write("main/.git/info/exclude", "excluded/\n");
+    try t.write("main/.git/worktrees/wt/commondir", "../..\n");
+    try t.write("main/.git/worktrees/wt/HEAD", "ref: refs/heads/wt\n");
+    // the linked worktree: `.git` is a pointer file
+    try t.mkdir("wt");
+    try t.write("wt/.git", "gitdir: ../main/.git/worktrees/wt\n");
+    try t.mkdir("wt/src");
+    try t.mkdir("wt/excluded");
+    try t.write("wt/src/a.txt", "");
+    try t.write("wt/excluded/b.txt", "");
+
+    var buf: [512]u8 = undefined;
+    const wt_root = try std.fmt.bufPrint(&buf, "{s}/wt", .{t.root});
+    var results = try walk.collect(testing.allocator, wt_root, .{ .threads = 1, .git_global = false });
+    defer results.deinit();
+    try testing.expect(findEntry(&results, "src/a.txt") != null);
+    try testing.expect(findEntry(&results, "excluded/b.txt") == null);
+    // the pointer file itself is just a hidden file, not skipped like a .git dir
+    try testing.expect(findEntry(&results, ".git") != null);
+}
+
+test "walk honors core.excludesFile from the repository config" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("excludes_file");
+    defer t.deinit();
+
+    try t.mkdir(".git");
+    try t.mkdir("build");
+    try t.mkdir("vendor");
+    // core.excludesFile, relative to the worktree root as in git (never to
+    // the process cwd); it ignores build/ and *.tmp. The repo .gitignore
+    // outranks it: `!keep.tmp` wins.
+    try t.write(".git/config", "[core]\n\trepositoryformatversion = 0\n\texcludesFile = .git/global-ignore\n");
+    try t.write(".git/global-ignore", "build/\n*.tmp\n");
+    try t.write(".gitignore", "!keep.tmp\n");
+    try t.write("build/out.o", "");
+    try t.write("vendor/lib.c", "");
+    try t.write("scratch.tmp", "");
+    try t.write("keep.tmp", "");
+
+    var results = try walk.collect(testing.allocator, t.root, .{ .threads = 1 });
+    defer results.deinit();
+    try testing.expect(findEntry(&results, "build") == null);
+    try testing.expect(findEntry(&results, "build/out.o") == null);
+    try testing.expect(findEntry(&results, "scratch.tmp") == null);
+    try testing.expect(findEntry(&results, "keep.tmp") != null);
+    try testing.expect(findEntry(&results, "vendor/lib.c") != null);
+    try testing.expect(results.ignore_rules.isIgnoredPath("scratch.tmp"));
+
+    var off = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .git_global = false });
+    defer off.deinit();
+    try testing.expect(findEntry(&off, "build/out.o") != null);
+    try testing.expect(findEntry(&off, "scratch.tmp") != null);
+}
+
+test "walk scopes a nested repository's info/exclude to that repository" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("info_exclude_nested");
+    defer t.deinit();
+
+    try t.mkdir(".git");
+    try t.mkdir("inner");
+    try t.mkdir("inner/.git");
+    try t.mkdir("inner/.git/info");
+    try t.write("inner/.git/info/exclude", "*.gen\n");
+    try t.write("top.gen", "");
+    try t.write("inner/file.gen", "");
+    try t.write("inner/file.c", "");
+
+    var results = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .git_global = false });
+    defer results.deinit();
+    try testing.expect(findEntry(&results, "top.gen") != null);
+    try testing.expect(findEntry(&results, "inner/file.gen") == null);
+    try testing.expect(findEntry(&results, "inner/file.c") != null);
+    try testing.expect(findEntry(&results, "inner/.git") == null);
+}

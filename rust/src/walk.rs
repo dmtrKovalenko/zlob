@@ -29,7 +29,10 @@ bitflags! {
     /// Bit values must match `ZLOB_WALK_*` in `include/zlob.h`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct WalkFlags: u32 {
-        /// Honor nested `.gitignore`/`.ignore` files; also skips `.git` dirs.
+        /// Honor nested `.gitignore`/`.ignore` files, plus each repository's
+        /// `$GIT_DIR/info/exclude` and git's `core.excludesFile` (see
+        /// [`Self::NO_GIT_EXCLUDE`] / [`Self::NO_GIT_GLOBAL`]); also skips
+        /// `.git` dirs.
         const GITIGNORE       = 1 << 0;
         /// Skip hidden (dot) files and don't descend into dot-directories.
         const SKIP_HIDDEN     = 1 << 1;
@@ -43,6 +46,16 @@ bitflags! {
         const ABORT_ON_ERROR  = 1 << 5;
         /// With [`Self::GITIGNORE`]: still descend into `.git` directories.
         const KEEP_GIT_DIR    = 1 << 6;
+        /// With [`Self::GITIGNORE`]: do not read `$GIT_DIR/info/exclude`.
+        /// By default every repository met during the walk (a directory with a
+        /// `.git` entry, linked worktrees and submodules included) contributes
+        /// its `info/exclude`, layered below that repository's root
+        /// `.gitignore` exactly like git does.
+        const NO_GIT_EXCLUDE  = 1 << 7;
+        /// With [`Self::GITIGNORE`]: do not read git's `core.excludesFile`
+        /// (repository config, else `~/.gitconfig` / `$XDG_CONFIG_HOME/git/config`,
+        /// else `~/.config/git/ignore`). Lowest precedence of all ignore sources.
+        const NO_GIT_GLOBAL   = 1 << 8;
 
         /// `ignore`-crate like defaults: [`Self::GITIGNORE`] | [`Self::SKIP_HIDDEN`]
         const RECOMMENDED     = Self::GITIGNORE.bits() | Self::SKIP_HIDDEN.bits();
@@ -469,8 +482,8 @@ impl WalkResults {
         })
     }
 
-    /// Reusable ignore rules (`.gitignore` + `.ignore` + custom rules matcher) gathered during
-    /// the walk, for testing arbitrary paths afterwards. Always `Some` after a
+    /// Reusable ignore rules (`.gitignore` + `.ignore` + git exclude files +
+    /// custom rules matcher) gathered during the walk, for testing arbitrary paths afterwards. Always `Some` after a
     /// successful [`WalkBuilder::collect`] (empty when `GITIGNORE` was off or the
     /// tree had no ignore files).
     pub fn ignore_rules(&self) -> Option<IgnoreRules<'_>> {
@@ -1149,6 +1162,126 @@ mod tests {
         assert!(!rules.is_ignored("main.rs"));
     }
 
+    // Regression: https://github.com/dmtrKovalenko/fff/pull/983
+    // `$GIT_DIR/info/exclude` is part of git's ignore stack: below the repo
+    // root .gitignore, above core.excludesFile. Linked worktrees share the
+    // main repository's copy through `commondir`.
+    #[test]
+    fn honors_git_info_exclude() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".git/info")).unwrap();
+        fs::create_dir_all(root.join(".git/worktrees/wt")).unwrap();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::create_dir(root.join("excluded")).unwrap();
+        fs::write(root.join(".git/info/exclude"), "excluded/\n*.log\n").unwrap();
+        fs::write(root.join(".gitignore"), "!keep.log\n").unwrap();
+        fs::write(root.join("src/a.txt"), "").unwrap();
+        fs::write(root.join("excluded/b.txt"), "").unwrap();
+        fs::write(root.join("keep.log"), "").unwrap();
+        fs::write(root.join("drop.log"), "").unwrap();
+
+        // NO_GIT_GLOBAL keeps the developer's own ~/.config/git/ignore out.
+        let flags = WalkFlags::RECOMMENDED | WalkFlags::NO_GIT_GLOBAL;
+        let names = |flags: WalkFlags, base: &std::path::Path| -> Vec<String> {
+            WalkBuilder::new(base)
+                .unwrap()
+                .options(flags | WalkFlags::SORT | WalkFlags::NO_REPORT_DIRS)
+                .threads(1)
+                .collect()
+                .unwrap()
+                .iter()
+                .map(|e| e.relative_path().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(names(flags, root), ["keep.log", "src/a.txt"]);
+        // the rules the watcher filters with agree
+        let results = WalkBuilder::new(root)
+            .unwrap()
+            .options(flags)
+            .collect()
+            .unwrap();
+        let rules = results.ignore_rules().expect("rules always present");
+        assert!(rules.is_ignored("excluded/b.txt"));
+        assert!(rules.is_ignored("drop.log"));
+        assert!(!rules.is_ignored("keep.log"));
+
+        // opt out
+        assert_eq!(
+            names(flags | WalkFlags::NO_GIT_EXCLUDE, root),
+            ["drop.log", "excluded/b.txt", "keep.log", "src/a.txt"]
+        );
+
+        // linked worktree: `.git` is a pointer file, commondir leads back here
+        fs::write(root.join(".git/worktrees/wt/commondir"), "../..\n").unwrap();
+        let wt = dir.path().parent().unwrap().join(format!(
+            "{}-wt",
+            dir.path().file_name().unwrap().to_string_lossy()
+        ));
+        fs::create_dir_all(wt.join("excluded")).unwrap();
+        fs::create_dir_all(wt.join("src")).unwrap();
+        fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", root.join(".git/worktrees/wt").display()),
+        )
+        .unwrap();
+        fs::write(wt.join("src/a.txt"), "").unwrap();
+        fs::write(wt.join("excluded/b.txt"), "").unwrap();
+        let got = names(flags, &wt);
+        fs::remove_dir_all(&wt).unwrap();
+        assert_eq!(got, ["src/a.txt"]);
+    }
+
+    // https://github.com/dmtrKovalenko/fff/pull/878: core.excludesFile from
+    // the repository config, lowest precedence of all.
+    #[test]
+    fn honors_git_core_excludes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir(root.join(".worktrees")).unwrap();
+        fs::write(root.join(".git/my-excludes"), ".worktrees/\n*.tmp\n").unwrap();
+        fs::write(
+            root.join(".git/config"),
+            format!(
+                "[core]\n\tbare = false\n\texcludesFile = {}\n",
+                root.join(".git/my-excludes").display()
+            ),
+        )
+        .unwrap();
+        fs::write(root.join(".gitignore"), "!keep.tmp\n").unwrap();
+        fs::write(root.join(".worktrees/hit.ts"), "").unwrap();
+        fs::write(root.join("hit.ts"), "").unwrap();
+        fs::write(root.join("scratch.tmp"), "").unwrap();
+        fs::write(root.join("keep.tmp"), "").unwrap();
+
+        let names = |flags: WalkFlags| -> Vec<String> {
+            WalkBuilder::new(root)
+                .unwrap()
+                .options(flags | WalkFlags::GITIGNORE | WalkFlags::SORT | WalkFlags::NO_REPORT_DIRS)
+                .threads(1)
+                .collect()
+                .unwrap()
+                .iter()
+                .map(|e| e.relative_path().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            names(WalkFlags::empty()),
+            [".gitignore", "hit.ts", "keep.tmp"]
+        );
+        assert_eq!(
+            names(WalkFlags::NO_GIT_GLOBAL),
+            [
+                ".gitignore",
+                ".worktrees/hit.ts",
+                "hit.ts",
+                "keep.tmp",
+                "scratch.tmp"
+            ]
+        );
+    }
+
     // Regression: https://github.com/dmtrKovalenko/fff/issues/723
     // Standard allowlist pattern: ignore everything, then re-include files with
     // extensions and every directory needed to reach them.
@@ -1497,6 +1630,14 @@ mod tests {
         assert_eq!(
             WalkFlags::KEEP_GIT_DIR.bits(),
             ffi::ZLOB_WALK_KEEP_GIT_DIR as u32
+        );
+        assert_eq!(
+            WalkFlags::NO_GIT_EXCLUDE.bits(),
+            ffi::ZLOB_WALK_NO_GIT_EXCLUDE as u32
+        );
+        assert_eq!(
+            WalkFlags::NO_GIT_GLOBAL.bits(),
+            ffi::ZLOB_WALK_NO_GIT_GLOBAL as u32
         );
         assert_eq!(
             WalkFlags::RECOMMENDED,
