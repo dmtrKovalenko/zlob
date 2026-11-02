@@ -1241,12 +1241,13 @@ mod tests {
         fs::create_dir(root.join(".git")).unwrap();
         fs::create_dir(root.join(".worktrees")).unwrap();
         fs::write(root.join(".git/my-excludes"), ".worktrees/\n*.tmp\n").unwrap();
+        // Git config values treat `\` as an escape, so a Windows path is
+        // written by hand with forward slashes.
+        let excludes = root.join(".git/my-excludes");
+        let excludes = excludes.to_string_lossy().replace('\\', "/");
         fs::write(
             root.join(".git/config"),
-            format!(
-                "[core]\n\tbare = false\n\texcludesFile = {}\n",
-                root.join(".git/my-excludes").display()
-            ),
+            format!("[core]\n\tbare = false\n\texcludesFile = {excludes}\n"),
         )
         .unwrap();
         fs::write(root.join(".gitignore"), "!keep.tmp\n").unwrap();
