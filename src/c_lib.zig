@@ -774,6 +774,8 @@ const ZLOB_WALK_NO_REPORT_DIRS: u32 = 1 << 3;
 const ZLOB_WALK_SORT: u32 = 1 << 4;
 const ZLOB_WALK_ABORT_ON_ERROR: u32 = 1 << 5;
 const ZLOB_WALK_KEEP_GIT_DIR: u32 = 1 << 6;
+const ZLOB_WALK_SKIP_GITIGNORE: u32 = 1 << 7;
+const ZLOB_WALK_SKIP_DOT_IGNORE: u32 = 1 << 8;
 
 fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
     const v: zlob_walk_options_t = if (options) |p| p.* else .{};
@@ -785,6 +787,8 @@ fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
         .include_hidden = f & ZLOB_WALK_SKIP_HIDDEN == 0,
         .respect_git = f & ZLOB_WALK_GITIGNORE != 0,
         .skip_git_dir = f & ZLOB_WALK_KEEP_GIT_DIR == 0,
+        .skip_gitignore = f & ZLOB_WALK_SKIP_GITIGNORE != 0,
+        .skip_dot_ignore = f & ZLOB_WALK_SKIP_DOT_IGNORE != 0,
         .report_dirs = f & ZLOB_WALK_NO_REPORT_DIRS == 0,
         .pattern = if (v.pattern) |p| mem.sliceTo(p, 0) else null,
         .pattern_flags = if (v.pattern_flags != 0)

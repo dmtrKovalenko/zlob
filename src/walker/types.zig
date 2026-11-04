@@ -205,6 +205,10 @@ pub const Options = struct {
     respect_git: bool = true,
     /// Skip ".git" directories (only when respect_git is set).
     skip_git_dir: bool = true,
+    /// Skip rules from ".gitignore" when respect_git is set.
+    skip_gitignore: bool = false,
+    /// Skip rules from ".ignore" when respect_git is set.
+    skip_dot_ignore: bool = false,
     /// Report directory entries (directories are traversed either way).
     report_dirs: bool = true,
     /// Glob filter: only entries whose root-relative path matches are reported

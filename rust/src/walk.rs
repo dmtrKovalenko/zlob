@@ -43,6 +43,10 @@ bitflags! {
         const ABORT_ON_ERROR  = 1 << 5;
         /// With [`Self::GITIGNORE`]: still descend into `.git` directories.
         const KEEP_GIT_DIR    = 1 << 6;
+        /// With [`Self::GITIGNORE`]: skip rules from `.gitignore` files.
+        const SKIP_GITIGNORE  = 1 << 7;
+        /// With [`Self::GITIGNORE`]: skip rules from `.ignore` files.
+        const SKIP_DOT_IGNORE = 1 << 8;
 
         /// `ignore`-crate like defaults: [`Self::GITIGNORE`] | [`Self::SKIP_HIDDEN`]
         const RECOMMENDED     = Self::GITIGNORE.bits() | Self::SKIP_HIDDEN.bits();
@@ -1247,6 +1251,60 @@ mod tests {
     }
 
     #[test]
+    fn ignore_sources_can_be_disabled_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/.gitignore"), "from-git\n").unwrap();
+        fs::write(root.join("nested/.ignore"), "from-dot\n").unwrap();
+        for path in [".git/config", "nested/from-git", "nested/from-dot", "extra"] {
+            fs::write(root.join(path), "").unwrap();
+        }
+
+        for skipped in [
+            WalkFlags::empty(),
+            WalkFlags::SKIP_GITIGNORE,
+            WalkFlags::SKIP_DOT_IGNORE,
+            WalkFlags::SKIP_GITIGNORE | WalkFlags::SKIP_DOT_IGNORE,
+        ] {
+            let result = WalkBuilder::new(root)
+                .unwrap()
+                .options(WalkFlags::GITIGNORE | skipped)
+                .threads(1)
+                .extra_ignore(&["/extra"])
+                .unwrap()
+                .collect()
+                .unwrap();
+            let rules = result.ignore_rules().unwrap();
+            for (path, is_ignored) in [
+                (
+                    "nested/from-git",
+                    !skipped.contains(WalkFlags::SKIP_GITIGNORE),
+                ),
+                (
+                    "nested/from-dot",
+                    !skipped.contains(WalkFlags::SKIP_DOT_IGNORE),
+                ),
+                ("extra", true),
+            ] {
+                assert_eq!(rules.is_ignored(path), is_ignored);
+                assert_eq!(
+                    result
+                        .iter()
+                        .any(|entry| entry.relative_path() == Path::new(path)),
+                    !is_ignored
+                );
+            }
+            assert!(
+                !result
+                    .iter()
+                    .any(|entry| entry.relative_path().starts_with(".git"))
+            );
+        }
+    }
+
+    #[test]
     fn interior_nul_is_an_error_not_a_silent_default() {
         // A root with an interior NUL must fail at construction, not
         // silently walk the cwd.
@@ -1497,6 +1555,14 @@ mod tests {
         assert_eq!(
             WalkFlags::KEEP_GIT_DIR.bits(),
             ffi::ZLOB_WALK_KEEP_GIT_DIR as u32
+        );
+        assert_eq!(
+            WalkFlags::SKIP_GITIGNORE.bits(),
+            ffi::ZLOB_WALK_SKIP_GITIGNORE as u32
+        );
+        assert_eq!(
+            WalkFlags::SKIP_DOT_IGNORE.bits(),
+            ffi::ZLOB_WALK_SKIP_DOT_IGNORE as u32
         );
         assert_eq!(
             WalkFlags::RECOMMENDED,

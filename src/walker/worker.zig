@@ -345,9 +345,11 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
 
     var ignore: ?*IgnoreNode = task.ignore;
     var own_ignore = false;
-    if (sh.options.respect_git and (w.saw_gitignore or w.saw_ignore)) {
+    const load_gitignore = w.saw_gitignore and !sh.options.skip_gitignore;
+    const load_dot_ignore = w.saw_ignore and !sh.options.skip_dot_ignore;
+    if (sh.options.respect_git and (load_gitignore or load_dot_ignore)) {
         @branchHint(.unlikely);
-        if (try loadIgnoreNode(sh, handle, task, w.saw_gitignore, w.saw_ignore)) |node| {
+        if (try loadIgnoreNode(sh, handle, task, load_gitignore, load_dot_ignore)) |node| {
             ignore = node;
             own_ignore = true;
             {
