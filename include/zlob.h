@@ -352,7 +352,9 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
 
 /* Walk behavior flags (zlob_walk_options_t.flags). All-zero options give a
  * plain walkdir-style traversal: hidden files included, .gitignore not
- * consulted, directories reported. */
+ * consulted, directories reported. Inside every repository the walk meets,
+ * ZLOB_WALK_GITIGNORE also honors $GIT_DIR/info/exclude and git's
+ * core.excludesFile, below the .gitignore next to .git (git precedence). */
 #define ZLOB_WALK_GITIGNORE   (1u << 0) /* honor (nested) .gitignore + .ignore; also skips .git */
 #define ZLOB_WALK_SKIP_HIDDEN (1u << 1) /* skip dotfiles and don't descend into dot-dirs */
 #define ZLOB_WALK_FOLLOW_SYMLINKS (1u << 2)
@@ -360,6 +362,8 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
 #define ZLOB_WALK_SORT            (1u << 4) /* sort zlob_walk_collect() results by path */
 #define ZLOB_WALK_ABORT_ON_ERROR  (1u << 5)
 #define ZLOB_WALK_KEEP_GIT_DIR    (1u << 6) /* with GITIGNORE: still enter .git dirs */
+#define ZLOB_WALK_NO_GIT_EXCLUDE  (1u << 7) /* with GITIGNORE: ignore $GIT_DIR/info/exclude */
+#define ZLOB_WALK_NO_GIT_GLOBAL   (1u << 8) /* with GITIGNORE: ignore core.excludesFile */
 
 /** Entry kinds. */
 #define ZLOB_WALK_KIND_UNKNOWN    0
@@ -458,14 +462,16 @@ int zlob_walk_collect(const char *root, const zlob_walk_options_t *options,
 
 void zlob_walk_result_free(zlob_walk_result_t *result);
 
-/** Borrowed handle to the reusable ignore rules (.gitignore + .ignore, nested)
- *  gathered during the walk. Always available after a successful
+/** Borrowed handle to the reusable ignore rules (.gitignore + .ignore, nested,
+ *  plus each repository's info/exclude and core.excludesFile) gathered during
+ *  the walk. Always available after a successful
  *  zlob_walk_collect() */
 void *zlob_walk_result_ignore_rules(const zlob_walk_result_t *result);
 
 /** Returns nonzero when `path` (root-relative) is ignored by the ignore rules
- *  the walker assembled, this includes every discovered `.gitignore`/`.ignore` plus
- *  any patterns passed via `extra_ignore`.
+ *  the walker assembled, this includes every discovered `.gitignore`/`.ignore`,
+ *  the git exclude files of every repository met, and any patterns passed via
+ *  `extra_ignore`.
  *
  *  Zero on "not ignored", a NULL `rules` handle, or not-accessible `path`.
  *  Performs `lstat` internally.

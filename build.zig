@@ -289,6 +289,7 @@ pub fn build(b: *std.Build) void {
         "src/walker.zig",
         "src/brace_optimizer.zig",
         "src/gitignore.zig",
+        "src/walker/git_excludes.zig",
         "src/fnmatch.zig",
         "src/pattern_context.zig",
         "src/sorting.zig",

@@ -14,7 +14,7 @@ zlob is a C library, zig library and a rust crate that makes globbing and file w
 - Faster than glibc up to 10x in specific cases and generally 1.2-1.7x faster. See [benchmarks](#Benchmarks)
 - Faster than rust's, node's, bun's, python's implementation by far
 - In addition to standard unix wildcard syntax supports `**` recursive patterns, braces `*.{c,h}`, `gitignore` and bash `extglob` patterns
-- Supports `.gitignore` out of the box
+- Supports `.gitignore` out of the box, including `.git/info/exclude` and git's `core.excludesFile`
 - Exports api for matching over paths (one or many) without involving file system
 - Exposes path length in the output struct for seamless FFI
 - Truly optimized for all platforms: 
@@ -212,7 +212,9 @@ for entry in results.iter() {
     println!("{} {:?}", entry.path().display(), entry.size());
 }
 
-// Raw walkdir/ignore-style traversal (skip gitignore files):
+// ignore-crate style traversal: nested .gitignore/.ignore, each repository's
+// .git/info/exclude and core.excludesFile (opt out of the last two with
+// WalkFlags::NO_GIT_EXCLUDE / WalkFlags::NO_GIT_GLOBAL):
 WalkBuilder::new(".").options(WalkFlags::GITIGNORE).run(|entry| {
     println!("{}", entry.path().display());
 
