@@ -172,6 +172,8 @@ pub const RawEntry = struct {
     name: []const u8,
     kind: EntryKind,
     meta: Metadata,
+    /// Linux can fetch known-type entries' metadata after ignore filtering.
+    metadata_deferred: bool = false,
 };
 
 pub const VisitAction = enum(c_int) {
@@ -202,9 +204,23 @@ pub const Options = struct {
     include_hidden: bool = true,
     /// Honor .gitignore files (nested ones included). `.ignore` files are
     /// honored too, with their patterns taking precedence over `.gitignore`.
+    /// Repository exclude files are honored as well, see `git_exclude` and
+    /// `git_global`.
     respect_git: bool = true,
+    /// With respect_git, inherit ignore rules up to the containing Git worktree.
+    gitignore_parents: bool = false,
     /// Skip ".git" directories (only when respect_git is set).
     skip_git_dir: bool = true,
+    /// With respect_git: honor `$GIT_DIR/info/exclude` of every repository
+    /// met during the walk (a directory holding `.git`), linked worktrees and
+    /// submodules included. Layered below that repository's root `.gitignore`
+    /// as in git, so a `!negation` there un-ignores what info/exclude ignores.
+    git_exclude: bool = true,
+    /// With respect_git: honor git's `core.excludesFile` inside repositories
+    /// (repository config, else `~/.gitconfig` / `$XDG_CONFIG_HOME/git/config`,
+    /// else the default `~/.config/git/ignore`; a relative path is relative
+    /// to the worktree root). Lowest precedence of all.
+    git_global: bool = true,
     /// Skip rules from ".gitignore" when respect_git is set.
     skip_gitignore: bool = false,
     /// Skip rules from ".ignore" when respect_git is set.

@@ -42,7 +42,8 @@ pub const WalkerResult = struct {
     entries: []Entry,
     chunks: [][]u8,
     allocator: Allocator,
-    /// Inferred set of ignore rules, valid until the .gitignore/.ignore file is changed
+    /// Inferred set of ignore rules, valid until a .gitignore/.ignore file or
+    /// a repository's info/exclude or core.excludesFile is changed
     ignore_rules: *IgnoreRules,
 
     pub fn deinit(self: *WalkerResult) void {
@@ -203,9 +204,10 @@ fn walkImpl(
     defer if (extra_root) |root_node| root_node.release(allocator);
     if (extra_root) |x| ignore_rules.setExtra(x);
 
+    const io = options.io orelse std.Io.Threaded.global_single_threaded.io();
     var sh = SharedWorkerState{
         .allocator = allocator,
-        .io = options.io orelse std.Io.Threaded.global_single_threaded.io(),
+        .io = io,
         .options = options,
         .root_path = root,
         .root_path_with_slash = prefix_buf[0..prefix_len],
@@ -218,15 +220,20 @@ fn walkImpl(
         else
             &.{},
         .extra_ignore_root = extra_root,
+        .git = .init(allocator, io, options.git_exclude, options.git_global),
         .statx_mask = scan_linux.statxMask(options.meta),
         .ignore_rules = ignore_rules,
     };
 
-    try sh.queue.init(allocator, n_workers);
-    defer {
-        sh.queue.deinit(allocator);
-        sh.visited.deinit(allocator);
+    defer sh.git.deinit();
+    if (options.respect_git and options.gitignore_parents) {
+        try worker.loadParentIgnoreRules(&sh);
+        if (ignore_rules.root_ignored) return;
     }
+
+    try sh.queue.init(allocator, n_workers);
+    defer sh.queue.deinit(allocator);
+    defer sh.visited.deinit(allocator);
 
     if (options.follow_symlinks) worker.recordRootVisited(&sh);
 
@@ -251,7 +258,13 @@ fn walkImpl(
     sh.threads = threads;
 
     const root_task = try allocator.create(DirTask);
-    root_task.* = .{ .rel = try allocator.dupe(u8, ""), .depth = 0, .ignore = null, .parent = null };
+    const root_rel = allocator.dupe(u8, "") catch |err| {
+        allocator.destroy(root_task);
+        return err;
+    };
+    const parents = ignore_rules.parents;
+    if (parents) |node| node.retain();
+    root_task.* = .{ .rel = root_rel, .depth = 0, .ignore = parents, .parent = null };
     sh.queue.push(allocator, sh.io, 0, root_task) catch |err| {
         worker.freeTask(&sh, root_task);
         return err;

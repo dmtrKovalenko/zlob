@@ -144,6 +144,9 @@ fn ignore_paths(root: &Path) -> std::collections::BTreeSet<String> {
         .standard_filters(false)
         .hidden(true)
         .git_ignore(true)
+        // zlob's default GITIGNORE also honors info/exclude and core.excludesFile
+        .git_exclude(true)
+        .git_global(true)
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.depth() > 0)

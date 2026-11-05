@@ -189,8 +189,9 @@ fn ignore_builder(root: &Path, gitignore: bool, hidden: bool) -> ignore::WalkBui
     let mut b = ignore::WalkBuilder::new(root);
     b.hidden(hidden)
         .git_ignore(gitignore)
-        .git_global(false)
-        .git_exclude(false)
+        // zlob's GITIGNORE reads both too: equal work on each side
+        .git_global(gitignore)
+        .git_exclude(gitignore)
         .ignore(gitignore)
         .parents(false);
     b
