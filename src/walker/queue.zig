@@ -15,6 +15,15 @@ pub const DirTask = struct {
     /// Parent directory handle the child opens relative to (one ref owned by
     /// the task). Null for the root task.
     parent: ?*HandleRef,
+    /// Device ID paired with `ino` in the visited set when following symlinks.
+    /// `processEntry` uses it to build keys for children from the directory
+    /// listing. `resolveTaskKey` can refresh both fields after opening.
+    dev: u64 = 0,
+    /// Inode of this directory, taken from the target for a followed symlink.
+    ino: u64 = 0,
+    /// The open could not guarantee it stayed on `dev` (mount crossing, or no
+    /// openat2): re-derive the key with one statx once the dir is open.
+    verify_key: bool = false,
 };
 
 const LocalQueue = struct {

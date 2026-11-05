@@ -3,6 +3,13 @@ const c_lib = @import("c_lib");
 const zlob_flags = @import("zlob_flags");
 const zlob_t = c_lib.zlob_t;
 
+// Root-module opt-out for per-worker signal-stack setup; see README.md.
+pub const std_options: std.Options = .{
+    .signal_stack_size = null,
+    .enable_segfault_handler = false,
+    .allow_stack_tracing = false,
+};
+
 const TestCase = struct {
     name: []const u8,
     pattern: [:0]const u8,

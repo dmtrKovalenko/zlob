@@ -7,6 +7,12 @@ const File = std.Io.File;
 
 const version = build_options.version;
 
+pub const std_options: std.Options = .{
+    .signal_stack_size = null,
+    .enable_segfault_handler = false,
+    .allow_stack_tracing = false,
+};
+
 const Options = struct {
     pattern: ?[]const u8 = null,
     path: ?[]const u8 = null,
@@ -23,6 +29,8 @@ const Options = struct {
     show_help: bool = false,
     show_version: bool = false,
     limit: usize = 100,
+    /// ZLOB_PARALLEL worker count for recursive `**` globs; 0 = serial walker.
+    threads: u32 = 0,
 };
 
 const BufferedWriter = struct {
@@ -69,6 +77,7 @@ fn printHelp(w: *Io.Writer, program_name: []const u8) void {
         \\    -s, --sorted         Sort results alphabetically (default: unsorted)
         \\    -B, --no-brace       Disable brace expansion (default: enabled)
         \\    -G, --no-gitignore   Don't respect .gitignore rules (default: enabled)
+        \\    -j, --threads <NUM>  Walk recursive '**' globs with NUM worker threads (default: serial)
         \\    -h, --help           Print help information
         \\    -V, --version        Print version information
         \\
@@ -121,6 +130,13 @@ fn parseArgs(args_iter: *std.process.Args.Iterator, stderr: *Io.Writer) !Options
                 opts.no_brace = true;
             } else if (std.mem.eql(u8, arg, "-G") or std.mem.eql(u8, arg, "--no-gitignore")) {
                 opts.no_gitignore = true;
+            } else if (std.mem.eql(u8, arg, "-j") or std.mem.eql(u8, arg, "--threads")) {
+                const threads_str = args_iter.next() orelse {
+                    return error.MissingArgument;
+                };
+                opts.threads = std.fmt.parseInt(u32, threads_str, 10) catch {
+                    return error.InvalidNumber;
+                };
             } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--hidden")) {
                 opts.hidden = true;
             } else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--count")) {
@@ -220,9 +236,13 @@ pub fn main(init: std.process.Init) !void {
     flags.onlydir = opts.dirs_only;
     flags.match_basename = opts.basename;
     flags.nomagic = false; // always enable magic, since we require a pattern argument
+    if (opts.threads > 0) {
+        flags.parallel = true;
+        zlob.setGlobParallelThreads(@intCast(@min(opts.threads, 1024)));
+    }
     _ = &flags; // suppress unused warning if match accepts anytype
 
-    var match_result = zlob.match(allocator, io, full_pattern, flags) catch |err| {
+    var match_result = zlob.match(init.gpa, io, full_pattern, flags) catch |err| {
         stderr.print("error: glob failed: {}\n", .{err}) catch {};
         stderr_writer.flush();
         std.process.exit(1);

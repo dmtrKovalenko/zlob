@@ -1385,6 +1385,196 @@ test "ZLOB_ALTDIRFUNC - nested directory with wildcard pattern" {
     try testing.expect(found_util);
 }
 
+test "ZLOB_ALTDIRFUNC - DT_UNKNOWN entries are probed instead of skipped" {
+    // Filesystems without d_type support (XFS ftype=0, FUSE, some NFS/overlay/9p)
+    // report every entry as DT_UNKNOWN (0). A non-final wildcard component must
+    // still recurse into such entries: the child opendir decides, and a file
+    // answering ENOTDIR/NULL is silently a non-match (glibc behaviour).
+    //
+    //     .
+    //     ├── root.txt      (d_type 0, really a file)
+    //     ├── src/          (d_type 0, really a directory)
+    //     │   ├── main.zig  (d_type 0)
+    //     │   └── util.zig  (d_type 0)
+    //     └── test/         (d_type 0, really a directory)
+    //         └── test_main.zig
+    const MockUnknownDir = struct {
+        const Entry = struct {
+            name: [:0]const u8,
+            d_type: u8,
+        };
+
+        const root_entries = [_]Entry{
+            .{ .name = "root.txt", .d_type = 0 },
+            .{ .name = "src", .d_type = 0 },
+            .{ .name = "test", .d_type = 0 },
+        };
+        const src_entries = [_]Entry{
+            .{ .name = "main.zig", .d_type = 0 },
+            .{ .name = "util.zig", .d_type = 0 },
+        };
+        const test_entries = [_]Entry{
+            .{ .name = "test_main.zig", .d_type = 0 },
+        };
+
+        // Per-handle state: the parent directory stays open while a child
+        // reported as DT_UNKNOWN is probed and iterated.
+        const State = struct {
+            entries: []const Entry = &.{},
+            index: usize = 0,
+            dirent: c_lib.zlob_dirent_t = undefined,
+            in_use: bool = false,
+        };
+        var slots: [8]State = [_]State{.{}} ** 8;
+        var refused_opens: usize = 0;
+
+        fn opendir(path: [*:0]const u8) callconv(.c) ?*anyopaque {
+            const p = std.mem.sliceTo(path, 0);
+            const entries: []const Entry = if (std.mem.endsWith(u8, p, "/src") or std.mem.eql(u8, p, "src"))
+                &src_entries
+            else if (std.mem.endsWith(u8, p, "/test") or std.mem.eql(u8, p, "test"))
+                &test_entries
+            else if (p.len == 0 or std.mem.eql(u8, p, "."))
+                &root_entries
+            else {
+                // Anything else (root.txt, src/main.zig, ...) is a file.
+                refused_opens += 1;
+                return null;
+            };
+            for (&slots) |*slot| {
+                if (slot.in_use) continue;
+                slot.* = .{ .entries = entries, .index = 0, .in_use = true };
+                return @ptrCast(slot);
+            }
+            return null;
+        }
+
+        fn readdir(handle: ?*anyopaque) callconv(.c) ?*c_lib.zlob_dirent_t {
+            const slot: *State = @ptrCast(@alignCast(handle.?));
+            if (slot.index >= slot.entries.len) return null;
+            slot.dirent.d_name = slot.entries[slot.index].name.ptr;
+            slot.dirent.d_type = slot.entries[slot.index].d_type;
+            slot.index += 1;
+            return &slot.dirent;
+        }
+
+        fn closedir(handle: ?*anyopaque) callconv(.c) void {
+            const slot: *State = @ptrCast(@alignCast(handle.?));
+            slot.in_use = false;
+        }
+    };
+
+    const allocator = testing.allocator;
+
+    // Non-final wildcard: "*" must descend into src and test although they
+    // are reported as DT_UNKNOWN, and must not abort on root.txt.
+    {
+        const pattern = try allocator.dupeZ(u8, "*/*.zig");
+        defer allocator.free(pattern);
+
+        var pzlob = glob.zlob_t{
+            .zlo_pathc = 0,
+            .zlo_pathv = null,
+            .zlo_offs = 0,
+            .zlo_pathlen = undefined,
+            .zlo_flags = 0,
+            .zlo_opendir = MockUnknownDir.opendir,
+            .zlo_readdir = @ptrCast(&MockUnknownDir.readdir),
+            .zlo_closedir = MockUnknownDir.closedir,
+        };
+
+        // No ZLOB_ERR here: an ALTDIRFUNC opendir returning NULL carries no
+        // errno, so it cannot be told apart from a real error. The real-fs
+        // path maps ENOTDIR to error.NotDir, which OpenErrorConfig.ignore_not_dir
+        // suppresses; see the "file/*" test below.
+        const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_ALTDIRFUNC, null, &pzlob);
+        defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+        try testing.expectEqual(@as(c_int, 0), result);
+        try testing.expectEqual(@as(usize, 3), pzlob.zlo_pathc);
+        try testing.expect(MockUnknownDir.refused_opens >= 1); // root.txt was probed
+
+        var found_main = false;
+        var found_util = false;
+        var found_test = false;
+        for (0..pzlob.zlo_pathc) |i| {
+            const path = std.mem.sliceTo(pzlob.zlo_pathv[i], 0);
+            if (std.mem.eql(u8, path, "src/main.zig")) found_main = true;
+            if (std.mem.eql(u8, path, "src/util.zig")) found_util = true;
+            if (std.mem.eql(u8, path, "test/test_main.zig")) found_test = true;
+        }
+        try testing.expect(found_main);
+        try testing.expect(found_util);
+        try testing.expect(found_test);
+    }
+
+    // Literal non-final component with a DT_UNKNOWN directory.
+    {
+        const pattern = try allocator.dupeZ(u8, "src/*.zig");
+        defer allocator.free(pattern);
+
+        var pzlob = glob.zlob_t{
+            .zlo_pathc = 0,
+            .zlo_pathv = null,
+            .zlo_offs = 0,
+            .zlo_pathlen = undefined,
+            .zlo_flags = 0,
+            .zlo_opendir = MockUnknownDir.opendir,
+            .zlo_readdir = @ptrCast(&MockUnknownDir.readdir),
+            .zlo_closedir = MockUnknownDir.closedir,
+        };
+
+        const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_ALTDIRFUNC, null, &pzlob);
+        defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+        try testing.expectEqual(@as(c_int, 0), result);
+        try testing.expectEqual(@as(usize, 2), pzlob.zlo_pathc);
+    }
+}
+
+test "ZLOB_ERR - wildcard under a regular file is NOMATCH, not an error (glibc ENOTDIR rule)" {
+    // glibc's glob_in_dir ignores ENOTDIR from opendir: glob("f/*", GLOB_ERR)
+    // where f is a file returns GLOB_NOMATCH and never calls errfunc. zlob
+    // relies on the same rule when it probes DT_UNKNOWN entries by opening them.
+    const allocator = testing.allocator;
+    const tmp_dir = "/tmp";
+
+    try createTestFiles(allocator, tmp_dir);
+    defer cleanupTestFiles(allocator, tmp_dir) catch {};
+
+    const Counter = struct {
+        var calls: usize = 0;
+        fn errfunc(_: [*:0]const u8, _: c_int) callconv(.c) c_int {
+            calls += 1;
+            return 0;
+        }
+    };
+    Counter.calls = 0;
+
+    const pattern = try std.fmt.allocPrintSentinel(allocator, "{s}/test_missing_flags/file1.txt/*", .{tmp_dir}, 0);
+    defer allocator.free(pattern);
+
+    var pzlob: glob.zlob_t = undefined;
+    const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_ERR, Counter.errfunc, &pzlob);
+    defer if (result == 0) c_lib.zlobfree(&pzlob);
+
+    try testing.expectEqual(@as(c_int, zlob_flags.ZLOB_NOMATCH), result);
+    try testing.expectEqual(@as(usize, 0), Counter.calls);
+
+    // Directories still expand normally under ZLOB_ERR.
+    const pattern2 = try std.fmt.allocPrintSentinel(allocator, "{s}/test_missing_flags/*/*.txt", .{tmp_dir}, 0);
+    defer allocator.free(pattern2);
+
+    var pzlob2: glob.zlob_t = undefined;
+    const result2 = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_ERR, Counter.errfunc, &pzlob2);
+    defer if (result2 == 0) c_lib.zlobfree(&pzlob2);
+
+    try testing.expectEqual(@as(c_int, 0), result2);
+    try testing.expectEqual(@as(usize, 1), pzlob2.zlo_pathc);
+    try testing.expect(std.mem.endsWith(u8, std.mem.sliceTo(pzlob2.zlo_pathv[0], 0), "dir1/file3.txt"));
+    try testing.expectEqual(@as(usize, 0), Counter.calls);
+}
+
 test "ZLOB_MAGCHAR - set when pattern has wildcards" {
     const allocator = testing.allocator;
     const tmp_dir = "/tmp";

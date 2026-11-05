@@ -22,6 +22,8 @@ pub const PatternContext = zlob.PatternContext;
 /// Parallel recursive directory walker (walkdir/ignore replacement). See
 /// `walk.collect` / `walk.run` and `walk.WalkMetadata`.
 pub const walk = zlob.walk;
+/// Worker threads for ZLOB_PARALLEL recursive globs (see `flags.ZLOB_PARALLEL`).
+pub const setGlobParallelThreads = zlob.setGlobParallelThreads;
 
 pub const ZlobResults = zlob.ZlobResults;
 pub const ZlobError = zlob.ZlobError;

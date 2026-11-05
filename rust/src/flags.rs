@@ -134,6 +134,13 @@ bitflags! {
         /// ```
         const MATCH_BASENAME = ffi::ZLOB_MATCH_BASENAME;
 
+        /// Opt-in: run recursive `**` patterns over the parallel walker
+        /// (worker count from [`crate::set_threads`], default 4). The result
+        /// set is identical to the serial path. Sorted output keeps the same order.
+        /// `ALTDIRFUNC`, `FOLLOW_SYMLINKS`, `zlob_at`, and brace alternatives
+        /// before the `**` use the serial walker.
+        const PARALLEL = ffi::ZLOB_PARALLEL;
+
         /// Recommended modern defaults for globbing.
         ///
         /// Enables: BRACE, DOUBLESTAR_RECURSIVE, NOSORT, TILDE, TILDE_CHECK
@@ -174,6 +181,7 @@ mod tests {
         assert_eq!(ZlobFlags::EXTGLOB.bits(), 1 << 26);
         assert_eq!(ZlobFlags::FOLLOW_SYMLINKS.bits(), 1 << 27);
         assert_eq!(ZlobFlags::MATCH_BASENAME.bits(), 1 << 28);
+        assert_eq!(ZlobFlags::PARALLEL.bits(), 1 << 29);
     }
 
     #[test]

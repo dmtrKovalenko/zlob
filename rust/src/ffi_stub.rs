@@ -24,6 +24,7 @@ pub const ZLOB_DOUBLESTAR_RECURSIVE: c_int = 1 << 25;
 pub const ZLOB_EXTGLOB: c_int = 1 << 26;
 pub const ZLOB_FOLLOW_SYMLINKS: c_int = 1 << 27;
 pub const ZLOB_MATCH_BASENAME: c_int = 1 << 28;
+pub const ZLOB_PARALLEL: c_int = 1 << 29;
 
 pub const ZLOB_RECOMMENDED: c_int =
     ZLOB_BRACE | ZLOB_DOUBLESTAR_RECURSIVE | ZLOB_NOSORT | ZLOB_TILDE | ZLOB_TILDE_CHECK;
@@ -91,6 +92,8 @@ unsafe extern "C" {
     ) -> c_int;
 
     pub fn zlobfree(pzlob: *mut zlob_t);
+
+    pub fn zlob_set_threads(threads: core::ffi::c_uint);
 
     pub fn zlob_at(
         base_path: *const c_char,
