@@ -50,7 +50,7 @@ test "errfunc is called on directory access error" {
 
     // Remove read permissions
     var perm_buf: [256:0]u8 = undefined;
-    const perm_path = try std.fmt.bufPrintZ(&perm_buf, "{s}", .{restricted_dir});
+    const perm_path = try std.fmt.bufPrintSentinel(&perm_buf, "{s}", .{restricted_dir}, 0);
     _ = c.chmod(perm_path.ptr, 0o000);
     defer _ = c.chmod(perm_path.ptr, 0o755); // Restore permissions for cleanup
 
@@ -66,7 +66,7 @@ test "errfunc is called on directory access error" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Try to glob with errfunc
-    const pattern = try allocator.dupeZ(u8, "*/*");
+    const pattern = try allocator.dupeSentinel(u8, "*/*", 0);
     defer allocator.free(pattern);
 
     var pzlob: c_lib.zlob_t = undefined;
@@ -95,7 +95,7 @@ test "errfunc returning non-zero causes ZLOB_ABORTED" {
 
     // Remove read permissions
     var perm_buf: [256:0]u8 = undefined;
-    const perm_path = try std.fmt.bufPrintZ(&perm_buf, "{s}", .{restricted_dir});
+    const perm_path = try std.fmt.bufPrintSentinel(&perm_buf, "{s}", .{restricted_dir}, 0);
     const chmod_result = c.chmod(perm_path.ptr, 0o000);
     defer _ = c.chmod(perm_path.ptr, 0o755);
 
@@ -109,7 +109,7 @@ test "errfunc returning non-zero causes ZLOB_ABORTED" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Try to glob with errfunc that returns non-zero
-    const pattern = try allocator.dupeZ(u8, "*/*");
+    const pattern = try allocator.dupeSentinel(u8, "*/*", 0);
     defer allocator.free(pattern);
 
     var pzlob: c_lib.zlob_t = undefined;
@@ -138,7 +138,7 @@ test "ZLOB_ERR flag causes abort on directory error" {
 
     // Remove read permissions
     var perm_buf: [256:0]u8 = undefined;
-    const perm_path = try std.fmt.bufPrintZ(&perm_buf, "{s}", .{restricted_dir});
+    const perm_path = try std.fmt.bufPrintSentinel(&perm_buf, "{s}", .{restricted_dir}, 0);
     const chmod_result = c.chmod(perm_path.ptr, 0o000);
     defer _ = c.chmod(perm_path.ptr, 0o755);
 
@@ -152,7 +152,7 @@ test "ZLOB_ERR flag causes abort on directory error" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Try to glob with ZLOB_ERR flag
-    const pattern = try allocator.dupeZ(u8, "*/*");
+    const pattern = try allocator.dupeSentinel(u8, "*/*", 0);
     defer allocator.free(pattern);
 
     var pzlob: c_lib.zlob_t = undefined;
@@ -177,7 +177,7 @@ test "errfunc NULL with ZLOB_ERR still aborts" {
     std.Io.Dir.cwd().createDir(io, restricted_dir, .default_dir) catch {};
 
     var perm_buf: [256:0]u8 = undefined;
-    const perm_path = try std.fmt.bufPrintZ(&perm_buf, "{s}", .{restricted_dir});
+    const perm_path = try std.fmt.bufPrintSentinel(&perm_buf, "{s}", .{restricted_dir}, 0);
     const chmod_result = c.chmod(perm_path.ptr, 0o000);
     defer _ = c.chmod(perm_path.ptr, 0o755);
 
@@ -189,7 +189,7 @@ test "errfunc NULL with ZLOB_ERR still aborts" {
     try std.process.setCurrentPath(io, test_dir);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*/*");
+    const pattern = try allocator.dupeSentinel(u8, "*/*", 0);
     defer allocator.free(pattern);
 
     var pzlob: c_lib.zlob_t = undefined;

@@ -831,7 +831,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             // buffer free - read more from current directory.
             // Short by 8: see direntNameLen. When the previous read already
             // proved EOF, skip the call that would only return 0.
-            const cap = self.getdents_buffer.len - 8;
+            const cap: c_uint = @intCast(@min(self.getdents_buffer.len - 8, std.math.maxInt(c_int)));
             const bytes_read: usize = if (self.current_eof)
                 0
             else
@@ -2011,7 +2011,7 @@ pub const DirIterator = struct {
             const i = iter * vec_len;
             const chunk: Vec = d_name[i..][0..vec_len].*;
             const eq = chunk == zeros;
-            const MaskInt = std.meta.Int(.unsigned, vec_len);
+            const MaskInt = @Int(.unsigned, vec_len);
             const mask = @as(MaskInt, @bitCast(eq));
             if (mask != 0) {
                 return d_name[0 .. i + @ctz(mask)];

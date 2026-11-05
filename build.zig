@@ -5,6 +5,14 @@ const zon = @import("build.zig.zon");
 const version_string: []const u8 = zon.version;
 const version = std.SemanticVersion.parse(version_string) catch @compileError("Invalid version in build.zig.zon");
 
+fn forwardRunArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        run.addPassthruArgs();
+    } else if (b.args) |args| {
+        run.addArgs(args);
+    }
+}
+
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
 // executed by an external runner. The functions in `std.Build` implement a DSL
@@ -100,13 +108,26 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Translate the public header once for flags and C ABI checks.
+    const c_header = b.addTranslateC(.{
+        .root_source_file = b.path("include/zlob.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = use_libc,
+    });
+    if (!use_libc) {
+        // Keep Clang's stdint.h self-contained when there is no target libc.
+        c_header.defineCMacro("__STDC_HOSTED__", "0");
+    }
+    const c_header_mod = c_header.createModule();
+
     // Flags module (canonical source of all ZLOB_* constants)
     const flags_mod = b.addModule("zlob_flags", .{
         .root_source_file = srcPath(b, src_dir, "flags.zig"),
         .target = target,
         .link_libc = use_libc,
+        .imports = &.{.{ .name = "zlob_header", .module = c_header_mod }},
     });
-    flags_mod.addIncludePath(b.path("include"));
 
     // zlob core module (for internal use - the actual implementation in zlob.zig)
     const zlob_core_mod = b.addModule("zlob_core", .{
@@ -117,10 +138,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "walker", .module = walker_mod },
             .{ .name = "zlob_flags", .module = flags_mod },
             .{ .name = "dirent", .module = dirent_mod },
+            .{ .name = "zlob_header", .module = c_header_mod },
         },
     });
-    // Add include path for C header imports (flags.zig uses @cImport)
-    zlob_core_mod.addIncludePath(b.path("include"));
 
     // Main zlob module (public API via lib.zig)
     const mod = b.addModule("zlob", .{
@@ -149,9 +169,9 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "zlob", .module = zlob_core_mod },
             .{ .name = "zlob_flags", .module = flags_mod },
+            .{ .name = "zlob_header", .module = c_header_mod },
         },
     });
-    c_lib_mod.addIncludePath(b.path("include"));
 
     // Test utilities module (shared helpers for tests)
     const test_utils_mod = b.addModule("test_utils", .{
@@ -180,10 +200,10 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "zlob", .module = zlob_core_mod },
                     .{ .name = "zlob_flags", .module = flags_mod },
+                    .{ .name = "zlob_header", .module = c_header_mod },
                 },
             }),
         });
-        c_lib.root_module.addIncludePath(b.path("include"));
         // Install C header
         c_lib.installHeader(b.path("include/zlob.h"), "zlob.h");
         b.installArtifact(c_lib);
@@ -203,10 +223,10 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zlob", .module = zlob_core_mod },
                 .{ .name = "zlob_flags", .module = flags_mod },
+                .{ .name = "zlob_header", .module = c_header_mod },
             },
         }),
     });
-    c_lib_static.root_module.addIncludePath(b.path("include"));
     // Install C header alongside static library when dynamic lib is skipped
     if (static_only) {
         c_lib_static.installHeader(b.path("include/zlob.h"), "zlob.h");
@@ -257,9 +277,7 @@ pub fn build(b: *std.Build) void {
         run_step.dependOn(&run_cmd.step);
         run_cmd.step.dependOn(b.getInstallStep());
 
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
+        forwardRunArgs(b, run_cmd);
     }
 
     const test_step = b.step("test", "Run tests");
@@ -311,10 +329,6 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "dirent", .module = dirent_mod },
             },
         });
-        // Add include path for C header imports (flags.zig uses @cImport)
-        test_mod.addIncludePath(b.path("include"));
-        test_mod.addIncludePath(b.path("include"));
-
         const test_exe = b.addTest(.{
             .root_module = test_mod,
         });
@@ -370,18 +384,14 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         });
+        const tls_test_options = b.addOptions();
+        tls_test_options.addOptionPath("consumer_path", dlopen_consumer.getEmittedBin());
+        tls_test_mod.addOptions("build_options", tls_test_options);
         const tls_test = b.addTest(.{
             .root_module = tls_test_mod,
         });
 
         const run_tls_test = b.addRunArtifact(tls_test);
-        // Point the test at the installed consumer .so. The zig test
-        // runner owns argv, so env var is the cleanest channel.
-        run_tls_test.step.dependOn(b.getInstallStep());
-        run_tls_test.setEnvironmentVariable(
-            "ZLOB_DLOPEN_CONSUMER",
-            b.getInstallPath(.lib, "libdlopen_consumer.so"),
-        );
         test_step.dependOn(&run_tls_test.step);
 
         // Symbol-level check: scan libzlob.a for any TLS symbol bigger
@@ -395,15 +405,13 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         });
+        const tls_budget_options = b.addOptions();
+        tls_budget_options.addOptionPath("archive_path", c_lib_static.getEmittedBin());
+        tls_budget_mod.addOptions("build_options", tls_budget_options);
         const tls_budget_test = b.addTest(.{
             .root_module = tls_budget_mod,
         });
         const run_tls_budget = b.addRunArtifact(tls_budget_test);
-        run_tls_budget.step.dependOn(b.getInstallStep());
-        run_tls_budget.setEnvironmentVariable(
-            "ZLOB_STATIC_ARCHIVE",
-            b.getInstallPath(.lib, "libzlob.a"),
-        );
         test_step.dependOn(&run_tls_budget.step);
     }
 
@@ -520,9 +528,7 @@ pub fn build(b: *std.Build) void {
             // libc comparison run step
             const compare_libc_cmd = b.addRunArtifact(compare_libc);
             compare_libc_cmd.step.dependOn(b.getInstallStep());
-            if (b.args) |args| {
-                compare_libc_cmd.addArgs(args);
-            }
+            forwardRunArgs(b, compare_libc_cmd);
             const compare_libc_step = b.step("compare-libc", "Compare SIMD glob vs libc glob()");
             compare_libc_step.dependOn(&compare_libc_cmd.step);
         }

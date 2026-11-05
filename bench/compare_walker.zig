@@ -42,7 +42,7 @@ fn runBenchmark(io: std.Io, allocator: std.mem.Allocator, test_path: []const u8,
     const iterations: usize = 10;
 
     std.debug.print("{s}\n", .{name});
-    std.debug.print("{s}\n", .{"-" ** 50});
+    std.debug.print("{s}\n", .{@as([50]u8, @splat('-'))});
 
     // Verify directory exists
     std.Io.Dir.cwd().access(io, test_path, .{}) catch {

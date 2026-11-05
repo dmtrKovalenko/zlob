@@ -18,34 +18,19 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 
-const c = @cImport({
-    @cInclude("dlfcn.h");
-    @cInclude("stdlib.h");
-});
+const c = std.c;
 
 test "dlopen consumer shared library does not exhaust static TLS block" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     if (builtin.abi == .musl) return error.SkipZigTest;
 
-    // The build step sets ZLOB_DLOPEN_CONSUMER to the consumer .so's path.
-    // Tests don't receive argv (the test runner owns it for --listen=...),
-    // so an env var is the cleanest way to pass the path through.
-    const lib_path_c = c.getenv("ZLOB_DLOPEN_CONSUMER") orelse {
-        std.debug.print(
-            "ZLOB_DLOPEN_CONSUMER not set; the build step should pass the consumer .so path\n",
-            .{},
-        );
-        return error.MissingLibPath;
-    };
-    const lib_path = std.mem.sliceTo(lib_path_c, 0);
-
-    const handle = c.dlopen(lib_path_c, c.RTLD_NOW | c.RTLD_LOCAL);
-    if (handle == null) {
+    const lib_path = @import("build_options").consumer_path;
+    const handle = c.dlopen(lib_path ++ "\x00", .{ .NOW = true }) orelse {
         const err = c.dlerror();
         const msg = if (err) |e| std.mem.sliceTo(e, 0) else "(no dlerror)";
         std.debug.print("dlopen({s}) failed: {s}\n", .{ lib_path, msg });
         return error.DlopenFailed;
-    }
+    };
     defer _ = c.dlclose(handle);
 
     // Resolve and call the consumer symbol. This forces the loader to bind

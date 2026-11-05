@@ -492,7 +492,7 @@ test "ZLOB_BRACE filesystem - simple extension alternatives" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*.{toml,lock}");
+    const pattern = try allocator.dupeSentinel(u8, "*.{toml,lock}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -521,7 +521,7 @@ test "ZLOB_BRACE filesystem - wildcard with extension alternatives" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "config.{yaml,yml}");
+    const pattern = try allocator.dupeSentinel(u8, "config.{yaml,yml}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -550,7 +550,7 @@ test "ZLOB_BRACE filesystem - directory alternatives" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "{src,lib}/*.c");
+    const pattern = try allocator.dupeSentinel(u8, "{src,lib}/*.c", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -578,7 +578,7 @@ test "ZLOB_BRACE filesystem - C source and header files" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "src/*.{c,h}");
+    const pattern = try allocator.dupeSentinel(u8, "src/*.{c,h}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -615,7 +615,7 @@ test "ZLOB_BRACE filesystem - recursive with extension alternatives" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "**/*.{c,h}");
+    const pattern = try allocator.dupeSentinel(u8, "**/*.{c,h}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -654,7 +654,7 @@ test "ZLOB_BRACE filesystem - recursive with directory alternatives" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "{src,lib}/**/*.c");
+    const pattern = try allocator.dupeSentinel(u8, "{src,lib}/**/*.c", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -683,7 +683,7 @@ test "ZLOB_BRACE filesystem - complex pattern with multiple brace groups" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "{src,lib}/**/*.{c,h}");
+    const pattern = try allocator.dupeSentinel(u8, "{src,lib}/**/*.{c,h}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -715,7 +715,7 @@ test "ZLOB_BRACE filesystem - single alternative (should still work)" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*.{json}");
+    const pattern = try allocator.dupeSentinel(u8, "*.{json}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -743,7 +743,7 @@ test "ZLOB_BRACE filesystem - many alternatives" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*.{json,yaml,yml,toml,lock,md,txt,css,js,ts}");
+    const pattern = try allocator.dupeSentinel(u8, "*.{json,yaml,yml,toml,lock,md,txt,css,js,ts}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -771,7 +771,7 @@ test "ZLOB_BRACE filesystem - no matches returns NOMATCH" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*.{xyz,abc,nonexistent}");
+    const pattern = try allocator.dupeSentinel(u8, "*.{xyz,abc,nonexistent}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -798,7 +798,7 @@ test "ZLOB_BRACE filesystem - without flag treats braces as literal" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Without ZLOB_BRACE, {toml,lock} is treated as literal
-    const pattern = try allocator.dupeZ(u8, "*.{toml,lock}");
+    const pattern = try allocator.dupeSentinel(u8, "*.{toml,lock}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -829,7 +829,7 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_MARK" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "{src,lib,docs}");
+    const pattern = try allocator.dupeSentinel(u8, "{src,lib,docs}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -862,7 +862,7 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_NOSORT" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*.{toml,lock,json}");
+    const pattern = try allocator.dupeSentinel(u8, "*.{toml,lock,json}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -890,7 +890,7 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_NOCHECK" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*.{nonexistent1,nonexistent2}");
+    const pattern = try allocator.dupeSentinel(u8, "*.{nonexistent1,nonexistent2}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -920,7 +920,7 @@ test "ZLOB_BRACE filesystem - combined with ZLOB_ONLYDIR" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Pattern that could match both files and directories
-    const pattern = try allocator.dupeZ(u8, "{src,lib,docs,README.md}/");
+    const pattern = try allocator.dupeSentinel(u8, "{src,lib,docs,README.md}/", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -955,7 +955,7 @@ test "ZLOB_BRACE filesystem - with ZLOB_APPEND" {
     var pzlob: zlob.zlob_t = undefined;
 
     // First glob: get .toml files
-    const pattern1 = try allocator.dupeZ(u8, "*.toml");
+    const pattern1 = try allocator.dupeSentinel(u8, "*.toml", 0);
     defer allocator.free(pattern1);
     const result1 = c_lib.zlob(pattern1.ptr, zlob_flags.ZLOB_BRACE, null, &pzlob);
     try testing.expectEqual(0, result1);
@@ -963,7 +963,7 @@ test "ZLOB_BRACE filesystem - with ZLOB_APPEND" {
     try testing.expectEqual(1, first_count); // Cargo.toml
 
     // Second glob: append .lock files
-    const pattern2 = try allocator.dupeZ(u8, "*.lock");
+    const pattern2 = try allocator.dupeSentinel(u8, "*.lock", 0);
     defer allocator.free(pattern2);
     const result2 = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_BRACE | zlob_flags.ZLOB_APPEND, null, &pzlob);
     defer c_lib.zlobfree(&pzlob);
@@ -993,7 +993,7 @@ test "ZLOB_BRACE filesystem - many files with brace pattern" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Pattern that will scan many directories
-    const pattern = try allocator.dupeZ(u8, "**/*.{c,h,txt,md,json,yaml,yml,toml,lock,css,js,ts}");
+    const pattern = try allocator.dupeSentinel(u8, "**/*.{c,h,txt,md,json,yaml,yml,toml,lock,css,js,ts}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1025,7 +1025,7 @@ test "ZLOB_BRACE filesystem - Cargo pattern (Rust project)" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "Cargo.{toml,lock}");
+    const pattern = try allocator.dupeSentinel(u8, "Cargo.{toml,lock}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1054,7 +1054,7 @@ test "ZLOB_BRACE filesystem - documentation pattern" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "**/*.{md,txt}");
+    const pattern = try allocator.dupeSentinel(u8, "**/*.{md,txt}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1082,7 +1082,7 @@ test "ZLOB_BRACE filesystem - web assets pattern" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*.{js,ts,css}");
+    const pattern = try allocator.dupeSentinel(u8, "*.{js,ts,css}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1110,7 +1110,7 @@ test "ZLOB_BRACE filesystem - config files pattern" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*.{json,yaml,yml,toml}");
+    const pattern = try allocator.dupeSentinel(u8, "*.{json,yaml,yml,toml}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1138,7 +1138,7 @@ test "ZLOB_BRACE filesystem - header files in multiple directories" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "{src,lib,include}/**/*.h");
+    const pattern = try allocator.dupeSentinel(u8, "{src,lib,include}/**/*.h", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1176,7 +1176,7 @@ test "ZLOB_BRACE filesystem - wildcard dir with brace extension" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*/*.{c,h}");
+    const pattern = try allocator.dupeSentinel(u8, "*/*.{c,h}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1218,7 +1218,7 @@ test "ZLOB_BRACE filesystem - literal prefix with wildcard dir and brace extensi
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "src/*/*.{c,h}");
+    const pattern = try allocator.dupeSentinel(u8, "src/*/*.{c,h}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1247,7 +1247,7 @@ test "ZLOB_BRACE filesystem - question mark wildcard with brace extension" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "src/????.{c,h}");
+    const pattern = try allocator.dupeSentinel(u8, "src/????.{c,h}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1276,7 +1276,7 @@ test "ZLOB_BRACE filesystem - multiple wildcard dirs with brace extension" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*/*/*.{c,h}");
+    const pattern = try allocator.dupeSentinel(u8, "*/*/*.{c,h}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1307,7 +1307,7 @@ test "ZLOB_BRACE filesystem - brace dir AND wildcard dir AND brace extension" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "{src,lib}/*/*.{c,h}");
+    const pattern = try allocator.dupeSentinel(u8, "{src,lib}/*/*.{c,h}", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;
@@ -1389,7 +1389,7 @@ test "ZLOB_BRACE filesystem - absolute path with recursive brace expansion" {
     // Use absolute path with braces and **: /tmp/test_brace/{src,lib}/**/*.c
     // This exercises the globRecursive brace-parsed start_dir construction
     // which must preserve the leading "/" for absolute paths.
-    const pattern = try allocator.dupeZ(u8, "/tmp/test_brace/{src,lib}/**/*.c");
+    const pattern = try allocator.dupeSentinel(u8, "/tmp/test_brace/{src,lib}/**/*.c", 0);
     defer allocator.free(pattern);
 
     var pzlob: zlob.zlob_t = undefined;

@@ -361,7 +361,7 @@ fn detectPatternTemplate(pattern: []const u8, has_wildcards: bool) struct { temp
 /// Compile a bracket expression into a 256-bit bitmap
 fn compileBracketBitmap(pattern: []const u8, bracket_start: usize) ?BracketBitmap {
     var bitmap = BracketBitmap{
-        .bitmap = [_]u8{0} ** 32,
+        .bitmap = @splat(0),
         .negated = false,
     };
 
@@ -450,7 +450,7 @@ pub fn indexOfCharSIMD(s: []const u8, needle: u8) ?usize {
 
     if (s.len >= vec_len) {
         const Vec = @Vector(vec_len, u8);
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const MaskInt = @Int(.unsigned, vec_len);
         const needle_vec: Vec = @splat(needle);
         var i: usize = 0;
         while (i + vec_len <= s.len) : (i += vec_len) {
@@ -519,7 +519,7 @@ const rev_scan_vec_len: usize = 16;
 inline fn lastIndexOfImpl(s: []const u8, a: u8, b: ?u8) ?usize {
     const V = rev_scan_vec_len;
     const Vec = @Vector(V, u8);
-    const MaskInt = std.meta.Int(.unsigned, V);
+    const MaskInt = @Int(.unsigned, V);
 
     if (s.len >= V) {
         const a_vec: Vec = @splat(a);
@@ -631,7 +631,7 @@ pub fn hasWildcardsBasic(s: []const u8) bool {
 
     if (s.len >= vec_len) {
         const Vec = @Vector(vec_len, u8);
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const MaskInt = @Int(.unsigned, vec_len);
         const star_vec: Vec = @splat('*');
         const question_vec: Vec = @splat('?');
         const bracket_vec: Vec = @splat('[');
@@ -667,7 +667,7 @@ pub fn containsExtglob(s: []const u8) bool {
 
     if (s.len >= vec_len + 1) {
         const Vec = @Vector(vec_len, u8);
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const MaskInt = @Int(.unsigned, vec_len);
         const paren_vec: Vec = @splat('(');
 
         // Start from index 1 since we need to check s[i-1]
@@ -739,7 +739,7 @@ pub fn hasWildcards(s: []const u8, flags: ZlobFlags) bool {
 
     if (s.len >= vec_len) {
         const Vec = @Vector(vec_len, u8);
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const MaskInt = @Int(.unsigned, vec_len);
         const star_vec: Vec = @splat('*');
         const question_vec: Vec = @splat('?');
         const bracket_vec: Vec = @splat('[');

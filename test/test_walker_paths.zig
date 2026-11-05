@@ -5,7 +5,7 @@ const testing = std.testing;
 const walker = @import("walker");
 
 const seg_len = 60;
-const seg = "d" ** seg_len;
+const seg: [seg_len]u8 = @splat('d');
 
 const Tree = struct {
     io: std.Io,
@@ -69,8 +69,8 @@ fn deepSiblingsCase(comptime be: walker.Backend) !void {
     defer tree.deinit();
 
     const prefix = seg ++ "/" ++ seg ++ "/" ++ seg ++ "/" ++ seg;
-    const a_dir = prefix ++ "/" ++ "a" ** seg_len;
-    const b_dir = prefix ++ "/" ++ "b" ** seg_len;
+    const a_dir = prefix ++ "/" ++ @as([seg_len]u8, @splat('a'));
+    const b_dir = prefix ++ "/" ++ @as([seg_len]u8, @splat('b'));
 
     try tree.mkdirs(a_dir);
     try tree.mkdirs(b_dir);

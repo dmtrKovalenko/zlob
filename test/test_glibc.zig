@@ -109,7 +109,7 @@ test "recursive glob - **/*.c finds all C files" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "**/*.c");
+    const pattern = try allocator.dupeSentinel(u8, "**/*.c", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -143,7 +143,7 @@ test "recursive glob - dir1/**/*.c finds C files in dir1" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "dir1/**/*.c");
+    const pattern = try allocator.dupeSentinel(u8, "dir1/**/*.c", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -175,7 +175,7 @@ test "recursive glob - **/*.h finds all header files" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "**/*.h");
+    const pattern = try allocator.dupeSentinel(u8, "**/*.h", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -207,7 +207,7 @@ test "recursive glob - dir2/**/*.c finds files in dir2 subdirectories" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "dir2/**/*.c");
+    const pattern = try allocator.dupeSentinel(u8, "dir2/**/*.c", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -239,7 +239,7 @@ test "recursive glob - **/*.txt finds all text files" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "**/*.txt");
+    const pattern = try allocator.dupeSentinel(u8, "**/*.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -271,7 +271,7 @@ test "recursive glob - no matches returns ZLOB_NOMATCH" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "**/*.nonexistent");
+    const pattern = try allocator.dupeSentinel(u8, "**/*.nonexistent", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -304,7 +304,7 @@ test "recursive glob - ZLOB_APPEND correctly accumulates results" {
     var pzlob: glob.zlob_t = undefined;
 
     // First glob for .c files
-    const pattern1 = try allocator.dupeZ(u8, "**/*.c");
+    const pattern1 = try allocator.dupeSentinel(u8, "**/*.c", 0);
     defer allocator.free(pattern1);
     const result1 = c_lib.zlob(pattern1.ptr, zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     try testing.expectEqual(0, result1);
@@ -312,7 +312,7 @@ test "recursive glob - ZLOB_APPEND correctly accumulates results" {
     try testing.expectEqual(8, first_count);
 
     // Second glob for .h files with ZLOB_APPEND
-    const pattern2 = try allocator.dupeZ(u8, "**/*.h");
+    const pattern2 = try allocator.dupeSentinel(u8, "**/*.h", 0);
     defer allocator.free(pattern2);
     const result2 = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_APPEND | zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE, null, &pzlob);
     defer c_lib.zlobfree(&pzlob);
@@ -342,7 +342,7 @@ test "recursive glob - empty pattern component" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "**/");
+    const pattern = try allocator.dupeSentinel(u8, "**/", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -379,7 +379,7 @@ test "glibc compatible - ** treated as * without ZLOB_DOUBLESTAR_RECURSIVE" {
     //   - Only matches: dir1/file1.c, dir2/file1.c, dir3/... (one level deep, like */*.c)
     //   - Does NOT match: file1.c (no directory component for **)
     //   - Does NOT match: dir1/subdir1/file1.c (too deep)
-    const pattern = try allocator.dupeZ(u8, "**/*.c");
+    const pattern = try allocator.dupeSentinel(u8, "**/*.c", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;

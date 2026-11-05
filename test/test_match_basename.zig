@@ -408,7 +408,7 @@ test "basename fs: MAGCHAR output flag reflects the user's pattern" {
     const zlob_core = @import("zlob_core");
     var pzlob: zlob_core.zlob_t = undefined;
     pzlob.zlo_flags = 0;
-    const pattern_z = try testing.allocator.dupeZ(u8, "b.txt");
+    const pattern_z = try testing.allocator.dupeSentinel(u8, "b.txt", 0);
     defer testing.allocator.free(pattern_z);
     _ = try zlob_core.globAt(testing.allocator, t.io, t.abs, pattern_z.ptr, @bitCast(@as(u32, BASENAME)), null, &pzlob);
     defer zlob_core.globfreeInternal(testing.allocator, &pzlob);

@@ -210,7 +210,7 @@ pub fn main() !void {
 
     benchmark("simdFindChar 512 bytes (needle at end)", struct {
         fn f() ?usize {
-            return fnmatch.simdFindChar("a" ** 511 ++ "z", 'z');
+            return fnmatch.simdFindChar(@as([511]u8, @splat('a')) ++ "z", 'z');
         }
     }.f);
 

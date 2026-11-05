@@ -868,7 +868,7 @@ test "walk error callback: receives path and errno, nonzero return aborts" {
     try t.write("locked/hidden.txt", "y");
 
     var path_buf: [512:0]u8 = undefined;
-    const locked_path = try std.fmt.bufPrintZ(&path_buf, "{s}/locked", .{t.root});
+    const locked_path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/locked", .{t.root}, 0);
     if (std.c.chmod(locked_path.ptr, 0) != 0) return error.SkipZigTest;
     defer _ = std.c.chmod(locked_path.ptr, 0o755);
     // Root opens mode-000 dirs anyway; the test needs a real EACCES.
@@ -930,7 +930,7 @@ test "walk glob pattern prunes: out-of-scope unreadable dir is never opened" {
     try t.write("locked/secret.rs", "");
 
     var path_buf: [512:0]u8 = undefined;
-    const locked_path = try std.fmt.bufPrintZ(&path_buf, "{s}/locked", .{t.root});
+    const locked_path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/locked", .{t.root}, 0);
     if (std.c.chmod(locked_path.ptr, 0) != 0) return error.SkipZigTest;
     defer _ = std.c.chmod(locked_path.ptr, 0o755);
     // Root can open mode-000 dirs anyway — the pruning proof needs EACCES.

@@ -38,7 +38,7 @@ pub fn main() !void {
         },
         .{
             .name = "Very long string (512 bytes)",
-            .haystack = "a" ** 511 ++ "z",
+            .haystack = @as([511]u8, @splat('a')) ++ "z",
             .needle = 'z',
         },
     };

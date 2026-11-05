@@ -222,7 +222,7 @@ pub fn matchPathIndicesAtCompiled(allocator: std.mem.Allocator, base_path: []con
 /// Returns `error.Aborted` if `base_path` is not an absolute path (doesn't start with '/').
 pub fn matchAt(allocator: std.mem.Allocator, io: std.Io, base_path: []const u8, pattern: []const u8, flags_param: anytype) !?ZlobResults {
     const zflags = flagsToZlobFlags(flags_param);
-    const pattern_z = try allocator.dupeZ(u8, pattern);
+    const pattern_z = try allocator.dupeSentinel(u8, pattern, 0);
     defer allocator.free(pattern_z);
 
     var pzlob: zlob_t = undefined;
@@ -265,8 +265,8 @@ fn flagsToZlobFlags(flags_param: anytype) ZlobFlags {
         // anonymous-to-named struct coercion which is brittle across Zig
         // versions, especially for empty literals.
         var gf = ZlobFlags{};
-        inline for (@typeInfo(T).@"struct".fields) |field| {
-            @field(gf, field.name) = @field(flags_param, field.name);
+        inline for (comptime std.meta.fieldNames(T)) |name| {
+            @field(gf, name) = @field(flags_param, name);
         }
         return gf;
     } else {

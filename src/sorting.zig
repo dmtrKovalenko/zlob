@@ -10,7 +10,7 @@ fn simdStrCmp(a: []const u8, b: []const u8) std.math.Order {
 
     if (min_len >= vec_len) {
         const Vec = @Vector(vec_len, u8);
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const MaskInt = @Int(.unsigned, vec_len);
         const all_ones: MaskInt = @as(MaskInt, 0) -% 1;
 
         var i: usize = 0;

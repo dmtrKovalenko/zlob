@@ -7,9 +7,7 @@ const mem = std.mem;
 const ZlobFlags = zlob_flags.ZlobFlags;
 const pattern_context = zlob_impl.pattern_context;
 
-const c_zlob = @cImport({
-    @cInclude("zlob.h");
-});
+const c_zlob = @import("zlob_header");
 
 // zig just added a ton of bullshit to the default std options which causes
 // a lot of different behavior changes for the standard C library this is

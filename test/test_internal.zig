@@ -60,7 +60,7 @@ test "SIMD - empty string" {
 }
 
 test "SIMD - long string with early match" {
-    const haystack = "x" ++ "a" ** 100;
+    const haystack = "x" ++ @as([100]u8, @splat('a'));
     const needle = 'x';
 
     const result = glob.simdFindChar(haystack, needle);
@@ -69,7 +69,7 @@ test "SIMD - long string with early match" {
 }
 
 test "SIMD - long string with late match" {
-    const haystack = "a" ** 100 ++ "x";
+    const haystack = @as([100]u8, @splat('a')) ++ "x";
     const needle = 'x';
 
     const result = glob.simdFindChar(haystack, needle);
