@@ -221,6 +221,10 @@ pub const Options = struct {
     /// else the default `~/.config/git/ignore`; a relative path is relative
     /// to the worktree root). Lowest precedence of all.
     git_global: bool = true,
+    /// Skip rules from ".gitignore" when respect_git is set.
+    skip_gitignore: bool = false,
+    /// Skip rules from ".ignore" when respect_git is set.
+    skip_dot_ignore: bool = false,
     /// Report directory entries (directories are traversed either way).
     report_dirs: bool = true,
     /// Glob filter: only entries whose root-relative path matches are reported

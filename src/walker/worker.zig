@@ -375,7 +375,9 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     var ignore: ?*IgnoreNode = task.ignore;
     var own_ignore = false;
     defer if (own_ignore) ignore.?.release(sh.allocator);
-    if (sh.options.respect_git and (w.saw_gitignore or w.saw_ignore or (w.dot_git != null and sh.git.enabled()))) {
+    const load_gitignore = w.saw_gitignore and !sh.options.skip_gitignore;
+    const load_dot_ignore = w.saw_ignore and !sh.options.skip_dot_ignore;
+    if (sh.options.respect_git and (load_gitignore or load_dot_ignore or (w.dot_git != null and sh.git.enabled()))) {
         @branchHint(.unlikely);
         if (try loadIgnoreNode(sh, handle, task, w, prefix_len)) |node| {
             ignore = node;
@@ -666,8 +668,8 @@ fn loadIgnoreNode(
     // Read both files (whichever exist) and hand them straight to the
     // parser. `.ignore` is second so its patterns get higher indices and
     // win ties — ripgrep precedence, no concat needed.
-    const git = if (w.saw_gitignore) readSmallFile(sh, handle, ".gitignore") else null;
-    const ign = if (w.saw_ignore) readSmallFile(sh, handle, ".ignore") else null;
+    const git = if (w.saw_gitignore and !sh.options.skip_gitignore) readSmallFile(sh, handle, ".gitignore") else null;
+    const ign = if (w.saw_ignore and !sh.options.skip_dot_ignore) readSmallFile(sh, handle, ".ignore") else null;
 
     const dir_offset = if (task.rel.len > 0) task.rel.len + 1 else 0;
     return parseIgnoreNode(sh, task.ignore, sh.ignore_rules.scope_prefix.len + dir_offset, repo, git, ign);
@@ -759,8 +761,8 @@ pub fn loadParentIgnoreRules(sh: *SharedWorkerState) WalkError!void {
         defer if (handle) |h| closeHandle(h, sh.io);
 
         const repo = if (offset == 0 and sh.git.enabled()) sh.git.load(dir, .unknown) else git_excludes.Docs{};
-        const git = if (handle) |h| readSmallFile(sh, h, ".gitignore") else null;
-        const ign = if (handle) |h| readSmallFile(sh, h, ".ignore") else null;
+        const git = if (handle != null and !sh.options.skip_gitignore) readSmallFile(sh, handle.?, ".gitignore") else null;
+        const ign = if (handle != null and !sh.options.skip_dot_ignore) readSmallFile(sh, handle.?, ".ignore") else null;
         if (try parseIgnoreNode(sh, parents, offset, repo, git, ign)) |node| {
             if (parents) |parent| parent.release(sh.allocator);
             parents = node;
