@@ -1425,7 +1425,7 @@ test "ZLOB_ALTDIRFUNC - DT_UNKNOWN entries are probed instead of skipped" {
             dirent: c_lib.zlob_dirent_t = undefined,
             in_use: bool = false,
         };
-        var slots: [8]State = [_]State{.{}} ** 8;
+        var slots: [8]State = @splat(.{});
         var refused_opens: usize = 0;
 
         fn opendir(path: [*:0]const u8) callconv(.c) ?*anyopaque {
@@ -1469,7 +1469,7 @@ test "ZLOB_ALTDIRFUNC - DT_UNKNOWN entries are probed instead of skipped" {
     // Non-final wildcard: "*" must descend into src and test although they
     // are reported as DT_UNKNOWN, and must not abort on root.txt.
     {
-        const pattern = try allocator.dupeZ(u8, "*/*.zig");
+        const pattern = try allocator.dupeSentinel(u8, "*/*.zig", 0);
         defer allocator.free(pattern);
 
         var pzlob = glob.zlob_t{
@@ -1510,7 +1510,7 @@ test "ZLOB_ALTDIRFUNC - DT_UNKNOWN entries are probed instead of skipped" {
 
     // Literal non-final component with a DT_UNKNOWN directory.
     {
-        const pattern = try allocator.dupeZ(u8, "src/*.zig");
+        const pattern = try allocator.dupeSentinel(u8, "src/*.zig", 0);
         defer allocator.free(pattern);
 
         var pzlob = glob.zlob_t{

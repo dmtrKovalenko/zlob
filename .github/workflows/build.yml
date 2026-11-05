@@ -35,7 +35,7 @@ jobs:
 
       - name: Rust clippy
         working-directory: rust
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
         run: make test

@@ -1143,7 +1143,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         const follow = self.config.follow_symlinks;
         const mark = self.config.sort_marks_dirs;
         const chunk = self.getdents_buffer.len;
-        const cap = chunk - 8;
+        const cap: c_uint = @intCast(chunk - 8);
 
         while (true) {
             // Reserve a full chunk but hand the kernel 8 bytes less: the
@@ -2124,7 +2124,7 @@ pub const DirIterator = struct {
         path_z[path.len] = 0;
 
         const dir = c.opendir(&path_z) orelse {
-            if (c._errno().* == @intFromEnum(c.E.NOTDIR)) return error.NotDir;
+            if (c._errno().* == @backingInt(c.E.NOTDIR)) return error.NotDir;
             return error.AccessDenied;
         };
 

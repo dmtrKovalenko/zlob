@@ -12,7 +12,6 @@
 
 const std = @import("std");
 const mem = std.mem;
-const intFromEnum = @import("enum_compat.zig").intFromEnum;
 const pattern_context_mod = @import("pattern_context.zig");
 const suffix_match = @import("suffix_match.zig");
 const flags_mod = @import("zlob_flags");
@@ -452,13 +451,13 @@ const posix_class_bitmaps = blk: {
     const classes = std.meta.tags(PosixCharClass);
     var table: [classes.len][32]u8 = undefined;
     for (classes) |class| {
-        table[intFromEnum(class)] = posixClassBitmap(class);
+        table[@backingInt(class)] = posixClassBitmap(class);
     }
     break :blk table;
 };
 
 fn addPosixClassToBitmap(bitmap: *[32]u8, class_type: PosixCharClass) void {
-    const class_bits: @Vector(32, u8) = posix_class_bitmaps[intFromEnum(class_type)];
+    const class_bits: @Vector(32, u8) = posix_class_bitmaps[@backingInt(class_type)];
     const current: @Vector(32, u8) = bitmap.*;
     bitmap.* = current | class_bits;
 }

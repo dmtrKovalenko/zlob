@@ -1187,7 +1187,7 @@ test "ZLOB_PARALLEL recursive glob matches serial result set" {
     };
     for ([_]u16{ 1, 4, 16 }) |threads| {
         for (patterns) |p| {
-            const pat = try std.fmt.bufPrintZ(&pat_buf, "{s}/{s}", .{ t.root, p });
+            const pat = try std.fmt.bufPrintSentinel(&pat_buf, "{s}/{s}", .{ t.root, p }, 0);
             try expectParallelEqualsSerial(alloc, pat, base, threads);
             try expectParallelEqualsSerial(alloc, pat, base | zlob_flags.ZLOB_MARK, threads);
             try expectParallelEqualsSerial(alloc, pat, base | zlob_flags.ZLOB_PERIOD, threads);
@@ -1251,12 +1251,12 @@ test "ZLOB_PARALLEL errfunc is delivered and can abort" {
     try t.mkdir("locked");
     try t.write("locked/b.c", "");
     var buf: [512:0]u8 = undefined;
-    const locked = try std.fmt.bufPrintZ(&buf, "{s}/locked", .{t.root});
+    const locked = try std.fmt.bufPrintSentinel(&buf, "{s}/locked", .{t.root}, 0);
     try testing.expectEqual(@as(usize, 0), std.os.linux.chmod(locked.ptr, 0));
     defer _ = std.os.linux.chmod(locked.ptr, 0o755);
 
     var pat_buf: [512:0]u8 = undefined;
-    const pat = try std.fmt.bufPrintZ(&pat_buf, "{s}/**/*.c", .{t.root});
+    const pat = try std.fmt.bufPrintSentinel(&pat_buf, "{s}/**/*.c", .{t.root}, 0);
     const base: c_int = zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE | zlob_flags.ZLOB_PARALLEL;
 
     par_errfunc_calls = 0;
@@ -1733,7 +1733,7 @@ test "short-read EOF: DirIterator trust cache stops at a symlink onto another de
     // directory is listed with the start dir's cache in hand; it must still
     // be listed completely.
     var pat_buf: [512:0]u8 = undefined;
-    const pat = try std.fmt.bufPrintZ(&pat_buf, "{s}/l*/link/*", .{t.root});
+    const pat = try std.fmt.bufPrintSentinel(&pat_buf, "{s}/l*/link/*", .{t.root}, 0);
     const alloc = testing.allocator;
     const paths = try globPathsSorted(alloc, pat, 0);
     defer {
@@ -1815,12 +1815,12 @@ test "ZLOB_PARALLEL matches serial on a tree deeper than the depth limit" {
     const base: c_int = zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE;
     var pat_buf: [1100:0]u8 = undefined;
     for ([_][]const u8{ "**/*.c", "**", "**/" }) |p| {
-        const pat = try std.fmt.bufPrintZ(&pat_buf, "{s}/{s}", .{ t.root, p });
+        const pat = try std.fmt.bufPrintSentinel(&pat_buf, "{s}/{s}", .{ t.root, p }, 0);
         try expectParallelEqualsSerial(alloc, pat, base, 4);
         try expectParallelEqualsSerial(alloc, pat, base | zlob_flags.ZLOB_ONLYDIR | zlob_flags.ZLOB_MARK, 4);
     }
     // And the limit really bites: the depth-130 file is not reported.
-    const pat = try std.fmt.bufPrintZ(&pat_buf, "{s}/**/*.c", .{t.root});
+    const pat = try std.fmt.bufPrintSentinel(&pat_buf, "{s}/**/*.c", .{t.root}, 0);
     const serial = try globPathsSorted(alloc, pat, base);
     defer {
         for (serial) |p| alloc.free(p);

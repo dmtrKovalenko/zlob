@@ -138,7 +138,7 @@ test "walkers skip overlong paths and keep entries that fit" {
 
     var dir = try std.Io.Dir.cwd().openDir(tree.io, tree.root, .{});
     defer dir.close(tree.io);
-    const segment = "d" ** 255;
+    const segment: [255]u8 = @splat('d');
     for (0..16) |i| {
         const name = if (i == 15) segment[0..254] else segment[0..];
         try dir.createDir(tree.io, name, .default_dir);

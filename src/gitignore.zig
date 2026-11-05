@@ -463,7 +463,7 @@ pub const GitIgnore = struct {
         errdefer allocator.free(wildcard_gates);
         for (wildcard_patterns, wildcard_gates) |*p, *g| g.* = WildcardGate.init(p);
 
-        var lit_ll = [_]u64{0} ** 8;
+        var lit_ll: [8]u64 = @splat(0);
         {
             var it = literal_dirs.keyIterator();
             while (it.next()) |k| litLlSet(&lit_ll, k.*);
