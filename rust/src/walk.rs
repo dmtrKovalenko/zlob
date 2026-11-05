@@ -57,6 +57,10 @@ bitflags! {
         /// else `~/.config/git/ignore`). Lowest precedence of all ignore sources.
         const NO_GIT_GLOBAL   = 1 << 8;
 
+        /// With [`Self::GITIGNORE`], inherit ancestor ignore rules up to the
+        /// containing Git worktree. An ignored walk root yields no entries.
+        const GITIGNORE_PARENTS = 1 << 9;
+
         /// `ignore`-crate like defaults: [`Self::GITIGNORE`] | [`Self::SKIP_HIDDEN`]
         const RECOMMENDED     = Self::GITIGNORE.bits() | Self::SKIP_HIDDEN.bits();
     }

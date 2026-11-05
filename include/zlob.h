@@ -364,6 +364,7 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
 #define ZLOB_WALK_KEEP_GIT_DIR    (1u << 6) /* with GITIGNORE: still enter .git dirs */
 #define ZLOB_WALK_NO_GIT_EXCLUDE  (1u << 7) /* with GITIGNORE: ignore $GIT_DIR/info/exclude */
 #define ZLOB_WALK_NO_GIT_GLOBAL   (1u << 8) /* with GITIGNORE: ignore core.excludesFile */
+#define ZLOB_WALK_GITIGNORE_PARENTS (1u << 9) /* with GITIGNORE: inherit rules up to the containing worktree */
 
 /** Entry kinds. */
 #define ZLOB_WALK_KIND_UNKNOWN    0

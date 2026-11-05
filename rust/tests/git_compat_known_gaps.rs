@@ -29,47 +29,6 @@ fn walk_kept(root: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// We *DO NOT* support outside of base directories ignore files. The same goes
-/// for a repository's info/exclude and core.excludesFile: they are found
-/// through the `.git` entry of the worktree root, so a walk rooted below it
-/// does not see them either.
-#[test]
-fn parent_gitignore_above_walk_root_is_not_applied() {
-    if !git_available() {
-        eprintln!("skipping: `git` not on PATH");
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join("src/deep")).unwrap();
-    for f in ["src/app.log", "src/keep.rs", "src/deep/d.log"] {
-        fs::write(root.join(f), "x").unwrap();
-    }
-    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
-    git_init(root);
-
-    // git, asked from inside src/, applies the parent rule.
-    let git = kept(&root.join("src"));
-    assert_eq!(
-        git,
-        BTreeSet::from(["keep.rs".to_string()]),
-        "sanity: git should apply the parent .gitignore"
-    );
-
-    // zlob, rooted at src/, never sees it.
-    let walk = walk_kept(&root.join("src"));
-    assert_eq!(
-        walk,
-        BTreeSet::from([
-            "keep.rs".to_string(),
-            "app.log".to_string(),
-            "deep/d.log".to_string(),
-        ]),
-        "expected the documented gap (no parent-directory discovery). If this \
-         now matches git, delete this test and fold the case into git_compat.rs"
-    );
-}
-
 /// matching is always case-sensitive unlike git has a setting for it
 #[test]
 fn matching_is_case_sensitive_even_where_git_is_not() {
