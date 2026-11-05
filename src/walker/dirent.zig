@@ -276,7 +276,7 @@ fn openMountinfo() bool {
     if (mount_fd >= 0) {
         if (mountFdIsOurs()) {
             if (mountFdCurrent()) {
-                var offset: u64 = undefined;
+                var offset: linux.off_t = undefined;
                 const rc = if (@bitSizeOf(usize) == 32)
                     linux.llseek(mount_fd, 0, &offset, linux.SEEK.SET)
                 else
