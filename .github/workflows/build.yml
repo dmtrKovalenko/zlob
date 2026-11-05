@@ -63,14 +63,6 @@ jobs:
       - name: aarch64 via qemu
         run: ./scripts/test_nolibc_threads.sh aarch64-linux-musl qemu-aarch64
 
-      # We can;t rn the actual android targest but we can double check the full compilation
-      - name: Cross-compile the Android targets
-        run: |
-          for t in aarch64-linux-android x86_64-linux-android arm-linux-androideabi; do
-            echo "==> $t"
-            zig build -Dtarget=$t -Doptimize=ReleaseFast -Dstatic-only=true -Dskip-bench=true
-          done
-
   docs-rs:
     name: docs.rs build
     runs-on: ubuntu-latest
@@ -117,6 +109,53 @@ jobs:
           ./zig-out/bin/zlob --version
           ./zig-out/bin/zlob "*.zig" src/
           ./zig-out/bin/zlob "**/*.zig" .
+
+  # Compile only: there are no Android or iOS runners to execute the tests on.
+  mobile:
+    name: Mobile (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            rust_target: aarch64-linux-android
+            name: Android aarch64
+          - target: arm-linux-androideabi
+            rust_target: armv7-linux-androideabi
+            name: Android armv7
+          - target: x86_64-linux-android
+            rust_target: x86_64-linux-android
+            name: Android x86_64
+          - target: aarch64-ios
+            rust_target: aarch64-apple-ios
+            name: iOS aarch64
+          - target: aarch64-ios-simulator
+            rust_target: aarch64-apple-ios-sim
+            name: iOS simulator aarch64
+          - target: x86_64-ios-simulator
+            rust_target: x86_64-apple-ios
+            name: iOS simulator x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Build Zig library
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -Dstatic-only=true -Dskip-bench=true
+
+      - name: Build Rust crate
+        working-directory: rust
+        run: cargo build --target ${{ matrix.rust_target }} --release --lib
 
   cross-compile:
     name: Cross-compile (Linux -> ${{ matrix.name }})
