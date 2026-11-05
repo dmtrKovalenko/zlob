@@ -2133,10 +2133,10 @@ pub const DirIterator = struct {
         @memcpy(path_z[0..path.len], path);
         path_z[path.len] = 0;
 
-        const dir = c.opendir(&path_z);
-        if (dir == null) {
+        const dir = c.opendir(&path_z) orelse {
+            if (c._errno().* == @intFromEnum(c.E.NOTDIR)) return error.NotDir;
             return error.AccessDenied;
-        }
+        };
 
         out.* = .{
             .io = io,

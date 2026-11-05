@@ -1085,7 +1085,7 @@ fn returnPatternAsResult(allocator: std.mem.Allocator, pattern: []const u8, flag
     var single = ResultsList.init(allocator);
     defer single.deinit();
     try single.appendPath(pattern);
-    return finalizeResults(allocator, &single, flags, pzlob);
+    return finalizeResults(allocator, &single, flags, pzlob, true);
 }
 
 const expandTilde = utils.expandTilde;

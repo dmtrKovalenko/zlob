@@ -276,8 +276,12 @@ fn openMountinfo() bool {
     if (mount_fd >= 0) {
         if (mountFdIsOurs()) {
             if (mountFdCurrent()) {
-                const off = linux.lseek(mount_fd, 0, linux.SEEK.SET);
-                if (linux.errno(off) == .SUCCESS) return true;
+                var offset: u64 = undefined;
+                const rc = if (@bitSizeOf(usize) == 32)
+                    linux.llseek(mount_fd, 0, &offset, linux.SEEK.SET)
+                else
+                    linux.lseek(mount_fd, 0, linux.SEEK.SET);
+                if (linux.errno(rc) == .SUCCESS) return true;
             }
             _ = linux.close(mount_fd);
         }

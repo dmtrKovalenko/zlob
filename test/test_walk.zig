@@ -438,11 +438,11 @@ test "sort: collect order equals a full-path pdq sort of the unsorted collect" {
     // Names chosen so that bytes below and above '/' ('-', '.', '_', digits,
     // upper case), prefix relations ("a" vs "a-b" vs "a/b") and deep nesting
     // all appear; the sort must be plain byte order on the full path.
-    const dirs = [_][]const u8{ "a", "a-b", "a.b", "a_b", "A", "a/b", "a/b/c", "a-b/c", "dir0", "dir1", "dir10", "dir2" };
+    const dirs = [_][]const u8{ "a", "a-b", "a.b", "a_b", "B", "a/b", "a/b/c", "a-b/c", "dir0", "dir1", "dir10", "dir2" };
     for (dirs) |d| try t.mkdir(d);
     const files = [_][]const u8{
-        "a/b/c/z.txt", "a/b/c.txt", "a/b.txt", "a.txt",  "a-b/c/x", "a-b/x", "a.b/x", "a_b/x", "A/x",
-        "dir0/f",      "dir1/f",    "dir10/f", "dir2/f", "z",       "Z",     "0",     "~",     " space",
+        "a/b/c/z.txt", "a/b/c.txt", "a/b.txt", "a.txt",  "a-b/c/x", "a-b/x", "a.b/x", "a_b/x", "B/x",
+        "dir0/f",      "dir1/f",    "dir10/f", "dir2/f", "z",       "Y",     "0",     "~",     " space",
     };
     for (files) |f| try t.write(f, "x");
     var name_buf: [64]u8 = undefined;
@@ -617,13 +617,19 @@ test "walk pattern: wildcards match within one path component" {
     try t.write("src/net/deep/d.rs", "");
     try t.write("lib/e.rs", "");
 
-    const Case = struct { pattern: []const u8, want: []const []const u8 };
+    const Case = struct {
+        pattern: []const u8,
+        want: []const []const u8,
+        match_basename: bool = false,
+    };
     const cases = [_]Case{
         // `*` is exactly one component: not src/a.rs, not src/net/deep/d.rs.
         .{ .pattern = "src/*/*.rs", .want = &.{"src/net/b.rs"} },
         // A slash-free pattern only matches at the root.
         .{ .pattern = "*.rs", .want = &.{"top.rs"} },
         .{ .pattern = "*.{rs,c}", .want = &.{"top.rs"} },
+        .{ .pattern = "*.rs", .want = &.{ "lib/e.rs", "src/a.rs", "src/net/b.rs", "src/net/deep/d.rs", "top.rs" }, .match_basename = true },
+        .{ .pattern = "./*.rs", .want = &.{"top.rs"}, .match_basename = true },
         // `?` and bracket classes do not match `/` either.
         .{ .pattern = "src/???/*.[cr]*", .want = &.{ "src/net/b.rs", "src/net/c.c" } },
         // Only `**` spans components.
@@ -638,6 +644,7 @@ test "walk pattern: wildcards match within one path component" {
                 .sort = true,
                 .report_dirs = false,
                 .pattern = case.pattern,
+                .pattern_flags = .{ .brace = true, .doublestar_recursive = true, .match_basename = case.match_basename },
             });
             defer results.deinit();
             testing.expectEqual(case.want.len, results.entries.len) catch |err| {
@@ -688,8 +695,8 @@ test "walk follow_symlinks: descends links, breaks cycles, never re-walks root" 
         defer results.deinit();
         try testing.expectEqual(@as(usize, 3), results.entries.len); // a.txt, back, link
         try testing.expectEqual(walk.EntryKind.sym_link, findEntry(&results, "link").?.kind);
-        try testing.expect(findEntry(&results, "link").?.meta.valid.size);
-        try testing.expectEqual(@as(u64, "../outside".len), findEntry(&results, "link").?.meta.size);
+        try testing.expect(findEntry(&results, "link").?.meta.?.valid.size);
+        try testing.expectEqual(@as(u64, "../outside".len), findEntry(&results, "link").?.meta.?.size);
         try testing.expect(findEntry(&results, "link/o.txt") == null);
     }
 
@@ -705,8 +712,8 @@ test "walk follow_symlinks: descends links, breaks cycles, never re-walks root" 
         defer results.deinit();
 
         try testing.expect(findEntry(&results, "link/o.txt") != null);
-        try testing.expect(findEntry(&results, "link").?.meta.valid.size);
-        try testing.expectEqual(@as(u64, "../outside".len), findEntry(&results, "link").?.meta.size);
+        try testing.expect(findEntry(&results, "link").?.meta.?.valid.size);
+        try testing.expectEqual(@as(u64, "../outside".len), findEntry(&results, "link").?.meta.?.size);
         // outside/ was already visited via link, so the cycle link is
         // reported but not descended.
         try testing.expect(findEntry(&results, "link/self") != null);
