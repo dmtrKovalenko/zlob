@@ -357,20 +357,20 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
  * core.excludesFile, below the .gitignore next to .git (git precedence). */
 #define ZLOB_WALK_GITIGNORE   (1u << 0) /* honor (nested) .gitignore + .ignore; also skips .git */
 #define ZLOB_WALK_SKIP_HIDDEN (1u << 1) /* skip dotfiles and don't descend into dot-dirs */
-#define ZLOB_WALK_FOLLOW_SYMLINKS (1u << 2)
-#define ZLOB_WALK_NO_REPORT_DIRS  (1u << 3) /* yield only non-directory entries */
-#define ZLOB_WALK_SORT            (1u << 4) /* sort zlob_walk_collect() results by path */
-#define ZLOB_WALK_ABORT_ON_ERROR  (1u << 5)
-#define ZLOB_WALK_KEEP_GIT_DIR    (1u << 6) /* with GITIGNORE: still enter .git dirs */
-#define ZLOB_WALK_NO_GIT_EXCLUDE  (1u << 7) /* with GITIGNORE: ignore $GIT_DIR/info/exclude */
-#define ZLOB_WALK_NO_GIT_GLOBAL   (1u << 8) /* with GITIGNORE: ignore core.excludesFile */
-#define ZLOB_WALK_GITIGNORE_PARENTS (1u << 9) /* with GITIGNORE: inherit rules up to the containing worktree */
+#define ZLOB_WALK_FOLLOW_SYMLINKS   (1u << 2)
+#define ZLOB_WALK_NO_REPORT_DIRS    (1u << 3) /* yield only non-directory entries */
+#define ZLOB_WALK_SORT              (1u << 4) /* sort zlob_walk_collect() results by path */
+#define ZLOB_WALK_ABORT_ON_ERROR    (1u << 5)
+#define ZLOB_WALK_KEEP_GIT_DIR      (1u << 6) /* with GITIGNORE: still enter .git dirs */
+#define ZLOB_WALK_NO_GIT_EXCLUDE    (1u << 7) /* with GITIGNORE: ignore $GIT_DIR/info/exclude */
+#define ZLOB_WALK_NO_GIT_GLOBAL     (1u << 8) /* with GITIGNORE: ignore core.excludesFile */
+#define ZLOB_WALK_GITIGNORE_PARENTS (1u << 9) /* with GITIGNORE: inherit parent dirs' rules */
 
 /** Entry kinds. */
-#define ZLOB_WALK_KIND_UNKNOWN    0
-#define ZLOB_WALK_KIND_FILE       1
-#define ZLOB_WALK_KIND_DIR        2
-#define ZLOB_WALK_KIND_SYMLINK    3
+#define ZLOB_WALK_KIND_UNKNOWN      0
+#define ZLOB_WALK_KIND_FILE         1
+#define ZLOB_WALK_KIND_DIR          2
+#define ZLOB_WALK_KIND_SYMLINK      3
 
 /** Error callback: return non-zero to abort the walk. */
 typedef int (*zlob_walk_errfunc_t)(const char *epath, int eerrno);
