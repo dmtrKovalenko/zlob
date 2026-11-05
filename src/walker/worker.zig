@@ -11,6 +11,7 @@ const gitignore_mod = @import("../gitignore.zig");
 const compiled_pattern = @import("../compiled_pattern.zig");
 const pattern_context = @import("../pattern_context.zig");
 const ignore_rules = @import("ignore_rules.zig");
+const git_excludes = @import("git_excludes.zig");
 const thread_mod = @import("thread.zig");
 
 pub const IgnoreRules = ignore_rules.IgnoreRules;
@@ -116,6 +117,9 @@ pub const SharedWorkerState = struct {
     /// project's discovered `.gitignore` files (the same precedence a nested
     /// `.gitignore` would give a deeper directory).
     extra_ignore_root: ?*IgnoreNode = null,
+    /// Repository exclude files (`$GIT_DIR/info/exclude`, core.excludesFile),
+    /// consulted only for directories whose listing holds `.git`.
+    git: git_excludes.Resolver,
     /// Linux only: the per-entry `statx()` mask, precomputed once from
     /// `options.meta` so the hot scan loop doesn't rebuild it per entry. Other
     /// backends also fetch only the requested attributes, but build that
@@ -201,6 +205,9 @@ pub const Worker = struct {
     metas: std.ArrayList(Metadata) = .empty,
     saw_gitignore: bool = false,
     saw_ignore: bool = false,
+    /// The listing's `.git` entry, if any: this directory is a repository
+    /// root whose exclude files apply.
+    dot_git: ?git_excludes.DotGit = null,
     /// Kernel buffer for getdents64 / getattrlistbulk.
     io_buf: []align(8) u8 = &.{},
 
@@ -244,11 +251,13 @@ fn workerThreadMain(ctx: *anyopaque) void {
 // Scratch accumulation
 // ---------------------------------------------------------------------------
 
-inline fn noteIgnoreFile(w: *Worker, name: []const u8) void {
+inline fn noteIgnoreFile(w: *Worker, name: []const u8, kind: EntryKind) void {
     if (name.len == 10 and mem.eql(u8, name, ".gitignore")) {
         w.saw_gitignore = true;
     } else if (name.len == 7 and mem.eql(u8, name, ".ignore")) {
         w.saw_ignore = true;
+    } else if (name.len == 4 and mem.eql(u8, name, ".git")) {
+        w.dot_git = .fromKind(kind);
     }
 }
 
@@ -261,7 +270,7 @@ pub inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: types.RawEn
     if (name[0] == '.') {
         @branchHint(.unlikely);
         if (name.len == 1 or (name.len == 2 and name[1] == '.')) return;
-        noteIgnoreFile(w, name);
+        noteIgnoreFile(w, name, raw.kind);
     }
     const off: u32 = @intCast(w.names.items.len);
     try w.names.appendSlice(sh.allocator, name);
@@ -286,7 +295,7 @@ pub inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []co
     if (name[0] == '.') {
         @branchHint(.unlikely);
         if (name.len == 1 or (name.len == 2 and name[1] == '.')) return;
-        noteIgnoreFile(w, name);
+        noteIgnoreFile(w, name, kind);
     }
     const off: u32 = @intCast(w.names.items.len);
     try w.names.appendSlice(sh.allocator, name);
@@ -336,6 +345,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     w.metas.clearRetainingCapacity();
     w.saw_gitignore = false;
     w.saw_ignore = false;
+    w.dot_git = null;
     scan.scanDir(sh, w, handle) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -346,11 +356,13 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
         },
     };
 
+    const prefix_len = taskPrefixLen(sh, w, task);
+
     var ignore: ?*IgnoreNode = task.ignore;
     var own_ignore = false;
-    if (sh.options.respect_git and (w.saw_gitignore or w.saw_ignore)) {
+    if (sh.options.respect_git and (w.saw_gitignore or w.saw_ignore or (w.dot_git != null and sh.git.enabled()))) {
         @branchHint(.unlikely);
-        if (try loadIgnoreNode(sh, handle, task, w.saw_gitignore, w.saw_ignore)) |node| {
+        if (try loadIgnoreNode(sh, handle, task, w, prefix_len)) |node| {
             ignore = node;
             own_ignore = true;
             {
@@ -362,7 +374,6 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     }
     defer if (own_ignore) ignore.?.release(sh.allocator);
 
-    const prefix_len = taskPrefixLen(sh, w, task);
     const opts = &sh.options;
     const entry_depth: u16 = task.depth +| 1;
     const may_descend = opts.max_depth == 0 or entry_depth < opts.max_depth;
@@ -618,30 +629,41 @@ fn loadIgnoreNode(
     sh: *SharedWorkerState,
     handle: Handle,
     task: *DirTask,
-    have_git: bool,
-    have_ignore: bool,
+    w: *const Worker,
+    prefix_len: usize,
 ) WalkError!?*IgnoreNode {
+    // Repository-wide exclude files when this directory holds `.git`. Lowest
+    // precedence, so they go first: core.excludesFile, then info/exclude.
+    var repo: git_excludes.Docs = .{};
+    if (w.dot_git) |dot_git| {
+        if (sh.git.enabled()) {
+            @branchHint(.unlikely);
+            // "root/rel/" minus the slash; an empty prefix is the cwd itself
+            // and a one-byte prefix is the filesystem root.
+            const dir: []const u8 = if (prefix_len == 0) "." else w.path_buf[0..@max(prefix_len - 1, 1)];
+            repo = sh.git.load(dir, dot_git);
+        }
+    }
     // Read both files (whichever exist) and hand them straight to the
     // parser. `.ignore` is second so its patterns get higher indices and
     // win ties — ripgrep precedence, no concat needed.
-    const git = if (have_git) readSmallFile(sh, handle, ".gitignore") else null;
-    const ign = if (have_ignore) readSmallFile(sh, handle, ".ignore") else null;
-    if (git == null and ign == null) return null;
+    const git = if (w.saw_gitignore) readSmallFile(sh, handle, ".gitignore") else null;
+    const ign = if (w.saw_ignore) readSmallFile(sh, handle, ".ignore") else null;
 
-    const n: usize = @as(usize, @intFromBool(git != null)) + @intFromBool(ign != null);
+    const n: usize = repo.count() + @intFromBool(git != null) + @intFromBool(ign != null);
+    if (n == 0) return null;
     const sources = sh.allocator.alloc([]const u8, n) catch {
+        repo.deinit(sh.allocator);
         if (git) |b| sh.allocator.free(b);
         if (ign) |b| sh.allocator.free(b);
         return error.OutOfMemory;
     };
     var i: usize = 0;
-    if (git) |b| {
-        sources[i] = b;
-        i += 1;
-    }
-    if (ign) |b| {
-        sources[i] = b;
-        i += 1;
+    for ([_]?[]u8{ repo.excludes_file, repo.info_exclude, git, ign }) |src| {
+        if (src) |b| {
+            sources[i] = b;
+            i += 1;
+        }
     }
 
     var gi = GitIgnore.parseOwnedMulti(sh.allocator, sources) catch |err| {

@@ -204,9 +204,21 @@ pub const Options = struct {
     include_hidden: bool = true,
     /// Honor .gitignore files (nested ones included). `.ignore` files are
     /// honored too, with their patterns taking precedence over `.gitignore`.
+    /// Repository exclude files are honored as well, see `git_exclude` and
+    /// `git_global`.
     respect_git: bool = true,
     /// Skip ".git" directories (only when respect_git is set).
     skip_git_dir: bool = true,
+    /// With respect_git: honor `$GIT_DIR/info/exclude` of every repository
+    /// met during the walk (a directory holding `.git`), linked worktrees and
+    /// submodules included. Layered below that repository's root `.gitignore`
+    /// as in git, so a `!negation` there un-ignores what info/exclude ignores.
+    git_exclude: bool = true,
+    /// With respect_git: honor git's `core.excludesFile` inside repositories
+    /// (repository config, else `~/.gitconfig` / `$XDG_CONFIG_HOME/git/config`,
+    /// else the default `~/.config/git/ignore`; a relative path is relative
+    /// to the worktree root). Lowest precedence of all.
+    git_global: bool = true,
     /// Report directory entries (directories are traversed either way).
     report_dirs: bool = true,
     /// Glob filter: only entries whose root-relative path matches are reported
