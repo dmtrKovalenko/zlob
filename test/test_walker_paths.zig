@@ -130,6 +130,99 @@ test "getdents64 backend: deep chain path stays intact" {
     try deepChainCase(.getdents64);
 }
 
+test "walkers skip overlong paths and keep entries that fit" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tree: Tree = .{ .io = undefined };
+    try tree.init("overlong_paths");
+    defer tree.deinit();
+
+    var dir = try std.Io.Dir.cwd().openDir(tree.io, tree.root, .{});
+    defer dir.close(tree.io);
+    const segment = "d" ** 255;
+    for (0..16) |i| {
+        const name = if (i == 15) segment[0..254] else segment[0..];
+        try dir.createDir(tree.io, name, .default_dir);
+        const next = try dir.openDir(tree.io, name, .{});
+        dir.close(tree.io);
+        dir = next;
+    }
+    try dir.createDir(tree.io, "too-long", .default_dir);
+    try dir.createDir(tree.io, "also-long", .default_dir);
+    const file = try dir.createFile(tree.io, "f", .{});
+    file.close(tree.io);
+
+    inline for (.{ walker.Backend.getdents64, walker.Backend.std_fs }) |backend| {
+        for ([_]bool{ false, true }) |sorted| {
+            var w = try walker.WalkerType(backend).init(testing.allocator, tree.io, tree.root, .{ .sorted = sorted });
+            defer w.deinit();
+            var saw_file = false;
+            while (try w.next()) |entry| {
+                try testing.expect(entry.path.len <= 4096);
+                if (std.mem.eql(u8, entry.basename, "f")) {
+                    try testing.expectEqual(@as(usize, 4096), entry.path.len);
+                    saw_file = true;
+                }
+            }
+            try testing.expect(saw_file);
+        }
+    }
+}
+
+const DirectorySwap = struct {
+    io: std.Io,
+    dir: std.Io.Dir,
+    swapped: bool = false,
+    failure: ?anyerror = null,
+
+    fn swap(self: *DirectorySwap, name: []const u8) !void {
+        try self.dir.deleteDir(self.io, name);
+        try self.dir.symLink(self.io, "../target", name, .{});
+        self.swapped = true;
+    }
+
+    fn filter(ctx: *anyopaque, _: []const u8, name: []const u8) bool {
+        const self: *DirectorySwap = @ptrCast(@alignCast(ctx));
+        self.swap(name) catch |err| {
+            self.failure = err;
+            return false;
+        };
+        return true;
+    }
+};
+
+test "walkers reject a directory replaced by a symlink before open" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tree: Tree = .{ .io = undefined };
+    try tree.init("directory_swap");
+    defer tree.deinit();
+    try tree.mkdirs("scan");
+    try tree.mkdirs("target");
+    try tree.touch("target/outside.txt");
+
+    var scan_path: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&scan_path, "{s}/scan", .{tree.root});
+    var dir = try std.Io.Dir.cwd().openDir(tree.io, path, .{});
+    defer dir.close(tree.io);
+
+    inline for (.{ walker.Backend.getdents64, walker.Backend.std_fs }) |backend| {
+        for ([_]bool{ false, true }) |sorted| {
+            try dir.createDir(tree.io, "child", .default_dir);
+            var swap = DirectorySwap{ .io = tree.io, .dir = dir };
+            var w = try walker.WalkerType(backend).init(testing.allocator, tree.io, path, .{
+                .sorted = sorted,
+                .dir_filter = .{ .filterDirFn = DirectorySwap.filter, .context = &swap },
+            });
+            defer w.deinit();
+            while (try w.next()) |entry| {
+                try testing.expect(!std.mem.eql(u8, entry.basename, "outside.txt"));
+            }
+            if (swap.failure) |err| return err;
+            try testing.expect(swap.swapped);
+            try dir.deleteFile(tree.io, "child");
+        }
+    }
+}
+
 // The two backends are meant to be interchangeable, so a tree with mixed
 // name lengths and nesting must produce the exact same set of paths.
 test "backends agree on the entry set" {

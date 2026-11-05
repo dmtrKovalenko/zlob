@@ -170,18 +170,17 @@ pub const Thread = struct {
                 // but not the attr API is not something we expect, but the
                 // symbols are weak) fall back to the host libc's defaults.
                 var attr: PthreadAttr = undefined;
-                var attr_ptr: ?*const anyopaque = null;
                 const have_attr = pthread_attr_init != null and
                     pthread_attr_setstacksize != null and
                     pthread_attr_destroy != null;
-                if (have_attr and pthread_attr_init.?(&attr) == 0) {
-                    if (pthread_attr_setstacksize.?(&attr, stack_size) == 0) {
-                        attr_ptr = @ptrCast(&attr);
-                    }
-                }
+                const attr_initialized = have_attr and pthread_attr_init.?(&attr) == 0;
                 defer {
-                    if (have_attr and attr_ptr != null) _ = pthread_attr_destroy.?(&attr);
+                    if (attr_initialized) _ = pthread_attr_destroy.?(&attr);
                 }
+                const attr_ptr: ?*const anyopaque = if (attr_initialized and pthread_attr_setstacksize.?(&attr, stack_size) == 0)
+                    @ptrCast(&attr)
+                else
+                    null;
                 if (attr_ptr == null and stack_size != FALLBACK_STACK_SIZE) return error.SpawnFailed;
 
                 var handle: pthread_t = 0;

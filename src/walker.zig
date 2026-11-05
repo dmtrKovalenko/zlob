@@ -326,6 +326,21 @@ pub fn isOptimizedBackendAvailable() bool {
     return builtin.os.tag == .linux;
 }
 
+/// Append a name and its separator if both fit.
+inline fn appendNameToPath(buffer: []u8, path_len: *usize, name: []const u8) bool {
+    const start = path_len.*;
+    const name_start = start + @as(usize, @intFromBool(start != 0));
+    const end = name_start + name.len;
+    if (end > buffer.len) {
+        @branchHint(.unlikely);
+        return false;
+    }
+    if (start != 0) buffer[start] = '/';
+    @memcpy(buffer[name_start..end], name);
+    path_len.* = end;
+    return true;
+}
+
 /// Linux only: directory opens ask for O_NOATIME so getdents64 never dirties
 /// directory inodes. On relatime mounts the first walk after 24h otherwise
 /// rewrites every directory's atime inline in getdents64 (btrfs: transaction
@@ -795,7 +810,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
                 if (kind == .directory or kind == .unknown or (follow and kind == .sym_link)) {
                     // Only descend candidates get their path assembled.
                     const path_start = self.path_len;
-                    self.appendNameToPath(raw.name);
+                    if (!appendNameToPath(&self.path_buffer, &self.path_len, raw.name)) continue;
                     kind = self.maybeDescend(raw.name, kind, raw.d_ino);
                     self.path_len = path_start;
                     if (kind == .directory) continue;
@@ -924,11 +939,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
             // Build path for this entry
             const path_start = self.path_len;
-            if (self.path_len + 1 + name.len > self.path_buffer.len) {
-                @branchHint(.unlikely);
-                continue;
-            }
-            self.appendNameToPath(name);
+            if (!appendNameToPath(&self.path_buffer, &self.path_len, name)) continue;
             const name_in_path_start = self.path_len - name.len;
             const relative_path = self.path_buffer[0..self.path_len];
 
@@ -971,11 +982,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             }
 
             const path_start = self.path_len;
-            if (self.path_len + 1 + name_z.len > self.path_buffer.len) {
-                @branchHint(.unlikely);
-                continue;
-            }
-            self.appendNameToPath(name_z);
+            if (!appendNameToPath(&self.path_buffer, &self.path_len, name_z)) continue;
             if (!self.descendSorted(item.parent_fd, name_z, item.kind, self.path_buffer[0..self.path_len], item.depth, @intCast(path_start), sink)) {
                 self.path_len = path_start;
             }
@@ -1076,6 +1083,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
+            .NOFOLLOW = !self.config.follow_symlinks,
         }) catch return false;
 
         if (self.config.follow_symlinks and kind == .directory) {
@@ -1273,16 +1281,6 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         return .{ .name = name_area[0..name_len :0], .d_type = d_type, .d_ino = d_ino };
     }
 
-    /// Append "/name" (or "name" at the root) to path_buffer.
-    inline fn appendNameToPath(self: *RecursiveGetdents64Walker, name: []const u8) void {
-        if (self.path_len > 0) {
-            self.path_buffer[self.path_len] = '/';
-            self.path_len += 1;
-        }
-        @memcpy(self.path_buffer[self.path_len..][0..name.len], name);
-        self.path_len += name.len;
-    }
-
     /// Decide whether to descend into this entry and, if so, open it and push
     /// it on the stack. Expects path_buffer[0..path_len] to hold the entry's
     /// relative path. Returns the resolved kind: a DT_UNKNOWN entry whose
@@ -1335,14 +1333,12 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
         };
         if (skip_descend) return kind;
 
-        // An .unknown entry may be a symlink; without follow mode
-        // NOFOLLOW makes such a probe fail (ELOOP) instead of
-        // descending through it.
+        // A listed directory may be replaced by a symlink before the open.
         const open_flags: posix.O = .{
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
-            .NOFOLLOW = kind == .unknown and !follow,
+            .NOFOLLOW = !follow,
         };
         var opened: ?posix.fd_t = null;
         var verify_key = false;
@@ -1425,7 +1421,7 @@ const RecursiveGetdents64Walker = if (builtin.os.tag != .linux) struct {} else s
 
         // Build path for this entry
         const path_start = self.path_len;
-        self.appendNameToPath(name);
+        if (!appendNameToPath(&self.path_buffer, &self.path_len, name)) return null;
         const name_in_path_start = self.path_len - name.len;
 
         kind = self.maybeDescend(name, kind, raw.d_ino);
@@ -1608,14 +1604,8 @@ const StdFsWalker = struct {
 
                 // Build path for this entry
                 const path_start = self.path_len;
-                if (self.path_len > 0) {
-                    self.path_buffer[self.path_len] = '/';
-                    self.path_len += 1;
-                }
-                const name_start = self.path_len;
-                if (self.path_len + entry.name.len > 4095) continue; // Path too long
-                @memcpy(self.path_buffer[self.path_len..][0..entry.name.len], entry.name);
-                self.path_len += entry.name.len;
+                if (!appendNameToPath(&self.path_buffer, &self.path_len, entry.name)) continue;
+                const name_start = self.path_len - entry.name.len;
 
                 const relative_path = self.path_buffer[0..self.path_len];
                 var kind = entry.kind;
@@ -1659,7 +1649,7 @@ const StdFsWalker = struct {
                     if (should_descend and !skip_descend) {
                         if (self.current_dir.?.openDir(io, entry.name, .{
                             .iterate = true,
-                            .follow_symlinks = !(kind == .unknown and !self.config.follow_symlinks),
+                            .follow_symlinks = self.config.follow_symlinks,
                         })) |subdir| {
                             var sub = subdir;
                             if (kind == .unknown) kind = .directory;
