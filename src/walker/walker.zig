@@ -8,7 +8,7 @@ const scan = @import("scan.zig");
 const scan_linux = @import("scan_linux.zig");
 const compiled_pattern = @import("../compiled_pattern.zig");
 const ignore_rules_mod = @import("ignore_rules.zig");
-const sort_mod = @import("sort.zig");
+const sorting = @import("../sorting.zig");
 
 const SharedWorkerState = worker.SharedWorkerState;
 const Worker = worker.Worker;
@@ -36,7 +36,7 @@ pub const __internal_test_api = if (builtin.is_test) struct {
     pub const max_dir_chain = ignore_rules_mod.__internal_test_api.max_dir_chain;
     pub const isIgnoredResolved = ignore_rules_mod.__internal_test_api.isIgnoredResolved;
     pub const isIgnoredPathSlow = ignore_rules_mod.__internal_test_api.isIgnoredPathSlow;
-    pub const sortEntries = sort_mod.sortEntries;
+    pub const sortPathsParallel = sorting.sortPathsParallel;
 } else struct {};
 
 pub const WalkError = types.WalkError;
@@ -205,7 +205,7 @@ pub fn collectAs(gpa: Allocator, root: []const u8, options: Options, comptime Ad
     // frees them), so a failure here leaks nothing.
     if (options.sort) {
         const io = options.io orelse std.Io.Threaded.global_single_threaded.io();
-        entries = try sort_mod.sortAs(Out, Adapter.relativePath, gpa, io, entries, n_workers);
+        entries = try sorting.sortPathsParallel(Out, Adapter.relativePath, gpa, io, entries, n_workers);
     }
 
     // Nothing below may fail once chunk ownership starts moving.

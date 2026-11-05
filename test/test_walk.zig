@@ -502,21 +502,21 @@ fn checkSortAgainstPdq(gpa: std.mem.Allocator, n: usize, threads: u32, seed: u64
     var subject = try gpa.alloc(walk.Entry, n);
     @memcpy(subject, reference);
     const io = std.Io.Threaded.global_single_threaded.io();
-    subject = try walk.__internal_test_api.sortEntries(gpa, io, subject, threads);
+    subject = try walk.__internal_test_api.sortPathsParallel(walk.Entry, walk.Entry.relativePath, gpa, io, subject, threads);
     defer gpa.free(subject);
 
     std.sort.pdq(walk.Entry, reference, {}, fullPathLessThan);
     for (reference, subject) |r, s| try testing.expectEqualStrings(r.path, s.path);
 }
 
-test "sort: sortEntries matches pdq on full paths (serial, randomized)" {
+test "sort: sortPathsParallel matches pdq on full paths (serial, randomized)" {
     try checkSortAgainstPdq(testing.allocator, 0, 1, 1);
     try checkSortAgainstPdq(testing.allocator, 1, 1, 1);
     try checkSortAgainstPdq(testing.allocator, 13, 1, 2);
     try checkSortAgainstPdq(testing.allocator, 5000, 1, 3);
 }
 
-test "sort: sortEntries matches pdq on full paths (parallel pool, randomized)" {
+test "sort: sortPathsParallel matches pdq on full paths (parallel pool, randomized)" {
     // Large enough that the task pool is exercised with several helpers.
     try checkSortAgainstPdq(std.heap.smp_allocator, 20000, 4, 4);
     try checkSortAgainstPdq(std.heap.smp_allocator, 20000, 16, 5);
