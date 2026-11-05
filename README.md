@@ -221,6 +221,11 @@ WalkBuilder::new(".").options(WalkFlags::GITIGNORE).run(|entry| {
     WalkState::Continue
 })?;
 
+// Also inherit parent ignore rules when walking a Git worktree subtree.
+let subtree = WalkBuilder::new("src")
+    .options(WalkFlags::GITIGNORE | WalkFlags::GITIGNORE_PARENTS)
+    .build()?;
+
 // Glob-scoped traversal: only src/ is ever descended into.
 let rs_files = WalkBuilder::new(".").include("src/**/*.rs").build()?;
 ```

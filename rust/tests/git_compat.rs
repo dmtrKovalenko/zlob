@@ -407,6 +407,92 @@ fn zlob_kept(root: &Path, threads: usize) -> BTreeSet<String> {
         .collect()
 }
 
+#[test]
+fn subtree_walk_can_inherit_gitignore_rules() {
+    if !git_available() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let subtree = repo.join("project/src");
+    for subdir in ["blocked", "nested", "other", "third"] {
+        fs::create_dir_all(subtree.join(subdir)).unwrap();
+    }
+    git_init(&repo);
+
+    fs::write(dir.path().join(".gitignore"), "*.rs\n").unwrap();
+    fs::write(repo.join(".gitignore"), "*.log\n/project/src/blocked/\n").unwrap();
+    fs::write(repo.join("project/.gitignore"), "/src/intermediate.txt\n").unwrap();
+    fs::write(repo.join(".git/info/exclude"), "/project/src/private.txt\n").unwrap();
+    fs::write(subtree.join(".gitignore"), "!keep.log\n/local.txt\n").unwrap();
+    fs::write(
+        subtree.join("nested/.gitignore"),
+        "!keep.log\n/nested.txt\n",
+    )
+    .unwrap();
+    fs::write(subtree.join("blocked/.gitignore"), "!inside.rs\n").unwrap();
+
+    let paths: Vec<String> = [
+        "app.log",
+        "keep.log",
+        "main.rs",
+        "blocked/inside.rs",
+        "intermediate.txt",
+        "private.txt",
+        "local.txt",
+        "nested/keep.log",
+        "nested/drop.log",
+        "nested/nested.txt",
+        "other/main.rs",
+        "third/main.rs",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    for path in &paths {
+        fs::write(subtree.join(path), "x").unwrap();
+    }
+
+    let options = SCRUBBED | WalkFlags::GITIGNORE_PARENTS | WalkFlags::NO_REPORT_DIRS;
+    let expected = git_kept(&subtree);
+    let ignored = git_ignored_paths(&subtree, &paths);
+    assert!(zlob_kept(&subtree, 1).contains("blocked/inside.rs"));
+    for &threads in THREAD_COUNTS {
+        let walk = WalkBuilder::new(&subtree)
+            .unwrap()
+            .options(options)
+            .threads(threads)
+            .collect()
+            .unwrap();
+        let kept: BTreeSet<_> = walk
+            .iter()
+            .map(|entry| entry.relative_path().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(kept, expected, "files at {threads} threads");
+
+        let rules = walk.ignore_rules().unwrap();
+        let ignored_by_walk = paths
+            .iter()
+            .filter(|path| rules.is_ignored(path))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            ignored_by_walk, ignored,
+            "retained rules at {threads} threads"
+        );
+    }
+
+    let blocked = subtree.join("blocked");
+    let walk = WalkBuilder::new(&blocked)
+        .unwrap()
+        .options(options)
+        .collect()
+        .unwrap();
+    assert_eq!(walk.len(), git_kept(&blocked).len());
+    assert!(walk.ignore_rules().unwrap().is_ignored("inside.rs"));
+}
+
 fn label_of(spec: &[(String, String)]) -> String {
     spec.iter()
         .map(|(d, b)| {

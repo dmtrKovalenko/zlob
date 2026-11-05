@@ -207,6 +207,8 @@ pub const Options = struct {
     /// Repository exclude files are honored as well, see `git_exclude` and
     /// `git_global`.
     respect_git: bool = true,
+    /// With respect_git, inherit ignore rules up to the containing Git worktree.
+    gitignore_parents: bool = false,
     /// Skip ".git" directories (only when respect_git is set).
     skip_git_dir: bool = true,
     /// With respect_git: honor `$GIT_DIR/info/exclude` of every repository
