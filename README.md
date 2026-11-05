@@ -340,7 +340,7 @@ This allows a very fast SIMD processing of the paths and supports **NOT ALL** th
 
 ## Compilation
 
-To compile zlob as a C library, install Zig 0.17.0. iOS cross-compilation is currently broken by a standard library build error in Zig 0.17.0.
+To compile zlob as a C library, install Zig 0.17.1 or newer.
 
 ```bash
 make

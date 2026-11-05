@@ -4,7 +4,7 @@ Zlob is a very fast glob implementation that is faster than ignore crate and eve
 
 ## Requirements
 
-To compile this crate, install Zig 0.17.0 and add it to your `PATH`. iOS targets are currently broken by a standard library build error in Zig 0.17.0. [Download Zig](https://ziglang.org/download/)
+To compile this crate, install Zig 0.17.1 or newer and add it to your `PATH`. [Download Zig](https://ziglang.org/download/)
 
 ## Misc
 
