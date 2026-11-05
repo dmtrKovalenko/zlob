@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const enums = @import("../enum_compat.zig");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
@@ -178,11 +179,11 @@ pub const SharedWorkerState = struct {
 
     pub fn fail(sh: *SharedWorkerState, f: Failure) void {
         sh.abort_signal.store(true, .release);
-        _ = sh.failure.cmpxchgStrong(@intFromEnum(Failure.none), @intFromEnum(f), .acq_rel, .acquire);
+        _ = sh.failure.cmpxchgStrong(enums.intFromEnum(Failure.none), enums.intFromEnum(f), .acq_rel, .acquire);
     }
 
     pub fn failureResult(sh: *SharedWorkerState) WalkError!void {
-        return switch (@as(Failure, @enumFromInt(sh.failure.load(.acquire)))) {
+        return switch (enums.enumFromInt(Failure, sh.failure.load(.acquire))) {
             .none => {},
             .aborted => error.Aborted,
             .oom => error.OutOfMemory,
@@ -1207,5 +1208,5 @@ pub fn errnoFromOpenError(err: anyerror) c_int {
         else => .IO,
     };
 
-    return @intFromEnum(e);
+    return enums.intFromEnum(e);
 }

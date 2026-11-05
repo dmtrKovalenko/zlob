@@ -903,7 +903,7 @@ test "walk error callback: receives path and errno, nonzero return aborts" {
         defer results.deinit();
         try testing.expectEqual(@as(usize, 1), Cb.calls);
         try testing.expect(Cb.saw_locked);
-        try testing.expectEqual(@intFromEnum(std.c.E.ACCES), Cb.last_errno);
+        try testing.expectEqual(@as(?std.c.E, .ACCES), std.enums.fromInt(std.c.E, Cb.last_errno));
         try testing.expectEqual(@as(usize, 3), results.entries.len); // locked, ok, ok/file.txt
         try testing.expect(findEntry(&results, "locked/hidden.txt") == null);
     }
