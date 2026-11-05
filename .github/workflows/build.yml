@@ -52,14 +52,16 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Install qemu-user-static
-        run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      # qemu-user-static is a virtual package since Ubuntu 26.04 and the
+      # static binaries are gone; the dynamic qemu-aarch64 runs static musl fine.
+      - name: Install qemu-user
+        run: sudo apt-get update && sudo apt-get install -y qemu-user
 
       - name: x86_64
         run: ./scripts/test_nolibc_threads.sh
 
       - name: aarch64 via qemu
-        run: ./scripts/test_nolibc_threads.sh aarch64-linux-musl qemu-aarch64-static
+        run: ./scripts/test_nolibc_threads.sh aarch64-linux-musl qemu-aarch64
 
       # We can;t rn the actual android targest but we can double check the full compilation
       - name: Cross-compile the Android targets
