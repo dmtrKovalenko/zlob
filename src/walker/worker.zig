@@ -178,11 +178,11 @@ pub const SharedWorkerState = struct {
 
     pub fn fail(sh: *SharedWorkerState, f: Failure) void {
         sh.abort_signal.store(true, .release);
-        _ = sh.failure.cmpxchgStrong(@intFromEnum(Failure.none), @intFromEnum(f), .acq_rel, .acquire);
+        _ = sh.failure.cmpxchgStrong(@backingInt(Failure.none), @backingInt(f), .acq_rel, .acquire);
     }
 
     pub fn failureResult(sh: *SharedWorkerState) WalkError!void {
-        return switch (@as(Failure, @enumFromInt(sh.failure.load(.acquire)))) {
+        return switch (@as(Failure, @fromBackingInt(@intCast(sh.failure.load(.acquire))))) {
             .none => {},
             .aborted => error.Aborted,
             .oom => error.OutOfMemory,
@@ -1207,5 +1207,5 @@ pub fn errnoFromOpenError(err: anyerror) c_int {
         else => .IO,
     };
 
-    return @intFromEnum(e);
+    return @backingInt(e);
 }

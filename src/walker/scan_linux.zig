@@ -36,9 +36,10 @@ pub fn scanDir(sh: *SharedWorkerState, w: *Worker, fd: posix.fd_t) WalkError!voi
     // detect a btrfs subvolume / mount crossing without a statx.
     var first_record = true;
 
+    // Short by 8 so the word-at-a-time name scan below stays in bounds.
+    const cap: c_uint = @intCast(w.io_buf.len - 8);
     while (true) {
-        // Short by 8 so the word-at-a-time name scan below stays in bounds.
-        const rc = linux.getdents64(fd, w.io_buf.ptr, w.io_buf.len - 8);
+        const rc = linux.getdents64(fd, w.io_buf.ptr, cap);
         const n: isize = @bitCast(rc);
         if (n < 0) {
             return switch (linux.errno(rc)) {

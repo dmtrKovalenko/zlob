@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_match_paths_preserves_lifetime() {
-        let paths = vec!["foo.rs".to_string(), "bar.txt".to_string()];
+        let paths = ["foo.rs".to_string(), "bar.txt".to_string()];
         let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
 
         let matches = zlob_match_paths("*.rs", &path_refs, ZlobFlags::empty())

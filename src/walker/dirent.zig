@@ -116,7 +116,7 @@ pub fn trustShortReaddir(fd: linux.fd_t) bool {
     // Some mount below the root would be a problem; find the root's canonical
     // path and check whether any of them actually lies under it.
     var link_buf: [32]u8 = undefined;
-    const link = std.fmt.bufPrintZ(&link_buf, "/proc/self/fd/{d}", .{fd}) catch return false;
+    const link = std.fmt.bufPrintSentinel(&link_buf, "/proc/self/fd/{d}", .{fd}, 0) catch return false;
     var path_buf: [4096]u8 = undefined;
     const rl = linux.readlink(link.ptr, &path_buf, path_buf.len);
     const rlen: isize = @bitCast(rl);
@@ -276,7 +276,7 @@ fn openMountinfo() bool {
     if (mount_fd >= 0) {
         if (mountFdIsOurs()) {
             if (mountFdCurrent()) {
-                var offset: u64 = undefined;
+                var offset: linux.off_t = undefined;
                 const rc = if (@bitSizeOf(usize) == 32)
                     linux.llseek(mount_fd, 0, &offset, linux.SEEK.SET)
                 else

@@ -134,6 +134,7 @@ fn main() {
         .write_to_file(out_dir.join("zlob_bindings.rs"))
         .expect("Couldn't write bindings!");
 
+    println!("cargo:rerun-if-env-changed=ZIG");
     let zig = env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
     let zig_version = Command::new(&zig)
         .arg("version")
@@ -165,13 +166,12 @@ fn main() {
 
     let mut cmd = Command::new(&zig);
     cmd.current_dir(&zlob_root)
+        .env("ZIG_GLOBAL_CACHE_DIR", &zig_global_cache_dir)
         .arg("build")
         .arg(format!("-Doptimize={}", optimize))
         .arg(format!("-Dsrc-dir={}", zig_src_dir))
         .arg("--cache-dir")
         .arg(&zig_cache_dir)
-        .arg("--global-cache-dir")
-        .arg(&zig_global_cache_dir)
         .arg("-Dskip-bench=true")
         .arg("-Dstatic-only=true")
         .arg("-p")
@@ -275,6 +275,11 @@ fn rust_target_to_clang(target: &str) -> String {
                 "riscv64"
             } else {
                 arch
+            };
+            // Rust spells the Apple simulator env `sim`, clang spells it `simulator`.
+            let rest = match rest.strip_suffix("-sim") {
+                Some(base) => format!("{base}-simulator"),
+                None => rest.to_string(),
             };
             format!("{}-{}", clang_arch, rest)
         }

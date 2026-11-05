@@ -508,7 +508,7 @@ fn Collector(comptime Adapter: type) type {
                 .len = @intCast(entry.path.len),
                 .basename_off = @intCast(entry.basename_offset),
                 .depth = entry.depth,
-                .kind = @intFromEnum(entry.kind),
+                .kind = @backingInt(entry.kind),
             }) catch {
                 ws.failed = true;
                 return .stop;
@@ -690,7 +690,7 @@ const WorkerSink = struct {
                     .basename_offset = rec.basename_off,
                     .depth = rec.depth,
                     .worker_id = worker_id,
-                    .kind = @enumFromInt(rec.kind),
+                    .kind = @fromBackingInt(@intCast(rec.kind)),
                 };
                 Adapter.convert(&dest[ei], &entry);
                 ei += 1;

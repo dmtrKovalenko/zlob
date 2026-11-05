@@ -8,10 +8,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 
-const c = @cImport({
-    @cInclude("stdlib.h");
-});
-
 /// Max tolerated size of a single TLS symbol in libzlob.a. 16 KB leaves
 /// plenty of room for small per-thread state (thread ids, panic depth,
 /// Io.Threaded.Thread.current pointer) while rejecting anything that
@@ -25,14 +21,7 @@ test "libzlob.a has no TLS symbols above the static-TLS budget" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     if (builtin.abi == .musl) return error.SkipZigTest;
 
-    const archive_path_c = c.getenv("ZLOB_STATIC_ARCHIVE") orelse {
-        std.debug.print(
-            "ZLOB_STATIC_ARCHIVE not set; the build step should pass the archive path\n",
-            .{},
-        );
-        return error.MissingArchivePath;
-    };
-    const archive_path = std.mem.sliceTo(archive_path_c, 0);
+    const archive_path = @import("build_options").archive_path;
 
     const io = std.Io.Threaded.global_single_threaded.io();
     const contents = try std.Io.Dir.cwd().readFileAlloc(

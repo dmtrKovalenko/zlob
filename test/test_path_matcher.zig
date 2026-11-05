@@ -1018,7 +1018,7 @@ test "matchPaths over chunked C-string array (> 256 paths)" {
         const is_zig = (i % 7) == 0;
         const ext = if (is_zig) ".zig" else ".txt";
         if (is_zig) matched_count += 1;
-        const written = std.fmt.bufPrintZ(&paths_buf[i], "p{d:0>5}{s}", .{ i, ext }) catch unreachable;
+        const written = std.fmt.bufPrintSentinel(&paths_buf[i], "p{d:0>5}{s}", .{ i, ext }, 0) catch unreachable;
         paths[i] = written.ptr;
     }
 

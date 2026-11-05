@@ -46,9 +46,7 @@ fn lastSepPos(s: []const u8) ?usize {
     return null;
 }
 
-const c_zlob = @cImport({
-    @cInclude("zlob.h");
-});
+const c_zlob = @import("zlob_header");
 
 pub const fnmatch = fnmatch_impl;
 pub const pattern_context = pattern_context_internal;

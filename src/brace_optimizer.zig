@@ -86,7 +86,7 @@ pub fn containsBraces(pattern: []const u8) bool {
 
     if (pattern.len >= vec_len) {
         const Vec = @Vector(vec_len, u8);
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const MaskInt = @Int(.unsigned, vec_len);
         const brace_vec: Vec = @splat('{');
         var i: usize = 0;
         while (i + vec_len <= pattern.len) : (i += vec_len) {

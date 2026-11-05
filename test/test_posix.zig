@@ -101,7 +101,7 @@ test "ZLOB_MARK - appends slash to directories" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*");
+    const pattern = try allocator.dupeSentinel(u8, "*", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -145,7 +145,7 @@ test "ZLOB_MARK - does not append slash to files" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*.txt");
+    const pattern = try allocator.dupeSentinel(u8, "*.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -182,7 +182,7 @@ test "ZLOB_MARK - works with recursive glob" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "**/");
+    const pattern = try allocator.dupeSentinel(u8, "**/", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -223,7 +223,7 @@ test "ZLOB_DOOFFS - reserves offset slots at beginning" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*.txt");
+    const pattern = try allocator.dupeSentinel(u8, "*.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -272,14 +272,14 @@ test "ZLOB_DOOFFS - works with ZLOB_APPEND" {
     pzlob.zlo_offs = 2;
 
     // First glob
-    const pattern1 = try allocator.dupeZ(u8, "*.txt");
+    const pattern1 = try allocator.dupeSentinel(u8, "*.txt", 0);
     defer allocator.free(pattern1);
     const result1 = c_lib.zlob(pattern1.ptr, zlob_flags.ZLOB_DOOFFS, null, &pzlob);
     try testing.expectEqual(0, result1);
     const first_count = pzlob.zlo_pathc;
 
     // Second glob with APPEND
-    const pattern2 = try allocator.dupeZ(u8, "*.c");
+    const pattern2 = try allocator.dupeSentinel(u8, "*.c", 0);
     defer allocator.free(pattern2);
     const result2 = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_DOOFFS | zlob_flags.ZLOB_APPEND, null, &pzlob);
     defer c_lib.zlobfree(&pzlob);
@@ -298,7 +298,7 @@ test "ZLOB_DOOFFS - works with ZLOB_APPEND" {
 // regardless of which path filled the struct.
 test "ZLOB_DOOFFS - reserves offset slots for the ZLOB_NOCHECK echo" {
     const allocator = testing.allocator;
-    const pattern = try allocator.dupeZ(u8, "zzz_no_such_file_anywhere_*.nope");
+    const pattern = try allocator.dupeSentinel(u8, "zzz_no_such_file_anywhere_*.nope", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -356,7 +356,7 @@ test "ZLOB_PERIOD - matches hidden files with wildcard" {
     // Define ZLOB_PERIOD
     const ZLOB_PERIOD = zlob_flags.ZLOB_PERIOD;
 
-    const pattern = try allocator.dupeZ(u8, "*");
+    const pattern = try allocator.dupeSentinel(u8, "*", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -398,7 +398,7 @@ test "ZLOB_PERIOD - without flag does not match hidden files" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "*");
+    const pattern = try allocator.dupeSentinel(u8, "*", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -434,7 +434,7 @@ test "ZLOB_PERIOD - explicit dot still matches" {
     try std.process.setCurrentPath(io, test_dir[0..test_dir_str.len :0]);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, ".*");
+    const pattern = try allocator.dupeSentinel(u8, ".*", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -473,7 +473,7 @@ test "ZLOB_TILDE - expands tilde to home directory" {
     f.close(io);
     defer std.Io.Dir.cwd().deleteFile(io, test_file) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "~/.zlob_test_tilde_*.txt");
+    const pattern = try allocator.dupeSentinel(u8, "~/.zlob_test_tilde_*.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -506,7 +506,7 @@ test "ZLOB_TILDE - expands ~username to user home" {
     const pattern_str = try std.fmt.allocPrint(allocator, "~{s}/.zlob_test_user_*.txt", .{username});
     defer allocator.free(pattern_str);
 
-    const pattern = try allocator.dupeZ(u8, pattern_str);
+    const pattern = try allocator.dupeSentinel(u8, pattern_str, 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -523,7 +523,7 @@ test "ZLOB_TILDE - expands ~username to user home" {
 test "ZLOB_TILDE - without flag treats tilde as literal" {
     const allocator = testing.allocator;
 
-    const pattern = try allocator.dupeZ(u8, "~/*.txt");
+    const pattern = try allocator.dupeSentinel(u8, "~/*.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -542,7 +542,7 @@ test "ZLOB_TILDE - without flag treats tilde as literal" {
 test "ZLOB_TILDE_CHECK - errors on nonexistent username" {
     const allocator = testing.allocator;
 
-    const pattern = try allocator.dupeZ(u8, "~nonexistentuser99999/*.txt");
+    const pattern = try allocator.dupeSentinel(u8, "~nonexistentuser99999/*.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -556,7 +556,7 @@ test "ZLOB_TILDE_CHECK - errors on nonexistent username" {
 test "ZLOB_TILDE_CHECK - without flag returns tilde literal on unknown user" {
     const allocator = testing.allocator;
 
-    const pattern = try allocator.dupeZ(u8, "~nonexistentuser99999");
+    const pattern = try allocator.dupeSentinel(u8, "~nonexistentuser99999", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -598,7 +598,7 @@ test "ZLOB_NOMAGIC - returns pattern for literal with no match" {
 
     // Literal pattern (no wildcards) that doesn't exist - should return the
     // pattern itself as a result (BSD NOMAGIC acts like NOCHECK for literals)
-    const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
+    const pattern = try allocator.dupeSentinel(u8, "nonexistent.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -633,7 +633,7 @@ test "ZLOB_NOMAGIC - returns NOMATCH for wildcard pattern with no match" {
 
     // Pattern with wildcards that doesn't match - NOMAGIC does NOT help here,
     // because the pattern has magic characters. Returns NOMATCH.
-    const pattern = try allocator.dupeZ(u8, "*.nonexistent");
+    const pattern = try allocator.dupeSentinel(u8, "*.nonexistent", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -663,7 +663,7 @@ test "ZLOB_NOMAGIC - succeeds normally for wildcard pattern with matches" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Wildcard pattern that matches - normal glob behavior, NOMAGIC irrelevant
-    const pattern = try allocator.dupeZ(u8, "*.txt");
+    const pattern = try allocator.dupeSentinel(u8, "*.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -700,7 +700,7 @@ test "ZLOB_MARK and ZLOB_PERIOD together" {
 
     const ZLOB_PERIOD = zlob_flags.ZLOB_PERIOD;
 
-    const pattern = try allocator.dupeZ(u8, "*");
+    const pattern = try allocator.dupeSentinel(u8, "*", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -739,7 +739,7 @@ test "ZLOB_TILDE with recursive glob" {
     var f = std.Io.Dir.cwd().createFile(io, test_file, .{}) catch return error.SkipZigTest;
     f.close(io);
 
-    const pattern = try allocator.dupeZ(u8, "~/**/.zlob_test_nested/*.txt");
+    const pattern = try allocator.dupeSentinel(u8, "~/**/.zlob_test_nested/*.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -775,7 +775,7 @@ test "ZLOB_PERIOD - recursive glob should not match hidden files by default" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test with ** recursive pattern - should NOT match hidden files without ZLOB_PERIOD
-    const pattern = try allocator.dupeZ(u8, "**/*");
+    const pattern = try allocator.dupeSentinel(u8, "**/*", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -830,7 +830,7 @@ test "ZLOB_PERIOD - recursive glob matches hidden files with flag" {
     const ZLOB_PERIOD = zlob_flags.ZLOB_PERIOD;
 
     // Test with ** recursive pattern WITH ZLOB_PERIOD - should match hidden files
-    const pattern = try allocator.dupeZ(u8, "**/*");
+    const pattern = try allocator.dupeSentinel(u8, "**/*", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -888,7 +888,7 @@ test "ZLOB_PERIOD - explicit dot pattern still matches without flag in recursive
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Pattern explicitly starts with . - should match even without ZLOB_PERIOD
-    const pattern = try allocator.dupeZ(u8, "**/.hidden*");
+    const pattern = try allocator.dupeSentinel(u8, "**/.hidden*", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -928,7 +928,7 @@ test "literal path - file exists" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "file1.txt");
+    const pattern = try allocator.dupeSentinel(u8, "file1.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -957,7 +957,7 @@ test "literal path - directory exists" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "dir1");
+    const pattern = try allocator.dupeSentinel(u8, "dir1", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -985,7 +985,7 @@ test "literal path - ZLOB_ONLYDIR with directory" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "dir1");
+    const pattern = try allocator.dupeSentinel(u8, "dir1", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1013,7 +1013,7 @@ test "literal path - ZLOB_ONLYDIR with file (should fail)" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "file1.txt");
+    const pattern = try allocator.dupeSentinel(u8, "file1.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1039,7 +1039,7 @@ test "literal path - ZLOB_MARK with directory" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "dir1");
+    const pattern = try allocator.dupeSentinel(u8, "dir1", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1069,7 +1069,7 @@ test "literal path - ZLOB_MARK with file (no slash)" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "file1.txt");
+    const pattern = try allocator.dupeSentinel(u8, "file1.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1098,7 +1098,7 @@ test "literal path - ./ prefix normalization" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "./file1.txt");
+    const pattern = try allocator.dupeSentinel(u8, "./file1.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1127,7 +1127,7 @@ test "literal path - ZLOB_NOCHECK returns pattern when not found" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
+    const pattern = try allocator.dupeSentinel(u8, "nonexistent.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1156,7 +1156,7 @@ test "literal path - not found without ZLOB_NOCHECK" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "nonexistent.txt");
+    const pattern = try allocator.dupeSentinel(u8, "nonexistent.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1182,7 +1182,7 @@ test "literal path - ZLOB_MARK and ZLOB_ONLYDIR together" {
     try std.process.setCurrentPath(io, test_dir_str);
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
-    const pattern = try allocator.dupeZ(u8, "dir1");
+    const pattern = try allocator.dupeSentinel(u8, "dir1", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1243,7 +1243,7 @@ test "ZLOB_ALTDIRFUNC - single directory with wildcard pattern" {
 
     const allocator = testing.allocator;
 
-    const pattern = try allocator.dupeZ(u8, "*.txt");
+    const pattern = try allocator.dupeSentinel(u8, "*.txt", 0);
     defer allocator.free(pattern);
 
     // Initialize zlob_t with ALTDIRFUNC callbacks
@@ -1351,7 +1351,7 @@ test "ZLOB_ALTDIRFUNC - nested directory with wildcard pattern" {
 
     const allocator = testing.allocator;
 
-    const pattern = try allocator.dupeZ(u8, "src/*.zig");
+    const pattern = try allocator.dupeSentinel(u8, "src/*.zig", 0);
     defer allocator.free(pattern);
 
     // Initialize zlob_t with ALTDIRFUNC callbacks
@@ -1425,7 +1425,7 @@ test "ZLOB_ALTDIRFUNC - DT_UNKNOWN entries are probed instead of skipped" {
             dirent: c_lib.zlob_dirent_t = undefined,
             in_use: bool = false,
         };
-        var slots: [8]State = [_]State{.{}} ** 8;
+        var slots: [8]State = @splat(.{});
         var refused_opens: usize = 0;
 
         fn opendir(path: [*:0]const u8) callconv(.c) ?*anyopaque {
@@ -1469,7 +1469,7 @@ test "ZLOB_ALTDIRFUNC - DT_UNKNOWN entries are probed instead of skipped" {
     // Non-final wildcard: "*" must descend into src and test although they
     // are reported as DT_UNKNOWN, and must not abort on root.txt.
     {
-        const pattern = try allocator.dupeZ(u8, "*/*.zig");
+        const pattern = try allocator.dupeSentinel(u8, "*/*.zig", 0);
         defer allocator.free(pattern);
 
         var pzlob = glob.zlob_t{
@@ -1510,7 +1510,7 @@ test "ZLOB_ALTDIRFUNC - DT_UNKNOWN entries are probed instead of skipped" {
 
     // Literal non-final component with a DT_UNKNOWN directory.
     {
-        const pattern = try allocator.dupeZ(u8, "src/*.zig");
+        const pattern = try allocator.dupeSentinel(u8, "src/*.zig", 0);
         defer allocator.free(pattern);
 
         var pzlob = glob.zlob_t{
@@ -1596,7 +1596,7 @@ test "ZLOB_MAGCHAR - set when pattern has wildcards" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test with wildcard pattern - ZLOB_MAGCHAR should be set
-    const pattern = try allocator.dupeZ(u8, "*.c");
+    const pattern = try allocator.dupeSentinel(u8, "*.c", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1630,7 +1630,7 @@ test "ZLOB_MAGCHAR - not set when pattern has no wildcards" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test with literal pattern (no wildcards) - ZLOB_MAGCHAR should NOT be set
-    const pattern = try allocator.dupeZ(u8, "file1.txt");
+    const pattern = try allocator.dupeSentinel(u8, "file1.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1664,7 +1664,7 @@ test "ZLOB_MAGCHAR - set with question mark wildcard" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test with ? wildcard - ZLOB_MAGCHAR should be set
-    const pattern = try allocator.dupeZ(u8, "file?.txt");
+    const pattern = try allocator.dupeSentinel(u8, "file?.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;
@@ -1698,7 +1698,7 @@ test "ZLOB_MAGCHAR - set with brace expansion when ZLOB_BRACE enabled" {
     defer std.process.setCurrentPath(io, old_cwd) catch {};
 
     // Test with brace pattern and ZLOB_BRACE flag - ZLOB_MAGCHAR should be set
-    const pattern = try allocator.dupeZ(u8, "file{1,2}.txt");
+    const pattern = try allocator.dupeSentinel(u8, "file{1,2}.txt", 0);
     defer allocator.free(pattern);
 
     var pzlob: glob.zlob_t = undefined;

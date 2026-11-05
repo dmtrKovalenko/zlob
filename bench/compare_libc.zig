@@ -88,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("NOTE: For best results, compile with -Doptimize=ReleaseFast\n\n", .{});
 
     // Create null-terminated string for libc
-    const pattern_z = try allocator.dupeZ(u8, pattern);
+    const pattern_z = try allocator.dupeSentinel(u8, pattern, 0);
     defer allocator.free(pattern_z);
 
     // First, count the matches

@@ -14,7 +14,7 @@ inline fn indexOfDoubleSlash(s: []const u8) ?usize {
     const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
 
     const Vec = @Vector(vec_len, u8);
-    const MaskInt = std.meta.Int(.unsigned, vec_len);
+    const MaskInt = @Int(.unsigned, vec_len);
     const slash_vec: Vec = @splat('/');
 
     if (s.len >= vec_len + 1) {
@@ -104,22 +104,11 @@ pub fn normalizePathSeparators(src: []const u8, scratch: []u8) []const u8 {
     return scratch[0..src.len];
 }
 
-// pwd.h is only available on POSIX systems where libc headers are present.
-// Excluded on: Windows (no pwd.h), Android (Zig can't provide bionic headers),
-// and Apple mobile platforms (iOS/tvOS/watchOS/visionOS — Zig doesn't ship their SDK headers).
-// Note: Zig force-enables link_libc for Darwin-based targets, so we must check os.tag directly.
+// Named-user lookup requires libc and a supported passwd layout. Zig can
+// force libc on for Apple mobile targets, where we skip named-user lookup.
 const has_pwd = switch (builtin.os.tag) {
     .windows, .ios, .tvos, .watchos, .visionos => false,
-    else => builtin.link_libc,
-};
-const pwd = if (has_pwd) @cImport({
-    @cInclude("pwd.h");
-}) else struct {
-    // Stub for platforms without pwd.h (Windows, Android, Apple mobile, no-libc builds)
-    pub const passwd = opaque {};
-    pub fn getpwnam(_: anytype) ?*passwd {
-        return null;
-    }
+    else => builtin.link_libc and std.c.passwd != void,
 };
 
 /// Build a path from directory and name components into the provided buffer.
@@ -167,14 +156,7 @@ pub fn expandTilde(allocator: Allocator, pattern: [:0]const u8, flags: ZlobFlags
             return pattern;
         }
     } else {
-        // ~username expansion - only supported on POSIX systems with libc (pwd.h)
-        if (!has_pwd) {
-            // No pwd.h support (Windows, Android, no-libc builds)
-            if (flags.tilde_check) {
-                return null;
-            }
-            return pattern;
-        }
+        if (comptime !has_pwd) return if (flags.tilde_check) null else pattern;
 
         const username = pattern[1..username_end];
 
@@ -188,23 +170,10 @@ pub fn expandTilde(allocator: Allocator, pattern: [:0]const u8, flags: ZlobFlags
         @memcpy(username_z[0..username.len], username);
         username_z[username.len] = 0;
 
-        const pw_entry = pwd.getpwnam(&username_z);
-        if (pw_entry == null) {
-            if (flags.tilde_check) {
-                return null;
-            }
-            return pattern;
-        }
-
-        const home_cstr = pw_entry.*.pw_dir;
-        if (home_cstr == null) {
-            if (flags.tilde_check) {
-                return null;
-            }
-            return pattern;
-        }
-
-        const home = mem.sliceTo(home_cstr, 0);
+        const pw_entry = std.c.getpwnam(username_z[0..username.len :0]) orelse
+            return if (flags.tilde_check) null else pattern;
+        const home_cstr = pw_entry.dir orelse return if (flags.tilde_check) null else pattern;
+        const home = mem.span(home_cstr);
         const rest = pattern[username_end..];
         const new_pattern = try allocator.allocSentinel(u8, home.len + rest.len, 0);
         @memcpy(new_pattern[0..home.len], home);
@@ -218,7 +187,7 @@ pub fn expandTilde(allocator: Allocator, pattern: [:0]const u8, flags: ZlobFlags
 /// the name cannot be null-terminated.
 fn getEnvVarBorrowed(allocator: Allocator, name: []const u8) ?[]const u8 {
     if (!builtin.link_libc) return null;
-    const name_z = allocator.dupeZ(u8, name) catch return null;
+    const name_z = allocator.dupeSentinel(u8, name, 0) catch return null;
     defer allocator.free(name_z);
     const ptr = std.c.getenv(name_z.ptr) orelse return null;
     return mem.sliceTo(ptr, 0);

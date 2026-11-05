@@ -436,8 +436,8 @@ pub const GitIgnore = struct {
                 return a.suffix_len < b.suffix_len;
             }
         }.lessThan);
-        var suffix_bucket_start = [_]u32{std.math.maxInt(u32)} ** 256;
-        var suffix_bucket_end = [_]u32{0} ** 256;
+        var suffix_bucket_start: [256]u32 = @splat(std.math.maxInt(u32));
+        var suffix_bucket_end: [256]u32 = @splat(0);
         for (suffix_patterns, 0..) |pattern, i| {
             const last = pattern.suffix.?[pattern.suffix.?.len - 1];
             if (suffix_bucket_start[last] == std.math.maxInt(u32)) {
@@ -463,7 +463,7 @@ pub const GitIgnore = struct {
         errdefer allocator.free(wildcard_gates);
         for (wildcard_patterns, wildcard_gates) |*p, *g| g.* = WildcardGate.init(p);
 
-        var lit_ll = [_]u64{0} ** 8;
+        var lit_ll: [8]u64 = @splat(0);
         {
             var it = literal_dirs.keyIterator();
             while (it.next()) |k| litLlSet(&lit_ll, k.*);

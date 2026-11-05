@@ -21,14 +21,14 @@ test "ZLOB_APPEND - basic append two patterns" {
     var pzlob: c_lib.zlob_t = undefined;
 
     // First glob: *.txt
-    const pattern1 = try allocator.dupeZ(u8, "test_append_basic/*.txt");
+    const pattern1 = try allocator.dupeSentinel(u8, "test_append_basic/*.txt", 0);
     defer allocator.free(pattern1);
     const result1 = c_lib.zlob(pattern1.ptr, 0, null, &pzlob);
     try testing.expectEqual(@as(c_int, 0), result1);
     try testing.expectEqual(@as(usize, 2), pzlob.zlo_pathc);
 
     // Second glob with APPEND: *.log
-    const pattern2 = try allocator.dupeZ(u8, "test_append_basic/*.log");
+    const pattern2 = try allocator.dupeSentinel(u8, "test_append_basic/*.log", 0);
     defer allocator.free(pattern2);
     const result2 = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_APPEND, null, &pzlob);
     try testing.expectEqual(@as(c_int, 0), result2);
@@ -73,19 +73,19 @@ test "ZLOB_APPEND - three consecutive appends" {
     var pzlob: c_lib.zlob_t = undefined;
 
     // First glob: *.c
-    const pattern1 = try allocator.dupeZ(u8, "test_append_three/*.c");
+    const pattern1 = try allocator.dupeSentinel(u8, "test_append_three/*.c", 0);
     defer allocator.free(pattern1);
     _ = c_lib.zlob(pattern1.ptr, 0, null, &pzlob);
     try testing.expectEqual(@as(usize, 1), pzlob.zlo_pathc);
 
     // Second glob with APPEND: *.h
-    const pattern2 = try allocator.dupeZ(u8, "test_append_three/*.h");
+    const pattern2 = try allocator.dupeSentinel(u8, "test_append_three/*.h", 0);
     defer allocator.free(pattern2);
     _ = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_APPEND, null, &pzlob);
     try testing.expectEqual(@as(usize, 2), pzlob.zlo_pathc);
 
     // Third glob with APPEND: *.zig
-    const pattern3 = try allocator.dupeZ(u8, "test_append_three/*.zig");
+    const pattern3 = try allocator.dupeSentinel(u8, "test_append_three/*.zig", 0);
     defer allocator.free(pattern3);
     _ = c_lib.zlob(pattern3.ptr, zlob_flags.ZLOB_APPEND, null, &pzlob);
     try testing.expectEqual(@as(usize, 3), pzlob.zlo_pathc);
@@ -107,13 +107,13 @@ test "ZLOB_APPEND - append to empty results" {
     var pzlob: c_lib.zlob_t = undefined;
 
     // First glob: pattern that matches nothing
-    const pattern1 = try allocator.dupeZ(u8, "test_append_empty/*.nonexistent");
+    const pattern1 = try allocator.dupeSentinel(u8, "test_append_empty/*.nonexistent", 0);
     defer allocator.free(pattern1);
     const result1 = c_lib.zlob(pattern1.ptr, 0, null, &pzlob);
     try testing.expectEqual(@as(c_int, zlob_flags.ZLOB_NOMATCH), result1);
 
     // Second glob with APPEND: pattern that matches something
-    const pattern2 = try allocator.dupeZ(u8, "test_append_empty/*.txt");
+    const pattern2 = try allocator.dupeSentinel(u8, "test_append_empty/*.txt", 0);
     defer allocator.free(pattern2);
     const result2 = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_APPEND, null, &pzlob);
     try testing.expectEqual(@as(c_int, 0), result2);
@@ -139,12 +139,12 @@ test "ZLOB_APPEND - preserve order with sorting" {
     var pzlob: c_lib.zlob_t = undefined;
 
     // First glob: *.txt (should be sorted: a.txt, z.txt)
-    const pattern1 = try allocator.dupeZ(u8, "test_append_order/*.txt");
+    const pattern1 = try allocator.dupeSentinel(u8, "test_append_order/*.txt", 0);
     defer allocator.free(pattern1);
     _ = c_lib.zlob(pattern1.ptr, 0, null, &pzlob);
 
     // Second glob with APPEND: *.log (should append sorted: b.log, m.log)
-    const pattern2 = try allocator.dupeZ(u8, "test_append_order/*.log");
+    const pattern2 = try allocator.dupeSentinel(u8, "test_append_order/*.log", 0);
     defer allocator.free(pattern2);
     _ = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_APPEND, null, &pzlob);
 
@@ -187,13 +187,13 @@ test "ZLOB_APPEND - with subdirectories" {
     var pzlob: c_lib.zlob_t = undefined;
 
     // First glob: dir1/*
-    const pattern1 = try allocator.dupeZ(u8, "test_append_dirs/dir1/*.txt");
+    const pattern1 = try allocator.dupeSentinel(u8, "test_append_dirs/dir1/*.txt", 0);
     defer allocator.free(pattern1);
     _ = c_lib.zlob(pattern1.ptr, 0, null, &pzlob);
     try testing.expectEqual(@as(usize, 1), pzlob.zlo_pathc);
 
     // Second glob with APPEND: dir2/*
-    const pattern2 = try allocator.dupeZ(u8, "test_append_dirs/dir2/*.txt");
+    const pattern2 = try allocator.dupeSentinel(u8, "test_append_dirs/dir2/*.txt", 0);
     defer allocator.free(pattern2);
     _ = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_APPEND, null, &pzlob);
     try testing.expectEqual(@as(usize, 2), pzlob.zlo_pathc);
@@ -226,13 +226,13 @@ test "ZLOB_APPEND - append many results" {
     var pzlob: c_lib.zlob_t = undefined;
 
     // First glob: *.txt (50 files)
-    const pattern1 = try allocator.dupeZ(u8, "test_append_many/*.txt");
+    const pattern1 = try allocator.dupeSentinel(u8, "test_append_many/*.txt", 0);
     defer allocator.free(pattern1);
     _ = c_lib.zlob(pattern1.ptr, 0, null, &pzlob);
     try testing.expectEqual(@as(usize, 50), pzlob.zlo_pathc);
 
     // Second glob with APPEND: *.log (50 more files)
-    const pattern2 = try allocator.dupeZ(u8, "test_append_many/*.log");
+    const pattern2 = try allocator.dupeSentinel(u8, "test_append_many/*.log", 0);
     defer allocator.free(pattern2);
     _ = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_APPEND, null, &pzlob);
     try testing.expectEqual(@as(usize, 100), pzlob.zlo_pathc);
@@ -257,7 +257,7 @@ test "ZLOB_APPEND - without initial glob should work" {
     pzlob.zlo_offs = 0;
 
     // Use ZLOB_APPEND on first call (should work like normal glob)
-    const pattern = try allocator.dupeZ(u8, "test_append_first/*.txt");
+    const pattern = try allocator.dupeSentinel(u8, "test_append_first/*.txt", 0);
     defer allocator.free(pattern);
     const result = c_lib.zlob(pattern.ptr, zlob_flags.ZLOB_APPEND, null, &pzlob);
     try testing.expectEqual(@as(c_int, 0), result);
@@ -284,13 +284,13 @@ test "ZLOB_APPEND - combined with ZLOB_NOSORT" {
     var pzlob: c_lib.zlob_t = undefined;
 
     // First glob with NOSORT
-    const pattern1 = try allocator.dupeZ(u8, "test_append_nosort/*.txt");
+    const pattern1 = try allocator.dupeSentinel(u8, "test_append_nosort/*.txt", 0);
     defer allocator.free(pattern1);
     _ = c_lib.zlob(pattern1.ptr, zlob_flags.ZLOB_NOSORT, null, &pzlob);
     try testing.expectEqual(@as(usize, 2), pzlob.zlo_pathc);
 
     // Append with NOSORT
-    const pattern2 = try allocator.dupeZ(u8, "test_append_nosort/*.log");
+    const pattern2 = try allocator.dupeSentinel(u8, "test_append_nosort/*.log", 0);
     defer allocator.free(pattern2);
     _ = c_lib.zlob(pattern2.ptr, zlob_flags.ZLOB_APPEND | zlob_flags.ZLOB_NOSORT, null, &pzlob);
     try testing.expectEqual(@as(usize, 3), pzlob.zlo_pathc);
@@ -312,7 +312,7 @@ test "ZLOB_APPEND - NOCHECK fallback keeps the earlier results" {
     var pzlob: c_lib.zlob_t = undefined;
     defer c_lib.zlobfree(&pzlob);
 
-    const first = try allocator.dupeZ(u8, "test_append_nocheck/*.txt");
+    const first = try allocator.dupeSentinel(u8, "test_append_nocheck/*.txt", 0);
     defer allocator.free(first);
     try testing.expectEqual(@as(c_int, 0), c_lib.zlob(first.ptr, 0, null, &pzlob));
     try testing.expectEqual(@as(usize, 1), pzlob.zlo_pathc);
@@ -335,7 +335,7 @@ test "ZLOB_APPEND - NOCHECK fallback keeps the earlier results" {
     }
 
     // A real match after the fallbacks still appends normally.
-    const last = try allocator.dupeZ(u8, "b.txt");
+    const last = try allocator.dupeSentinel(u8, "b.txt", 0);
     defer allocator.free(last);
     try testing.expectEqual(@as(c_int, 0), c_lib.zlob(last.ptr, zlob_flags.ZLOB_APPEND | zlob_flags.ZLOB_MATCH_BASENAME, null, &pzlob));
     try testing.expectEqual(expected + 1, pzlob.zlo_pathc);

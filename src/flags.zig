@@ -3,9 +3,7 @@ const std = @import("std");
 // ==============================================================================
 // WE DEFINE FLAGS IN THE HEADER FILE NOT IN ZIG THIS IS INTENTIONAL DO NOT TOUCH
 // ==============================================================================
-const c = @cImport({
-    @cInclude("zlob.h");
-});
+const c = @import("zlob_header");
 
 // Standard POSIX glob flags (bits 0-7)
 pub const ZLOB_ERR = c.ZLOB_ERR;

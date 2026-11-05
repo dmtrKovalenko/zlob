@@ -93,7 +93,7 @@ pub const DirEntries = if (!supported) struct {} else struct {
         while (true) {
             const r = __getdirentries64(self.fd, self.buf.ptr, self.buf.len, &self.basep);
             if (r < 0) {
-                if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+                if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
                 return error.ReadFailed;
             }
             if (r == 0) return false;
@@ -199,7 +199,7 @@ pub const BulkScanner = if (!supported) struct {} else struct {
             const n = getattrlistbulk(self.fd, &self.alist, self.buf.ptr, self.buf.len, FSOPT_NOFOLLOW);
             if (n < 0) {
                 const e = std.c._errno().*;
-                switch (@as(std.c.E, @enumFromInt(e))) {
+                switch (@as(std.c.E, @fromBackingInt(@intCast(e)))) {
                     .INTR => continue,
                     .INVAL, .OPNOTSUPP => return if (self.primed) error.ReadFailed else error.Unsupported,
                     .ACCES, .PERM => return error.PermissionDenied,

@@ -182,7 +182,7 @@ pub fn splitPathComponentsNormalized(path: []const u8, buffer: [][]const u8) ?[]
 
     if (path.len >= vec_len) {
         const Vec = @Vector(vec_len, u8);
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const MaskInt = @Int(.unsigned, vec_len);
         const slash_vec: Vec = @splat('/');
         const back_vec: Vec = @splat('\\');
         var idx: usize = 0;

@@ -410,10 +410,10 @@ mod tests {
     fn test_zlob_brace_expansion() {
         // both individual and brace combination work correctly
         let result = zlob("*.toml", ZlobFlags::empty()).unwrap().unwrap();
-        assert!(result.len() >= 1);
+        assert!(!result.is_empty());
 
         let result = zlob("*.lock", ZlobFlags::empty()).unwrap().unwrap();
-        assert!(result.len() >= 1);
+        assert!(!result.is_empty());
 
         let result = zlob("*.{toml,lock}", ZlobFlags::empty()).unwrap();
         assert!(result.is_none());

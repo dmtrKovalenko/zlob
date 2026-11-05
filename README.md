@@ -340,7 +340,7 @@ This allows a very fast SIMD processing of the paths and supports **NOT ALL** th
 
 ## Compilation
 
-Obviously to compile zlob as a C library you have to have installed `zig` toolchain (**only 0.16.0**) and then you can use standard make commands:
+To compile zlob as a C library, install Zig 0.17.1 or newer.
 
 ```bash
 make

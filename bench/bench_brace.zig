@@ -45,7 +45,7 @@ const BenchmarkResult = struct {
 fn getRepoPath(allocator: std.mem.Allocator) ![]const u8 {
     // Try PROFILE_BIG_REPO env var first (via libc getenv)
     if (builtin.link_libc) {
-        const name_z = try allocator.dupeZ(u8, "PROFILE_BIG_REPO");
+        const name_z = try allocator.dupeSentinel(u8, "PROFILE_BIG_REPO", 0);
         defer allocator.free(name_z);
         if (std.c.getenv(name_z.ptr)) |val| {
             const slice = std.mem.sliceTo(val, 0);

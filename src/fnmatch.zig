@@ -227,7 +227,7 @@ pub fn simdFindChar(haystack: []const u8, needle: u8) ?usize {
 
     if (haystack.len >= vec_len) {
         const Vec = @Vector(vec_len, u8);
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const MaskInt = @Int(.unsigned, vec_len);
         const needle_vec: Vec = @splat(needle);
 
         var i: usize = 0;
@@ -257,7 +257,7 @@ fn simdEqual(a: []const u8, b: []const u8) bool {
     const vec_len = std.simd.suggestVectorLength(u8) orelse 16;
     if (a.len >= vec_len) {
         const Vec = @Vector(vec_len, u8);
-        const MaskInt = std.meta.Int(.unsigned, vec_len);
+        const MaskInt = @Int(.unsigned, vec_len);
         const all_ones: MaskInt = @as(MaskInt, 0) -% 1;
         var i: usize = 0;
         while (i + vec_len <= a.len) : (i += vec_len) {
@@ -290,7 +290,7 @@ inline fn matchBracketBitmap(pattern: []const u8, bracket_pos: usize, ch: u8) st
     const bracket_start = pi;
 
     // Build a 256-bit bitmap for the character set
-    var bitmap: [32]u8 = [_]u8{0} ** 32;
+    var bitmap: [32]u8 = @splat(0);
 
     while (pi < pattern.len) {
         const set_c = pattern[pi];
@@ -390,7 +390,7 @@ fn getPosixClassType(name: []const u8) PosixCharClass {
 
 /// Comptime-precomputed 256-bit bitmap for each POSIX character class.
 fn posixClassBitmap(comptime class_type: PosixCharClass) [32]u8 {
-    var bitmap: [32]u8 = [_]u8{0} ** 32;
+    var bitmap: [32]u8 = @splat(0);
     switch (class_type) {
         .alpha => {
             addRangeToBitmap(&bitmap, 'A', 'Z');
@@ -448,16 +448,16 @@ fn posixClassBitmap(comptime class_type: PosixCharClass) [32]u8 {
 
 /// Lookup table of precomputed POSIX class bitmaps, indexed by enum value.
 const posix_class_bitmaps = blk: {
-    const fields = @typeInfo(PosixCharClass).@"enum".fields;
-    var table: [fields.len][32]u8 = undefined;
-    for (fields) |field| {
-        table[field.value] = posixClassBitmap(@enumFromInt(field.value));
+    const classes = std.meta.tags(PosixCharClass);
+    var table: [classes.len][32]u8 = undefined;
+    for (classes) |class| {
+        table[@backingInt(class)] = posixClassBitmap(class);
     }
     break :blk table;
 };
 
 fn addPosixClassToBitmap(bitmap: *[32]u8, class_type: PosixCharClass) void {
-    const class_bits: @Vector(32, u8) = posix_class_bitmaps[@intFromEnum(class_type)];
+    const class_bits: @Vector(32, u8) = posix_class_bitmaps[@backingInt(class_type)];
     const current: @Vector(32, u8) = bitmap.*;
     bitmap.* = current | class_bits;
 }
@@ -765,7 +765,7 @@ fn matchStar(alternatives: []const []const u8, rest_pattern: []const u8, string:
 fn matchPlus(alternatives: []const []const u8, rest_pattern: []const u8, string: []const u8, str_pos: usize) bool {
     // Use a visited bitset to avoid exponential re-exploration of the same string positions.
     // Supports strings up to 1024 chars; beyond that falls back to unguarded recursion.
-    var visited: [1024 / 8]u8 = [_]u8{0} ** (1024 / 8);
+    var visited: [1024 / 8]u8 = @splat(0);
     return matchPlusInner(alternatives, rest_pattern, string, str_pos, &visited);
 }
 
