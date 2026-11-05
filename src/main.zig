@@ -242,7 +242,7 @@ pub fn main(init: std.process.Init) !void {
     }
     _ = &flags; // suppress unused warning if match accepts anytype
 
-    var match_result = zlob.match(allocator, io, full_pattern, flags) catch |err| {
+    var match_result = zlob.match(init.gpa, io, full_pattern, flags) catch |err| {
         stderr.print("error: glob failed: {}\n", .{err}) catch {};
         stderr_writer.flush();
         std.process.exit(1);

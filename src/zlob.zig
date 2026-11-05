@@ -1554,7 +1554,7 @@ fn globRecursive(allocator: std.mem.Allocator, pattern: []const u8, dirname: []c
             base_dir,
             fs_provider,
         );
-    } else if (flags.parallel and base_dir == null and !fs_provider.isAltDirFunc() and gitignore_filter == null and
+    } else if (flags.parallel and !flags.follow_symlinks and base_dir == null and !fs_provider.isAltDirFunc() and
         try globRecursiveWalkParallel(allocator, &rec_pattern, start_dir, flags, &all_results, &info, errfunc))
     {
         // ZLOB_PARALLEL: the parallel walker filled all_results in worker
@@ -2277,8 +2277,12 @@ const ParallelGlobSink = struct {
         const self: *ParallelGlobSink = @ptrCast(@alignCast(ctx.?));
         const rec_pattern = self.rec_pattern;
         const is_dir = entry.kind == .directory;
-        // report_dirs already excludes directories unless directories_only.
         const rel_path = entry.relativePath();
+        const basename = entry.basename();
+
+        const filter = rec_pattern.gitignore_filter;
+        if (is_dir and filter != null and filter.?.checkInode(rel_path, basename, true) == true) return .skip_dir;
+        if (is_dir != self.info.directories_only) return .cont;
 
         if (rec_pattern.dir_components.len > 0) {
             const last_slash = mem.lastIndexOf(u8, rel_path, "/") orelse return .cont;
@@ -2289,7 +2293,7 @@ const ParallelGlobSink = struct {
         }
 
         const matches = matchRecursiveBasename(
-            entry.basename(),
+            basename,
             rec_pattern,
             &self.pattern_ctx,
             self.enable_extglob,
@@ -2297,7 +2301,7 @@ const ParallelGlobSink = struct {
             self.file_alt_extglob_mask,
         );
         if (!matches) return .cont;
-        if (self.info.directories_only and !is_dir) return .cont;
+        if (!is_dir and filter != null and filter.?.checkInode(rel_path, basename, false) == true) return .cont;
 
         const needs_mark = self.mark and is_dir;
         const base_path_len = if (self.use_dirname) self.start_dir.len + 1 + rel_path.len else rel_path.len;
@@ -2364,11 +2368,11 @@ fn globRecursiveWalkParallel(
         // up to max_depth + 1); the parallel one lists at entry depth <
         // max_depth. Hence the +1.
         .max_depth = walker.WalkerConfig.default_max_depth + 1,
-        .follow_symlinks = flags.follow_symlinks,
         .include_hidden = flags.period or pattern_wants_hidden,
         .respect_git = false,
         .skip_git_dir = false,
-        .report_dirs = info.directories_only,
+        // The visitor needs to see ignored directories so it can prune them.
+        .report_dirs = info.directories_only or rec_pattern.gitignore_filter != null,
         .pattern = null,
         .err_callback = if (errfunc != null) &parallelErrfuncTrampoline else null,
         .abort_on_error = flags.err,

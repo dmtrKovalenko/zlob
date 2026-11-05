@@ -119,8 +119,8 @@ typedef struct {
 /* Opt-in: run recursive `**` patterns over the parallel walker (up to
  * zlob_set_threads() worker threads, default 4). Results are identical to the
  * serial path (sorted unless ZLOB_NOSORT; under NOSORT the order differs).
- * Not used with ZLOB_ALTDIRFUNC, ZLOB_GITIGNORE, zlob_at(), or brace
- * alternatives before the `**` -- those fall back to the serial walker.
+ * ZLOB_ALTDIRFUNC, ZLOB_FOLLOW_SYMLINKS, zlob_at(), and brace alternatives
+ * before the `**` use the serial walker.
  * errfunc may be invoked from worker threads; calls are serialized. */
 #define ZLOB_PARALLEL             (1 << 29)
 

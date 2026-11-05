@@ -1189,6 +1189,37 @@ test "ZLOB_PARALLEL recursive glob matches serial result set" {
     }
 }
 
+test "ZLOB_PARALLEL honors gitignore during recursive globs" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("parglob_gitignore");
+    defer t.deinit();
+
+    try t.mkdir("drop");
+    try t.mkdir("src");
+    try t.mkdir("src/drop");
+    try t.mkdir("lib");
+    try t.write(".gitignore", "/drop/\n*.c\n!keep.c\n");
+    try t.write("drop/keep.c", "");
+    try t.write("src/drop/keep.c", "");
+    try t.write("src/keep.c", "");
+    try t.write("src/ignored.c", "");
+    try t.write("lib/.gitignore", "keep.c\n");
+    try t.write("lib/keep.c", "");
+
+    const old_cwd = try std.process.currentPathAlloc(t.io, alloc);
+    defer alloc.free(old_cwd);
+    try std.process.setCurrentPath(t.io, t.root);
+    defer std.process.setCurrentPath(t.io, old_cwd) catch unreachable;
+
+    const base = zlob_flags.ZLOB_DOUBLESTAR_RECURSIVE | zlob_flags.ZLOB_GITIGNORE;
+    try expectParallelEqualsSerial(alloc, "**/*.c", base, 4);
+    try expectParallelEqualsSerial(alloc, "src/**/*.c", base, 4);
+    try expectParallelEqualsSerial(alloc, "**/drop/*.c", base, 4);
+    try expectParallelEqualsSerial(alloc, "**/*", base | zlob_flags.ZLOB_ONLYDIR | zlob_flags.ZLOB_MARK, 4);
+}
+
 var par_errfunc_calls: usize = 0;
 fn countingErrfunc(_: [*:0]const u8, _: c_int) callconv(.c) c_int {
     par_errfunc_calls += 1;
