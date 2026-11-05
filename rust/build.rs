@@ -276,6 +276,11 @@ fn rust_target_to_clang(target: &str) -> String {
             } else {
                 arch
             };
+            // Rust spells the Apple simulator env `sim`, clang spells it `simulator`.
+            let rest = match rest.strip_suffix("-sim") {
+                Some(base) => format!("{base}-simulator"),
+                None => rest.to_string(),
+            };
             format!("{}-{}", clang_arch, rest)
         }
         None => target.to_string(),
