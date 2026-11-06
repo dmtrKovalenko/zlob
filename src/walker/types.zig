@@ -223,11 +223,6 @@ pub const Options = struct {
     /// Descend into symlinked directories (cycles are detected and broken).
     /// Not supported by the Windows ntdll backend.
     follow_symlinks: bool = false,
-    /// Visit the contents of each directory alias under its own path, skipping
-    /// unresolved links and links back to ancestors. Takes precedence over
-    /// follow_symlinks. Link entries and metadata retain their lstat semantics.
-    /// Directory symlink traversal is unsupported on the Windows ntdll backend.
-    follow_symlink_paths: bool = false,
     /// Report entries whose name starts with '.'. Hidden directories are not
     /// descended into when false.
     include_hidden: bool = true,
@@ -250,12 +245,6 @@ pub const Options = struct {
     /// else the default `~/.config/git/ignore`; a relative path is relative
     /// to the worktree root). Lowest precedence of all.
     git_global: bool = true,
-    /// Allow repository config to override the global core.excludesFile setting.
-    repo_excludes_file: bool = true,
-    /// Use ignore crate precedence and Git boundaries for discovered rules.
-    /// With gitignore_parents, parent .ignore files extend beyond the
-    /// containing worktree and the explicitly selected root is walked.
-    ignore_compat: bool = false,
     /// Skip rules from ".gitignore" when respect_git is set.
     skip_gitignore: bool = false,
     /// Skip rules from ".ignore" when respect_git is set.

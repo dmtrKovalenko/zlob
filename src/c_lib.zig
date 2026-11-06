@@ -781,9 +781,6 @@ const ZLOB_WALK_NO_GIT_GLOBAL: u32 = 1 << 8;
 const ZLOB_WALK_GITIGNORE_PARENTS: u32 = 1 << 9;
 const ZLOB_WALK_SKIP_GITIGNORE: u32 = 1 << 10;
 const ZLOB_WALK_SKIP_DOT_IGNORE: u32 = 1 << 11;
-const ZLOB_WALK_FOLLOW_SYMLINK_PATHS: u32 = 1 << 12;
-const ZLOB_WALK_NO_REPO_EXCLUDES_FILE: u32 = 1 << 13;
-const ZLOB_WALK_IGNORE_COMPAT: u32 = 1 << 14;
 
 fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
     const v: zlob_walk_options_t = if (options) |p| p.* else .{};
@@ -792,9 +789,6 @@ fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
         .threads = v.threads,
         .max_depth = v.max_depth,
         .follow_symlinks = f & ZLOB_WALK_FOLLOW_SYMLINKS != 0,
-        .follow_symlink_paths = f & ZLOB_WALK_FOLLOW_SYMLINK_PATHS != 0,
-        .repo_excludes_file = f & ZLOB_WALK_NO_REPO_EXCLUDES_FILE == 0,
-        .ignore_compat = f & ZLOB_WALK_IGNORE_COMPAT != 0,
         .include_hidden = f & ZLOB_WALK_SKIP_HIDDEN == 0,
         .respect_git = f & ZLOB_WALK_GITIGNORE != 0,
         .gitignore_parents = f & ZLOB_WALK_GITIGNORE_PARENTS != 0,

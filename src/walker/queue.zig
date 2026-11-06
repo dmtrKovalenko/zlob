@@ -24,8 +24,6 @@ pub const DirTask = struct {
     /// The open could not guarantee it stayed on `dev` (mount crossing, or no
     /// openat2): re-derive the key with one statx once the dir is open.
     verify_key: bool = false,
-    /// With follow_symlink_paths, only an already checked link may be followed.
-    via_symlink: bool = false,
 };
 
 const LocalQueue = struct {

@@ -4,12 +4,13 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 use proptest::prelude::*;
 
 mod common;
 use common::{git_available, git_ignored_paths, git_init, git_kept};
-use zlob::walk::{WalkBuilder, WalkFlags};
+use zlob::walk::{WalkBuilder, WalkFlags, WalkState};
 use zlob::{ZlobFlags, zlob};
 
 /// The reference git runs with global and system config scrubbed (see
@@ -426,6 +427,7 @@ fn subtree_walk_can_inherit_gitignore_rules() {
     fs::write(repo.join("project/.gitignore"), "/src/intermediate.txt\n").unwrap();
     fs::write(repo.join(".git/info/exclude"), "/project/src/private.txt\n").unwrap();
     fs::write(subtree.join(".gitignore"), "!keep.log\n/local.txt\n").unwrap();
+    fs::write(subtree.join(".ignore"), "!app.log\nmain.rs\n").unwrap();
     fs::write(
         subtree.join("nested/.gitignore"),
         "!keep.log\n/nested.txt\n",
@@ -454,22 +456,40 @@ fn subtree_walk_can_inherit_gitignore_rules() {
         fs::write(subtree.join(path), "x").unwrap();
     }
 
-    let options = SCRUBBED | WalkFlags::GITIGNORE_PARENTS | WalkFlags::NO_REPORT_DIRS;
+    let options = SCRUBBED
+        | WalkFlags::GITIGNORE_PARENTS
+        | WalkFlags::NO_REPORT_DIRS
+        | WalkFlags::SKIP_DOT_IGNORE;
     let expected = git_kept(&subtree);
     let ignored = git_ignored_paths(&subtree, &paths);
     assert!(zlob_kept(&subtree, 1).contains("blocked/inside.rs"));
     for &threads in THREAD_COUNTS {
-        let walk = WalkBuilder::new(&subtree)
-            .unwrap()
-            .options(options)
-            .threads(threads)
-            .collect()
-            .unwrap();
+        let mut builder = WalkBuilder::new(&subtree).unwrap();
+        builder.options(options).threads(threads);
+        let walk = builder.collect().unwrap();
         let kept: BTreeSet<_> = walk
             .iter()
             .map(|entry| entry.relative_path().to_string_lossy().into_owned())
             .collect();
         assert_eq!(kept, expected, "files at {threads} threads");
+
+        let visited = Mutex::new(Vec::new());
+        builder
+            .visit(|entry| {
+                visited
+                    .lock()
+                    .unwrap()
+                    .push(entry.relative_path().to_string_lossy().into_owned());
+                WalkState::Continue
+            })
+            .unwrap();
+        let mut visited = visited.into_inner().unwrap();
+        visited.sort();
+        assert_eq!(
+            visited,
+            expected.iter().cloned().collect::<Vec<_>>(),
+            "streamed files at {threads} threads"
+        );
 
         let rules = walk.ignore_rules().unwrap();
         let ignored_by_walk = paths

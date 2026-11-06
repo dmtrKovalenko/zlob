@@ -378,17 +378,12 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
 #define ZLOB_WALK_GITIGNORE_PARENTS (1u << 9)  /* with GITIGNORE: inherit parent dirs' rules */
 #define ZLOB_WALK_SKIP_GITIGNORE    (1u << 10) /* with GITIGNORE: skip .gitignore rules */
 #define ZLOB_WALK_SKIP_DOT_IGNORE   (1u << 11) /* with GITIGNORE: skip .ignore rules */
-#define ZLOB_WALK_FOLLOW_SYMLINK_PATHS                                                             \
-  (1u << 12) /* visit each alias, skipping dangling links and ancestor cycles */
-#define ZLOB_WALK_NO_REPO_EXCLUDES_FILE                                                            \
-  (1u << 13)                               /* use the global core.excludesFile setting only */
-#define ZLOB_WALK_IGNORE_COMPAT (1u << 14) /* use ignore crate precedence and Git boundaries */
 
 /** Entry kinds. */
-#define ZLOB_WALK_KIND_UNKNOWN  0
-#define ZLOB_WALK_KIND_FILE     1
-#define ZLOB_WALK_KIND_DIR      2
-#define ZLOB_WALK_KIND_SYMLINK  3
+#define ZLOB_WALK_KIND_UNKNOWN      0
+#define ZLOB_WALK_KIND_FILE         1
+#define ZLOB_WALK_KIND_DIR          2
+#define ZLOB_WALK_KIND_SYMLINK      3
 
 /** Error callback: return non-zero to abort the walk. */
 typedef int (*zlob_walk_errfunc_t)(const char *epath, int eerrno);

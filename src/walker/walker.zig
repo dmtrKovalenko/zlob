@@ -264,15 +264,13 @@ fn walkImpl(
     var transient_rules = IgnoreRules{ .allocator = allocator };
     defer transient_rules.deinit();
     const ignore_rules = retained_rules orelse &transient_rules;
-    ignore_rules.follow_symlink_paths = options.follow_symlink_paths and !types.is_windows_backend;
 
     // Root prefix: root/ (or "" for an empty root meaning cwd-relative
     // output, or "root" when it already ends with /).
     var prefix_buf: [types.MAX_PATH]u8 = undefined;
     var prefix_len: usize = 0;
     if (root.len > 0) {
-        const max_root_len: usize = if (options.ignore_compat) MAX_PATH - 1 else MAX_PATH - 2;
-        if (root.len > max_root_len) {
+        if (root.len >= MAX_PATH - 1) {
             // Root doesn't fit the path-assembly buffer; report it like any
             // other directory error and produce an empty walk.
             if (options.err_callback) |cb| {
@@ -312,7 +310,6 @@ fn walkImpl(
         .allocator = allocator,
         .io = io,
         .options = options,
-        .unique_dirs = options.follow_symlinks and !options.follow_symlink_paths,
         .root_path = root,
         .root_path_with_slash = prefix_buf[0..prefix_len],
         .root_prefix_len = @intCast(prefix_len),
@@ -331,15 +328,6 @@ fn walkImpl(
         .finish = finish,
     };
 
-    if (options.respect_git and options.ignore_compat) {
-        ignore_rules.compat = true;
-        sh.git.want_global = false;
-        sh.git.ignore_compat = true;
-        if (options.git_global) {
-            try ignore_rules.loadCompatGlobal(io);
-        }
-    }
-    sh.git.use_repo_setting = options.repo_excludes_file;
     defer sh.git.deinit();
     if (options.respect_git and options.gitignore_parents) {
         try worker.loadParentIgnoreRules(&sh);
@@ -349,9 +337,8 @@ fn walkImpl(
     try sh.queue.init(allocator, n_workers);
     defer sh.queue.deinit(allocator);
     defer sh.visited.deinit(allocator);
-    defer if (sh.alias_root) |root_ref| root_ref.release(&sh);
 
-    if (sh.unique_dirs) worker.recordRootVisited(&sh);
+    if (options.follow_symlinks) worker.recordRootVisited(&sh);
 
     // All fallible allocations happen before the root task is queued so an
     // early error can't leak in-flight tasks.

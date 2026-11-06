@@ -65,19 +65,6 @@ bitflags! {
         const SKIP_GITIGNORE  = 1 << 10;
         /// With [`Self::GITIGNORE`]: skip rules from `.ignore` files.
         const SKIP_DOT_IGNORE = 1 << 11;
-        /// Walk each logical path to a directory, including symlink aliases.
-        /// Skip dangling links and links to ancestors. Supersedes FOLLOW_SYMLINKS.
-        /// Entries and requested metadata still describe the link itself.
-        /// Directory symlink traversal is unsupported on the Windows ntdll backend.
-        const FOLLOW_SYMLINK_PATHS = 1 << 12;
-        /// With GITIGNORE, use the global excludes file even when the repository
-        /// overrides core.excludesFile. Repository info/exclude still applies.
-        const NO_REPO_EXCLUDES_FILE = 1 << 13;
-        /// With GITIGNORE, prioritize .ignore rules across directories and
-        /// scope Git rules to the nearest .git or .jj boundary. Global rules
-        /// use the process working directory as their base.
-        /// With GITIGNORE_PARENTS, inherit .ignore above the worktree too.
-        const IGNORE_COMPAT = 1 << 14;
 
         /// `ignore`-crate like defaults: [`Self::GITIGNORE`] | [`Self::SKIP_HIDDEN`]
         const RECOMMENDED     = Self::GITIGNORE.bits() | Self::SKIP_HIDDEN.bits();
@@ -815,39 +802,6 @@ mod tests {
         assert_eq!(names, vec!["Cargo.toml", "src", "src/main.rs"]);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn follow_symlink_paths_rechecks_a_retargeted_directory_link() -> std::io::Result<()> {
-        use std::os::unix::fs::symlink;
-        use std::path::PathBuf;
-
-        let dir = tempfile::tempdir()?;
-        let root = dir.path();
-        let alias = root.join("alias");
-        fs::create_dir(root.join("real"))?;
-        fs::write(root.join("real/leaf"), "")?;
-        symlink("real", &alias)?;
-
-        let mut retargeted = Ok(());
-        let mut paths = Vec::new();
-        WalkBuilder::new(root)
-            .unwrap()
-            .options(WalkFlags::FOLLOW_SYMLINK_PATHS)
-            .run_serial(|entry| {
-                let path = entry.relative_path();
-                if path == Path::new("alias") {
-                    retargeted = fs::remove_file(&alias).and_then(|()| symlink(".", &alias));
-                }
-                paths.push(path.to_owned());
-                WalkState::Continue
-            })
-            .unwrap();
-        retargeted?;
-        paths.sort();
-        assert_eq!(paths, ["alias", "real", "real/leaf"].map(PathBuf::from));
-        Ok(())
-    }
-
     #[test]
     fn build_plain_walkdir_mode() {
         let dir = make_tree();
@@ -962,30 +916,6 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count.load(Ordering::Relaxed), 7);
-    }
-
-    #[test]
-    fn visit_applies_nested_rules_without_returning_a_rules_handle() {
-        let dir = make_tree();
-        fs::write(dir.path().join("src/.ignore"), "!keep.log\n").unwrap();
-        fs::write(dir.path().join("src/keep.log"), "").unwrap();
-        fs::write(dir.path().join("src/drop.log"), "").unwrap();
-
-        let paths = std::sync::Mutex::new(Vec::new());
-        WalkBuilder::new(dir.path())
-            .unwrap()
-            .threads(4)
-            .visit(|entry| {
-                paths.lock().unwrap().push(entry.relative_path().to_owned());
-                WalkState::Continue
-            })
-            .unwrap();
-        let mut actual = paths.into_inner().unwrap();
-        actual.sort();
-        assert_eq!(
-            actual,
-            ["Cargo.toml", "src", "src/keep.log", "src/main.rs"].map(std::path::PathBuf::from)
-        );
     }
 
     #[test]
