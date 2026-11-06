@@ -781,6 +781,9 @@ const ZLOB_WALK_NO_GIT_GLOBAL: u32 = 1 << 8;
 const ZLOB_WALK_GITIGNORE_PARENTS: u32 = 1 << 9;
 const ZLOB_WALK_SKIP_GITIGNORE: u32 = 1 << 10;
 const ZLOB_WALK_SKIP_DOT_IGNORE: u32 = 1 << 11;
+const ZLOB_WALK_FOLLOW_SYMLINK_PATHS: u32 = 1 << 12;
+const ZLOB_WALK_NO_REPO_EXCLUDES_FILE: u32 = 1 << 13;
+const ZLOB_WALK_IGNORE_COMPAT: u32 = 1 << 14;
 
 fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
     const v: zlob_walk_options_t = if (options) |p| p.* else .{};
@@ -789,6 +792,9 @@ fn walkOptionsFromC(options: ?*const zlob_walk_options_t) walk.Options {
         .threads = v.threads,
         .max_depth = v.max_depth,
         .follow_symlinks = f & ZLOB_WALK_FOLLOW_SYMLINKS != 0,
+        .follow_symlink_paths = f & ZLOB_WALK_FOLLOW_SYMLINK_PATHS != 0,
+        .repo_excludes_file = f & ZLOB_WALK_NO_REPO_EXCLUDES_FILE == 0,
+        .ignore_compat = f & ZLOB_WALK_IGNORE_COMPAT != 0,
         .include_hidden = f & ZLOB_WALK_SKIP_HIDDEN == 0,
         .respect_git = f & ZLOB_WALK_GITIGNORE != 0,
         .gitignore_parents = f & ZLOB_WALK_GITIGNORE_PARENTS != 0,
@@ -857,6 +863,16 @@ fn cWalkVisit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
     };
 }
 
+fn walkErrorCode(err: walk.WalkError) c_int {
+    return switch (err) {
+        error.Aborted => zlob_flags.ZLOB_ABORTED,
+        error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
+        error.ReadFailed => zlob_flags.ZLOB_READ_FAILED,
+        error.PermissionDenied => zlob_flags.ZLOB_PERMISSION_DENIED,
+        error.NameTooLong => zlob_flags.ZLOB_NAME_TOO_LONG,
+    };
+}
+
 /// Stream every entry through `cb`. On success (rc==0), if `out_rules` is
 /// non-NULL, the retained `IgnoreRules` handle is written there; the caller
 /// then owns it and must release with `zlob_ignore_rules_free`. Pass NULL
@@ -874,21 +890,13 @@ pub export fn zlob_walk(
 
     const root_slice = mem.sliceTo(root, 0);
     var cctx = CWalkCtx{ .cb = cb, .user = ctx };
-    const rules = walk.run(allocator, root_slice, walkOptionsFromC(options), .{
-        .context = @ptrCast(&cctx),
-        .visit = cWalkVisit,
-    }) catch |err| return switch (err) {
-        error.Aborted => zlob_flags.ZLOB_ABORTED,
-        error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
-        error.ReadFailed => zlob_flags.ZLOB_READ_FAILED,
-        error.PermissionDenied => zlob_flags.ZLOB_PERMISSION_DENIED,
-        error.NameTooLong => zlob_flags.ZLOB_NAME_TOO_LONG,
-    };
+    const visitor: walk.Visitor = .{ .context = @ptrCast(&cctx), .visit = cWalkVisit };
+    const opts = walkOptionsFromC(options);
     if (out_rules) |slot| {
+        const rules = walk.run(allocator, root_slice, opts, visitor) catch |err| return walkErrorCode(err);
         slot.* = @ptrCast(rules);
     } else {
-        rules.deinit();
-        allocator.destroy(rules);
+        walk.visit(allocator, root_slice, opts, visitor) catch |err| return walkErrorCode(err);
     }
     return 0;
 }
@@ -942,13 +950,7 @@ pub export fn zlob_walk_collect(
 
     const root_slice = mem.sliceTo(root, 0);
     var results = walk.collectAs(allocator, root_slice, walkOptionsFromC(options), CWalkAdapter) catch |err|
-        return switch (err) {
-            error.Aborted => zlob_flags.ZLOB_ABORTED,
-            error.OutOfMemory => zlob_flags.ZLOB_NOSPACE,
-            error.ReadFailed => zlob_flags.ZLOB_READ_FAILED,
-            error.PermissionDenied => zlob_flags.ZLOB_PERMISSION_DENIED,
-            error.NameTooLong => zlob_flags.ZLOB_NAME_TOO_LONG,
-        };
+        return walkErrorCode(err);
 
     // Keep a holder even with no entries so the caller can still query the
     // (always-retained) reusable ignore rules.

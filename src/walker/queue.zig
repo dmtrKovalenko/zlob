@@ -24,11 +24,13 @@ pub const DirTask = struct {
     /// The open could not guarantee it stayed on `dev` (mount crossing, or no
     /// openat2): re-derive the key with one statx once the dir is open.
     verify_key: bool = false,
+    /// With follow_symlink_paths, only an already checked link may be followed.
+    via_symlink: bool = false,
 };
 
 const LocalQueue = struct {
     mutex: std.Io.Mutex = .init,
-    items: std.ArrayList(*DirTask) = .empty,
+    items: std.ArrayList(DirTask) = .empty,
     approx_len: std.atomic.Value(usize) = .init(0),
 
     fn deinit(lq: *LocalQueue, gpa: Allocator) void {
@@ -57,7 +59,8 @@ pub const Queue = struct {
         gpa.free(q.locals);
     }
 
-    pub fn push(q: *Queue, gpa: Allocator, io: std.Io, worker_id: u32, t: *DirTask) !void {
+    /// A successful push transfers ownership of the path and references to the queue.
+    pub fn push(q: *Queue, gpa: Allocator, io: std.Io, worker_id: u32, t: DirTask) !void {
         const local = &q.locals[q.localIndex(worker_id)];
         local.mutex.lockUncancelable(io);
         errdefer local.mutex.unlock(io);
@@ -69,7 +72,7 @@ pub const Queue = struct {
         if (queued_before < q.locals.len) q.wakeOne(io);
     }
 
-    pub fn pop(q: *Queue, io: std.Io, worker_id: u32) ?*DirTask {
+    pub fn pop(q: *Queue, io: std.Io, worker_id: u32) ?DirTask {
         const home = q.localIndex(worker_id);
         while (true) {
             if (q.popFrom(io, home)) |task| return task;
@@ -107,7 +110,7 @@ pub const Queue = struct {
         return @as(usize, @intCast(worker_id)) % q.locals.len;
     }
 
-    fn popFrom(q: *Queue, io: std.Io, index: usize) ?*DirTask {
+    fn popFrom(q: *Queue, io: std.Io, index: usize) ?DirTask {
         const local = &q.locals[index];
         if (local.approx_len.load(.acquire) == 0) return null;
         local.mutex.lockUncancelable(io);
@@ -119,7 +122,7 @@ pub const Queue = struct {
         return task;
     }
 
-    fn steal(q: *Queue, io: std.Io, home: usize) ?*DirTask {
+    fn steal(q: *Queue, io: std.Io, home: usize) ?DirTask {
         var offset: usize = 1;
         while (offset < q.locals.len) : (offset += 1) {
             const index = (home + offset) % q.locals.len;

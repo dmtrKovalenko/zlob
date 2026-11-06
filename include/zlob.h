@@ -378,12 +378,17 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
 #define ZLOB_WALK_GITIGNORE_PARENTS (1u << 9)  /* with GITIGNORE: inherit parent dirs' rules */
 #define ZLOB_WALK_SKIP_GITIGNORE    (1u << 10) /* with GITIGNORE: skip .gitignore rules */
 #define ZLOB_WALK_SKIP_DOT_IGNORE   (1u << 11) /* with GITIGNORE: skip .ignore rules */
+#define ZLOB_WALK_FOLLOW_SYMLINK_PATHS                                                             \
+  (1u << 12) /* visit each alias, skipping dangling links and ancestor cycles */
+#define ZLOB_WALK_NO_REPO_EXCLUDES_FILE                                                            \
+  (1u << 13)                               /* use the global core.excludesFile setting only */
+#define ZLOB_WALK_IGNORE_COMPAT (1u << 14) /* use ignore crate precedence and Git boundaries */
 
 /** Entry kinds. */
-#define ZLOB_WALK_KIND_UNKNOWN      0
-#define ZLOB_WALK_KIND_FILE         1
-#define ZLOB_WALK_KIND_DIR          2
-#define ZLOB_WALK_KIND_SYMLINK      3
+#define ZLOB_WALK_KIND_UNKNOWN  0
+#define ZLOB_WALK_KIND_FILE     1
+#define ZLOB_WALK_KIND_DIR      2
+#define ZLOB_WALK_KIND_SYMLINK  3
 
 /** Error callback: return non-zero to abort the walk. */
 typedef int (*zlob_walk_errfunc_t)(const char *epath, int eerrno);
@@ -447,10 +452,9 @@ typedef struct zlob_walk_entry {
 typedef int (*zlob_walk_cb)(const zlob_walk_entry_t *entry, void *ctx);
 
 /**
- * Walking the file tree and calling the callback per every entry
- * respecting the options and metadata settings. Starts from the root path.
- *
- * When finished walking writes the inferred ignore rules ot the out_rules ptr
+ * Stream entries under root through cb. Pass NULL for out_rules to release
+ * ignore rules as workers finish their subtrees. Otherwise, on success,
+ * *out_rules receives a handle owned by the caller (see zlob_ignore_rules_free).
  */
 int zlob_walk(const char *root, const zlob_walk_options_t *options, zlob_walk_cb cb, void *ctx,
               void **out_rules);

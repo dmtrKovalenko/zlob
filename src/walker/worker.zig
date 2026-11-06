@@ -31,6 +31,9 @@ const VisitAction = types.VisitAction;
 const MAX_PATH = types.MAX_PATH;
 const NAME_MAX = types.NAME_MAX;
 const NAME_BUF = types.NAME_BUF_Z_LENGTH;
+// A path read from a directory listing can fit even when opening that
+// child's assembled path would exceed the operating system's limit.
+const MAX_ENTRY_PATH = MAX_PATH + NAME_MAX;
 const closeFd = types.closeFd;
 const closeHandle = types.closeHandle;
 
@@ -83,6 +86,9 @@ pub const IgnoreNode = struct {
     relative_offset: u32,
     refs: std.atomic.Value(u32),
     chain_last: gitignore_mod.LastByteFilter = .{},
+    source: enum { combined, git, dot_ignore } = .combined,
+    git_boundary: bool = false,
+    in_git_context: bool = false,
 
     pub fn retain(self: *IgnoreNode) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -104,6 +110,8 @@ pub const SharedWorkerState = struct {
     allocator: Allocator,
     io: std.Io,
     options: Options,
+    /// The legacy follow mode visits each physical directory once per walk.
+    unique_dirs: bool,
     root_path: []const u8,
     /// "root/" — copied into each worker's path buffer at init.
     root_path_with_slash: []const u8,
@@ -139,6 +147,9 @@ pub const SharedWorkerState = struct {
     /// before helper threads exist; only ever cleared afterwards (a followed
     /// symlink left the root's device), hence the atomic.
     trust_short: std.atomic.Value(bool) = .init(false),
+    /// Retained for root-relative ancestor lookups in the alias-following mode.
+    /// The root worker sets this before publishing its first child task.
+    alias_root: ?*HandleRef = null,
     /// Device of the walk root, for the cross-device check above.
     root_dev: u64 = 0,
     /// Linux only: directories are opened with O_NOATIME so getdents64 never
@@ -161,6 +172,7 @@ pub const SharedWorkerState = struct {
     openat2_unavailable: std.atomic.Value(bool) = .init(false),
     /// Reusable ignore rules. Workers register each parsed `.gitignore`/ `.ignore`
     ignore_rules: *IgnoreRules,
+    retain_rules: bool,
     retain_mutex: std.Io.Mutex = .init,
     /// Lazy worker spawning: helper threads are created only once the walk has
     /// demonstrably parallel work, so shallow trees never pay the spawn cost.
@@ -240,7 +252,7 @@ pub const Worker = struct {
     id: u32,
     sh: *SharedWorkerState,
     /// Full-path assembly buffer; [0..root_prefix_len) holds "root/".
-    path_buf: [MAX_PATH + 1]u8 = undefined,
+    path_buf: [MAX_ENTRY_PATH + 1]u8 = undefined,
     /// Per-directory name bytes (reset per task, capacity retained).
     names: std.ArrayList(u8) = .empty,
     entries: std.ArrayList(Scratch) = .empty,
@@ -257,6 +269,7 @@ pub const Worker = struct {
     /// The listing's `.git` entry, if any: this directory is a repository
     /// root whose exclude files apply.
     dot_git: ?git_excludes.DotGit = null,
+    saw_dot_jj: bool = false,
     /// Kernel buffer for getdents64 / getattrlistbulk.
     io_buf: []align(8) u8 = &.{},
     /// Worktree-relative match path, allocated only when inheriting rules.
@@ -276,7 +289,7 @@ pub const Worker = struct {
         errdefer if (w.io_buf.len > 0) sh.allocator.free(w.io_buf);
         const scope_prefix = sh.ignore_rules.scope_prefix;
         if (scope_prefix.len > 0) {
-            const path = try sh.allocator.alloc(u8, scope_prefix.len + MAX_PATH);
+            const path = try sh.allocator.alloc(u8, scope_prefix.len + MAX_ENTRY_PATH);
             @memcpy(path[0..scope_prefix.len], scope_prefix);
             w.scoped_path = path;
         }
@@ -295,11 +308,10 @@ pub const Worker = struct {
     }
 };
 
-pub fn freeTask(sh: *SharedWorkerState, t: *DirTask) void {
+pub fn freeTask(sh: *SharedWorkerState, t: DirTask) void {
     if (t.parent) |p| p.release(sh);
     if (t.ignore) |ig| ig.release(sh.allocator);
     sh.allocator.free(t.rel);
-    sh.allocator.destroy(t);
 }
 
 fn workerThreadMain(ctx: *anyopaque) void {
@@ -318,6 +330,18 @@ inline fn noteIgnoreFile(w: *Worker, name: []const u8, kind: EntryKind) void {
         w.saw_ignore = true;
     } else if (name.len == 4 and mem.eql(u8, name, ".git")) {
         w.dot_git = .fromKind(kind);
+    } else if (w.sh.options.ignore_compat) {
+        // These are candidates on case-insensitive filesystems. All opens
+        // and stats still use the canonical name to check the actual lookup.
+        switch (name.len) {
+            3 => w.saw_dot_jj = w.saw_dot_jj or std.ascii.eqlIgnoreCase(name, ".jj"),
+            4 => if (std.ascii.eqlIgnoreCase(name, ".git")) {
+                w.dot_git = .unknown;
+            },
+            7 => w.saw_ignore = w.saw_ignore or std.ascii.eqlIgnoreCase(name, ".ignore"),
+            10 => w.saw_gitignore = w.saw_gitignore or std.ascii.eqlIgnoreCase(name, ".gitignore"),
+            else => {},
+        }
     }
 }
 
@@ -345,7 +369,7 @@ pub inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: types.RawEn
     if (sh.options.meta.any()) {
         try w.metas.append(sh.allocator, raw.meta);
     }
-    if (sh.options.follow_symlinks) {
+    if (sh.unique_dirs) {
         try w.inos.append(sh.allocator, raw.ino);
     }
 }
@@ -367,7 +391,7 @@ pub inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []co
         .name_len = @intCast(name.len),
         .kind = kind,
     });
-    if (sh.options.follow_symlinks) {
+    if (sh.unique_dirs) {
         try w.inos.append(sh.allocator, 0);
     }
 }
@@ -382,9 +406,10 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
     // walker.zig relies on that).
     var may_spawn = state.threads.len > 0;
 
-    while (state.queue.pop(state.io, worker.id)) |task| {
+    while (state.queue.pop(state.io, worker.id)) |next_task| {
+        var task = next_task;
         if (!state.abort_signal.load(.acquire)) {
-            processDir(state, worker, task) catch |err| switch (err) {
+            processDir(state, worker, &task) catch |err| switch (err) {
                 error.OutOfMemory => state.fail(.oom),
                 error.ReadFailed => state.fail(.read_failed),
                 error.PermissionDenied => state.fail(.permission_denied),
@@ -431,10 +456,20 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     var handle_consumed = false;
     defer if (!handle_consumed) closeHandle(handle, sh.io);
 
+    if (sh.options.follow_symlink_paths and !is_windows_backend and (task.depth == 0 or task.via_symlink)) {
+        // Capture the actual root before helpers start. A queued link may
+        // have been retargeted since we checked its ancestors.
+        const opened = statEntry(sh, handle, "", true) orelse return;
+        if (task.depth == 0) {
+            sh.root_key = opened.key;
+        } else if (opened.key.dev != task.dev or opened.key.ino != task.ino) return;
+    }
+
     // The root is the first and only task before any helper thread is
     // spawned, so this plain store is published to them by the spawn.
     if (comptime backend == .linux_getdents) {
-        if (task.depth == 0 and sh.options.trust_short_getdents == .auto) {
+        // Aliases can lead outside the mount tree checked by trustShortReaddir.
+        if (task.depth == 0 and !sh.options.follow_symlink_paths and sh.options.trust_short_getdents == .auto) {
             sh.trust_short.store(scan_linux.trustShortReaddir(handle), .monotonic);
         }
     }
@@ -443,7 +478,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     // unavailable) is re-keyed BEFORE its scan: the directory may sit on a
     // filesystem the short-read gate never examined, so its own listing
     // must already run with trust cleared, not just its children's.
-    const verify_first = builtin.os.tag == .linux and sh.options.follow_symlinks and task.depth != 0 and task.verify_key;
+    const verify_first = builtin.os.tag == .linux and sh.unique_dirs and task.depth != 0 and task.verify_key;
     if (verify_first) {
         if (!resolveTaskKey(sh, task, handle, 0)) return;
     }
@@ -456,6 +491,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     w.saw_gitignore = false;
     w.saw_ignore = false;
     w.dot_git = null;
+    w.saw_dot_jj = false;
     scan.scanDir(sh, w, handle) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -468,7 +504,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     // Same-filesystem opens are keyed by the listing's d_ino and checked
     // against the "." record the scan just produced (no syscall when they
     // agree, see resolveTaskKey).
-    if (builtin.os.tag == .linux and sh.options.follow_symlinks and task.depth != 0 and !verify_first) {
+    if (builtin.os.tag == .linux and sh.unique_dirs and task.depth != 0 and !verify_first) {
         if (!resolveTaskKey(sh, task, handle, w.dot_ino)) return;
     }
 
@@ -483,12 +519,16 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     defer if (own_ignore) ignore.?.release(sh.allocator);
     const load_gitignore = w.saw_gitignore and !sh.options.skip_gitignore;
     const load_dot_ignore = w.saw_ignore and !sh.options.skip_dot_ignore;
-    if (sh.options.respect_git and (load_gitignore or load_dot_ignore or (w.dot_git != null and sh.git.enabled()))) {
+    const load_vcs = if (sh.options.ignore_compat)
+        w.dot_git != null or w.saw_dot_jj
+    else
+        w.dot_git != null and sh.git.enabled();
+    if (sh.options.respect_git and (load_gitignore or load_dot_ignore or load_vcs)) {
         @branchHint(.unlikely);
         if (try loadIgnoreNode(sh, handle, task, w, prefix_len)) |node| {
             ignore = node;
             own_ignore = true;
-            {
+            if (sh.retain_rules) {
                 sh.retain_mutex.lockUncancelable(sh.io);
                 defer sh.retain_mutex.unlock(sh.io);
                 sh.ignore_rules.put(task.rel, node) catch return error.OutOfMemory;
@@ -500,7 +540,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     const entry_depth: u16 = task.depth +| 1;
     const may_descend = opts.max_depth == 0 or entry_depth < opts.max_depth;
     const want_meta = opts.meta.any();
-    const have_inos = opts.follow_symlinks and w.inos.items.len == w.entries.items.len;
+    const have_inos = sh.unique_dirs and w.inos.items.len == w.entries.items.len;
     var child_ref: ?*HandleRef = null;
     defer if (child_ref) |cr| cr.release(sh);
 
@@ -537,22 +577,28 @@ fn processEntry(
     if (!opts.include_hidden and name[0] == '.') return;
 
     var is_dir = entry_kind == .directory;
-    if (opts.respect_git and opts.skip_git_dir and is_dir and
-        mem.eql(u8, name, ".git"))
+    const path_len = prefix_len + name.len;
+    const too_long_to_open = path_len >= MAX_PATH;
+    if (too_long_to_open and (!opts.ignore_compat or path_len > MAX_ENTRY_PATH or
+        entry_kind == .sym_link or entry_kind == .unknown))
     {
-        @branchHint(.unlikely);
-        return;
-    }
-
-    if (prefix_len + name.len >= MAX_PATH) {
         @branchHint(.cold);
         return;
     }
     @memcpy(w.path_buf[prefix_len..][0..name.len], name);
     w.path_buf[prefix_len + name.len] = 0;
     const full = w.path_buf[0 .. prefix_len + name.len];
-    const basename = full[prefix_len..];
+    const basename = w.path_buf[prefix_len..full.len :0];
     const relative_path = full[sh.root_prefix_len..];
+
+    var child_key: InodeKey = .{ .dev = task.dev, .ino = ino };
+    if (sh.options.follow_symlink_paths and !is_windows_backend and entry_kind == .sym_link) {
+        const target = statEntry(sh, handle, basename, true) orelse return;
+        if (target.is_dir and linkTargetsAncestor(sh, w, task.rel, target.key)) return;
+        is_dir = target.is_dir;
+        child_key = target.key;
+    }
+    if (is_dir and opts.respect_git and opts.skip_git_dir and mem.eql(u8, basename, ".git")) return;
 
     if (chainMayIgnore(cur_ignore, sh.extra_ignore_root, basename[basename.len - 1])) {
         // Extra rules are walk-relative and take precedence over discovered rules.
@@ -568,7 +614,11 @@ fn processEntry(
                 @memcpy(path[start..][0..basename.len], basename);
                 break :blk path[0 .. start + basename.len];
             } else relative_path;
-            if (chainVerdict(cur_ignore, match_path, basename, is_dir) == true) return;
+            const verdict = if (opts.ignore_compat)
+                sh.ignore_rules.compatVerdict(cur_ignore, match_path, full, basename, is_dir)
+            else
+                chainVerdict(cur_ignore, match_path, basename, is_dir);
+            if (verdict == true) return;
         }
     }
 
@@ -577,10 +627,9 @@ fn processEntry(
     // (exact within one filesystem; a mount or btrfs-subvolume crossing is
     // re-keyed when the child is opened, see `resolveTaskKey`), so only
     // symlinks -- whose target lives elsewhere -- pay a statx here.
-    var child_key: InodeKey = .{ .dev = task.dev, .ino = ino };
-    if (!is_dir and opts.follow_symlinks and entry_kind == .sym_link) {
+    if (!is_dir and sh.unique_dirs and entry_kind == .sym_link) {
         // stat(FOLLOW): a directory target not yet visited is descended
-        if (statForSymlink(sh, handle, name, true)) |res| {
+        if (statEntry(sh, handle, basename, true)) |res| {
             // Leaving the root's device may land on a filesystem the
             // short-read gate never examined; stop trusting short reads for
             // the rest of the walk. Ordered before the child task is pushed,
@@ -589,7 +638,7 @@ fn processEntry(
             is_dir = res.is_dir and !sh.visitedBefore(res.key);
             child_key = res.key;
         }
-    } else if (is_dir and opts.follow_symlinks) {
+    } else if (is_dir and sh.unique_dirs) {
         // A real directory whose inode was already claimed (reached first
         // through a symlink, on another thread or earlier in this one) is
         // still reported -- only the descent is skipped. Every directory is
@@ -598,7 +647,7 @@ fn processEntry(
         // race; only the subtree's placement does.
         if (ino != 0) {
             if (sh.visitedBefore(child_key)) is_dir = false;
-        } else if (statForSymlink(sh, handle, name, false)) |res| {
+        } else if (statEntry(sh, handle, basename, false)) |res| {
             // Listing gave no inode (non-Linux backends, DT_UNKNOWN).
             if (sh.visitedBefore(res.key)) is_dir = false;
             child_key = res.key;
@@ -640,9 +689,14 @@ fn processEntry(
         return;
 
     if (is_dir and may_descend and action != .skip_dir) {
+        if (too_long_to_open) return reportError(sh, full, error.NameTooLong);
         const cr = child_ref.* orelse blk: {
             const cr = try sh.allocator.create(HandleRef);
             cr.* = .{ .handle = handle, .refs = .init(1) };
+            if (opts.follow_symlink_paths and task.depth == 0) {
+                cr.retain();
+                sh.alias_root = cr;
+            }
             child_ref.* = cr;
             handle_consumed.* = true;
             break :blk cr;
@@ -651,21 +705,19 @@ fn processEntry(
         const rel = full[sh.root_prefix_len..];
         const child_rel = try sh.allocator.dupe(u8, rel);
         errdefer sh.allocator.free(child_rel);
-        const child = try sh.allocator.create(DirTask);
-        errdefer sh.allocator.destroy(child);
-
         cr.retain();
         errdefer cr.release(sh);
         if (cur_ignore) |ig| ig.retain();
         errdefer if (cur_ignore) |ig| ig.release(sh.allocator);
 
-        child.* = .{
+        const child: DirTask = .{
             .rel = child_rel,
             .depth = entry_depth,
             .ignore = cur_ignore,
             .parent = cr,
             .dev = child_key.dev,
             .ino = child_key.ino,
+            .via_symlink = entry_kind == .sym_link,
         };
         try sh.queue.push(sh.allocator, sh.io, w.id, child);
     }
@@ -733,9 +785,9 @@ fn openChild(sh: *SharedWorkerState, parent: Handle, name: []const u8, task: *Di
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
-            .NOFOLLOW = !sh.options.follow_symlinks,
+            .NOFOLLOW = !sh.unique_dirs and !(sh.options.follow_symlink_paths and task.via_symlink),
         };
-        if (builtin.os.tag == .linux and sh.options.follow_symlinks) {
+        if (builtin.os.tag == .linux and sh.unique_dirs) {
             // The task's inherited (dev, d_ino) key is only right while the
             // open stays on the parent's filesystem. RESOLVE_NO_XDEV makes a
             // mount-point crossing fail with EXDEV; then (and when openat2 is
@@ -754,7 +806,10 @@ fn openChild(sh: *SharedWorkerState, parent: Handle, name: []const u8, task: *Di
     } else if (is_windows_backend) {
         return win.openChildDir(parent, name);
     } else {
-        return parent.openDir(sh.io, name, .{ .iterate = true });
+        return parent.openDir(sh.io, name, .{
+            .iterate = true,
+            .follow_symlinks = !sh.options.follow_symlink_paths or task.via_symlink,
+        });
     }
 }
 
@@ -837,6 +892,11 @@ fn loadIgnoreNode(
     w: *const Worker,
     prefix_len: usize,
 ) WalkError!?*IgnoreNode {
+    if (sh.options.ignore_compat) {
+        const dir = if (prefix_len == 0) "." else w.path_buf[0..@max(prefix_len - 1, 1)];
+        const dir_offset = if (task.rel.len > 0) task.rel.len + 1 else 0;
+        return loadCompatNode(sh, handle, task.ignore, dir, sh.ignore_rules.scope_prefix.len + dir_offset, w.dot_git, w.saw_dot_jj, w.saw_gitignore, w.saw_ignore);
+    }
     // Repository-wide exclude files when this directory holds `.git`. Lowest
     // precedence, so they go first: core.excludesFile, then info/exclude.
     var repo: git_excludes.Docs = .{};
@@ -856,7 +916,44 @@ fn loadIgnoreNode(
     const ign = if (w.saw_ignore and !sh.options.skip_dot_ignore) readSmallFile(sh, handle, ".ignore") else null;
 
     const dir_offset = if (task.rel.len > 0) task.rel.len + 1 else 0;
-    return parseIgnoreNode(sh, task.ignore, sh.ignore_rules.scope_prefix.len + dir_offset, repo, git, ign);
+    return parseIgnoreNode(sh, task.ignore, sh.ignore_rules.scope_prefix.len + dir_offset, repo, git, ign, .combined, false);
+}
+
+fn loadCompatNode(
+    sh: *SharedWorkerState,
+    handle: Handle,
+    parent: ?*IgnoreNode,
+    dir: []const u8,
+    offset: usize,
+    dot_git: ?git_excludes.DotGit,
+    saw_dot_jj: bool,
+    saw_gitignore: bool,
+    saw_dot_ignore: bool,
+) WalkError!?*IgnoreNode {
+    const git_exists = if (dot_git) |hint| switch (hint) {
+        .directory, .file => true,
+        .unknown => statEntry(sh, handle, ".git", true) != null,
+    } else false;
+    const vcs = git_exists or (saw_dot_jj and statEntry(sh, handle, ".jj", true) != null);
+    const in_git_context = vcs or (parent != null and parent.?.in_git_context);
+    const repo = if (git_exists and sh.options.git_exclude)
+        sh.git.load(dir, dot_git.?)
+    else
+        git_excludes.Docs{};
+    const git = if (in_git_context and saw_gitignore and !sh.options.skip_gitignore)
+        readSmallFile(sh, handle, ".gitignore")
+    else
+        null;
+    const git_node = try parseIgnoreNode(sh, parent, offset, repo, git, null, .git, vcs);
+    errdefer if (git_node) |node| node.release(sh.allocator);
+    if (saw_dot_ignore and !sh.options.skip_dot_ignore) {
+        const ign = readSmallFile(sh, handle, ".ignore");
+        if (try parseIgnoreNode(sh, git_node orelse parent, offset, .{}, null, ign, .dot_ignore, false)) |node| {
+            if (git_node) |g| g.release(sh.allocator);
+            return node;
+        }
+    }
+    return git_node;
 }
 
 fn parseIgnoreNode(
@@ -866,9 +963,11 @@ fn parseIgnoreNode(
     repo: git_excludes.Docs,
     git: ?[]u8,
     ign: ?[]u8,
+    source: @FieldType(IgnoreNode, "source"),
+    git_boundary: bool,
 ) WalkError!?*IgnoreNode {
     const n: usize = repo.count() + @intFromBool(git != null) + @intFromBool(ign != null);
-    if (n == 0) return null;
+    if (n == 0 and !git_boundary) return null;
     const sources = sh.allocator.alloc([]const u8, n) catch {
         repo.deinit(sh.allocator);
         if (git) |b| sh.allocator.free(b);
@@ -883,7 +982,8 @@ fn parseIgnoreNode(
         }
     }
 
-    var gi = GitIgnore.parseOwnedMulti(sh.allocator, sources) catch |err| {
+    const syntax: GitIgnore.Syntax = if (sh.options.ignore_compat) .ignore_compat else .git;
+    var gi = GitIgnore.parseOwnedMultiWithSyntax(sh.allocator, sources, syntax) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return null;
     };
@@ -899,8 +999,14 @@ fn parseIgnoreNode(
         .relative_offset = @intCast(offset),
         .refs = .init(1),
         .chain_last = gi.any_last,
+        .source = source,
+        .git_boundary = git_boundary,
+        .in_git_context = git_boundary or (parent != null and parent.?.in_git_context),
     };
     if (parent) |p| node.chain_last.merge(p.chain_last) else if (sh.extra_ignore_root) |x| node.chain_last.merge(x.chain_last);
+    if (git_boundary) {
+        if (sh.ignore_rules.compat_global) |*global| node.chain_last.merge(global.any_last);
+    }
     return node;
 }
 
@@ -914,6 +1020,7 @@ pub fn loadParentIgnoreRules(sh: *SharedWorkerState) WalkError!void {
     };
     defer sh.allocator.free(absolute);
     if (absolute.len >= MAX_PATH) return;
+    if (sh.options.ignore_compat) return loadCompatParents(sh, absolute);
 
     var dir: []const u8 = absolute;
     const worktree = while (true) {
@@ -949,7 +1056,7 @@ pub fn loadParentIgnoreRules(sh: *SharedWorkerState) WalkError!void {
         const repo = if (offset == 0 and sh.git.enabled()) sh.git.load(dir, .unknown) else git_excludes.Docs{};
         const git = if (handle != null and !sh.options.skip_gitignore) readSmallFile(sh, handle.?, ".gitignore") else null;
         const ign = if (handle != null and !sh.options.skip_dot_ignore) readSmallFile(sh, handle.?, ".ignore") else null;
-        if (try parseIgnoreNode(sh, parents, offset, repo, git, ign)) |node| {
+        if (try parseIgnoreNode(sh, parents, offset, repo, git, ign, .combined, false)) |node| {
             if (parents) |parent| parent.release(sh.allocator);
             parents = node;
         }
@@ -967,11 +1074,50 @@ pub fn loadParentIgnoreRules(sh: *SharedWorkerState) WalkError!void {
     }
 }
 
+fn loadCompatParents(sh: *SharedWorkerState, absolute: []const u8) WalkError!void {
+    var dirs: [MAX_PATH / 2 + 1][]const u8 = undefined;
+    var count: usize = 0;
+    var dir = absolute;
+    while (std.fs.path.dirname(dir)) |parent| {
+        dirs[count] = parent;
+        count += 1;
+        dir = parent;
+    }
+    var parents: ?*IgnoreNode = null;
+    errdefer if (parents) |parent| parent.release(sh.allocator);
+    while (count > 0) {
+        count -= 1;
+        const path = dirs[count];
+        const handle = openRoot(sh, path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
+        defer closeHandle(handle, sh.io);
+        const offset = path.len + @intFromBool(!std.fs.path.isSep(path[path.len - 1]));
+        if (try loadCompatNode(sh, handle, parents, path, offset, .unknown, true, true, true)) |node| {
+            if (parents) |parent| parent.release(sh.allocator);
+            parents = node;
+        }
+    }
+    if (parents == null) return;
+    const need_slash = !std.fs.path.isSep(absolute[absolute.len - 1]);
+    const prefix = try sh.allocator.alloc(u8, absolute.len + @intFromBool(need_slash));
+    @memcpy(prefix[0..absolute.len], absolute);
+    if (need_slash) prefix[absolute.len] = '/';
+    if (builtin.os.tag == .windows) {
+        for (prefix) |*byte| {
+            if (byte.* == '\\') byte.* = '/';
+        }
+    }
+    sh.ignore_rules.scope_prefix = prefix;
+    sh.ignore_rules.parents = parents;
+}
+
 const max_gitignore_size = 1024 * 1024;
 
 fn readSmallFile(sh: *SharedWorkerState, handle: Handle, name: [:0]const u8) ?[]u8 {
     if (is_posix_backend) {
-        const fd = posix.openatZ(handle, name, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, 0) catch return null;
+        const fd = posix.openatZ(handle, name, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = !sh.options.ignore_compat, .NONBLOCK = true }, 0) catch return null;
         defer closeFd(fd);
 
         // tries to read the file into the small bufefer cause most of gitignore files are tiny
@@ -1099,49 +1245,46 @@ fn resolveTaskKey(sh: *SharedWorkerState, task: *DirTask, handle: Handle, dot_in
 }
 
 pub fn recordRootVisited(sh: *SharedWorkerState) void {
+    if (is_windows_backend) return;
     const root = if (sh.root_path.len == 0) "." else sh.root_path;
-    if (is_windows_backend) {
-        return; // symlink following unimplemented on the ntdll backend
-    } else if (is_posix_backend) {
-        var path_z: [MAX_PATH:0]u8 = undefined;
-        if (root.len >= MAX_PATH) return;
-        @memcpy(path_z[0..root.len], root);
-        path_z[root.len] = 0;
-        if (builtin.os.tag == .linux) {
-            var stx: linux.Statx = undefined;
-            const rc = linux.statx(types.AT_FDCWD, path_z[0..root.len :0], 0, .{ .INO = true }, &stx);
-            if (linux.errno(rc) != .SUCCESS) return;
-            const dev = (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor);
-            sh.root_dev = dev;
-            sh.root_key = .{ .dev = dev, .ino = stx.ino };
-        } else {
-            var st: std.c.Stat = undefined;
-            if (std.c.fstatat(types.AT_FDCWD, path_z[0..root.len :0], &st, 0) != 0) return;
-            sh.root_key = .{
-                .dev = @bitCast(@as(i64, @intCast(st.dev))),
-                .ino = @intCast(st.ino),
-            };
-        }
-    } else {
-        const stat = std.Io.Dir.cwd().statFile(sh.io, root, .{ .follow_symlinks = true }) catch return;
-        sh.root_key = .{ .dev = 0, .ino = @intCast(stat.inode) };
-    }
+    var path_z: [MAX_PATH:0]u8 = undefined;
+    if (root.len >= MAX_PATH) return;
+    @memcpy(path_z[0..root.len], root);
+    path_z[root.len] = 0;
+    const cwd = if (is_posix_backend) types.AT_FDCWD else std.Io.Dir.cwd();
+    const target = statEntry(sh, cwd, path_z[0..root.len :0], true) orelse return;
+    sh.root_key = target.key;
+    sh.root_dev = target.key.dev;
     _ = sh.visitedBefore(sh.root_key);
 }
 
-/// Stats the handle as fast as possible
-fn statForSymlink(sh: *SharedWorkerState, handle: Handle, name: []const u8, follow: bool) ?SymlinkStat {
+/// Only followed directory links need an ancestry check. Ordinary directories
+/// take neither an identity syscall nor the walk-wide visited-set lock.
+fn linkTargetsAncestor(sh: *SharedWorkerState, w: *Worker, parent_rel: []const u8, target: InodeKey) bool {
+    if (is_windows_backend) unreachable;
+    if (std.meta.eql(target, sh.root_key)) return true;
+    var rel = parent_rel;
+    while (rel.len > 0) {
+        const end = sh.root_prefix_len + rel.len;
+        const saved = w.path_buf[end];
+        w.path_buf[end] = 0;
+        const ancestor = statEntry(sh, sh.alias_root.?.handle, w.path_buf[sh.root_prefix_len..end :0], true);
+        w.path_buf[end] = saved;
+        const resolved = ancestor orelse return true;
+        if (std.meta.eql(target, resolved.key)) return true;
+        rel = rel[0 .. mem.lastIndexOfScalar(u8, rel, '/') orelse break];
+    }
+    return false;
+}
+
+/// An empty name stats the open handle itself, including read-only directories.
+fn statEntry(sh: *SharedWorkerState, handle: Handle, name: [:0]const u8, follow: bool) ?SymlinkStat {
     if (is_windows_backend) {
         return null; // reparse-point targets are never descended
     } else if (builtin.os.tag == .linux) {
-        var name_z: [NAME_BUF:0]u8 = undefined;
-        if (name.len > NAME_MAX) return null;
-        @memcpy(name_z[0..name.len], name);
-        name_z[name.len] = 0;
-        // request as few infromation as is_posix_backend
         var stx: linux.Statx = undefined;
-        const flags: u32 = if (follow) 0 else linux.AT.SYMLINK_NOFOLLOW;
-        const rc = linux.statx(handle, name_z[0..name.len :0], flags, .{ .TYPE = true, .INO = true }, &stx);
+        const flags: u32 = if (name.len == 0) linux.AT.EMPTY_PATH else if (follow) 0 else linux.AT.SYMLINK_NOFOLLOW;
+        const rc = linux.statx(handle, name, flags, .{ .TYPE = true, .INO = true }, &stx);
         if (linux.errno(rc) != .SUCCESS) return null;
         const dev = (@as(u64, stx.dev_major) << 32) | @as(u64, stx.dev_minor);
         return .{
@@ -1149,19 +1292,16 @@ fn statForSymlink(sh: *SharedWorkerState, handle: Handle, name: []const u8, foll
             .key = .{ .dev = dev, .ino = stx.ino },
         };
     } else if (is_posix_backend) {
-        var name_z: [NAME_BUF:0]u8 = undefined;
-        if (name.len > NAME_MAX) return null;
-        @memcpy(name_z[0..name.len], name);
-        name_z[name.len] = 0;
         var st: std.c.Stat = undefined;
         const flags: u32 = if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW;
-        if (std.c.fstatat(handle, name_z[0..name.len :0], &st, flags) != 0) return null;
+        const rc = if (name.len == 0) std.c.fstat(handle, &st) else std.c.fstatat(handle, name, &st, flags);
+        if (rc != 0) return null;
         return .{
             .is_dir = (@as(u32, @intCast(st.mode)) & 0o170000) == 0o040000,
             .key = .{ .dev = @bitCast(@as(i64, @intCast(st.dev))), .ino = @intCast(st.ino) },
         };
     } else {
-        const stat = handle.statFile(sh.io, name, .{ .follow_symlinks = follow }) catch return null;
+        const stat = (if (name.len == 0) handle.stat(sh.io) else handle.statFile(sh.io, name, .{ .follow_symlinks = follow })) catch return null;
         return .{
             .is_dir = stat.kind == .directory,
             .key = .{ .dev = 0, .ino = @intCast(stat.inode) },

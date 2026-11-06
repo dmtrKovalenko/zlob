@@ -65,6 +65,19 @@ bitflags! {
         const SKIP_GITIGNORE  = 1 << 10;
         /// With [`Self::GITIGNORE`]: skip rules from `.ignore` files.
         const SKIP_DOT_IGNORE = 1 << 11;
+        /// Walk each logical path to a directory, including symlink aliases.
+        /// Skip dangling links and links to ancestors. Supersedes FOLLOW_SYMLINKS.
+        /// Entries and requested metadata still describe the link itself.
+        /// Directory symlink traversal is unsupported on the Windows ntdll backend.
+        const FOLLOW_SYMLINK_PATHS = 1 << 12;
+        /// With GITIGNORE, use the global excludes file even when the repository
+        /// overrides core.excludesFile. Repository info/exclude still applies.
+        const NO_REPO_EXCLUDES_FILE = 1 << 13;
+        /// With GITIGNORE, prioritize .ignore rules across directories and
+        /// scope Git rules to the nearest .git or .jj boundary. Global rules
+        /// use the process working directory as their base.
+        /// With GITIGNORE_PARENTS, inherit .ignore above the worktree too.
+        const IGNORE_COMPAT = 1 << 14;
 
         /// `ignore`-crate like defaults: [`Self::GITIGNORE`] | [`Self::SKIP_HIDDEN`]
         const RECOMMENDED     = Self::GITIGNORE.bits() | Self::SKIP_HIDDEN.bits();
@@ -325,15 +338,23 @@ impl WalkBuilder {
         }
     }
 
-    /// Stream entries through `visitor`, in parallel calling callback for every entry.
-    /// Returns assembled Walk
-    ///
-    /// the callback should neer panic, panicking = UB
+    /// Stream entries through a parallel visitor. Ignore rules are released
+    /// as workers finish their subtrees. Use [`Self::run`] to query them later.
+    /// The visitor must not panic across the native callback boundary.
+    pub fn visit<F>(&self, visitor: F) -> Result<()>
+    where
+        F: Fn(WalkEntry<'_>) -> WalkState + Sync,
+    {
+        self.run_inner(self.threads, &visitor, None)
+    }
+
+    /// Stream entries through a parallel visitor and retain the ignore rules.
+    /// The visitor must not panic across the native callback boundary.
     pub fn run<F>(&self, visitor: F) -> Result<WalkerOutcomeRules>
     where
         F: Fn(WalkEntry<'_>) -> WalkState + Sync,
     {
-        self.run_inner(self.threads, &move |e| visitor(e))
+        self.run_with_rules(self.threads, &visitor)
     }
 
     /// Stream entries through `visitor` on the calling thread only.
@@ -357,13 +378,27 @@ impl WalkBuilder {
         // Capture by shared reference so the closure captures the *whole*
         // SerialBridge (Sync via unsafe impl above)
         let bridge_ref = &bridge;
-        self.run_inner(1, &move |e| {
+        self.run_with_rules(1, &move |e| {
             let f = unsafe { &mut *bridge_ref.ptr };
             f(e)
         })
     }
 
-    fn run_inner<F>(&self, threads: u16, visitor: &F) -> Result<WalkerOutcomeRules>
+    fn run_with_rules<F>(&self, threads: u16, visitor: &F) -> Result<WalkerOutcomeRules>
+    where
+        F: Fn(WalkEntry<'_>) -> WalkState + Sync,
+    {
+        let mut raw = std::ptr::null_mut();
+        self.run_inner(threads, visitor, Some(&mut raw))?;
+        Ok(WalkerOutcomeRules { raw })
+    }
+
+    fn run_inner<F>(
+        &self,
+        threads: u16,
+        visitor: &F,
+        out_rules: Option<&mut *mut c_void>,
+    ) -> Result<()>
     where
         F: Fn(WalkEntry<'_>) -> WalkState + Sync,
     {
@@ -389,18 +424,17 @@ impl WalkBuilder {
 
         let (root, mut opts) = self.checked_options()?;
         opts.threads = threads;
-        let mut raw_rules: *mut c_void = std::ptr::null_mut();
         let rc = unsafe {
             ffi::zlob_walk(
                 root.as_ptr(),
                 &opts,
                 Some(zlob_callback::<F>),
                 visitor as *const F as *mut c_void,
-                &mut raw_rules,
+                out_rules.map_or(std::ptr::null_mut(), std::ptr::from_mut),
             )
         };
         match rc {
-            0 => Ok(WalkerOutcomeRules { raw: raw_rules }),
+            0 => Ok(()),
             _ => Err(rc_to_error(rc)),
         }
     }
@@ -781,6 +815,39 @@ mod tests {
         assert_eq!(names, vec!["Cargo.toml", "src", "src/main.rs"]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn follow_symlink_paths_rechecks_a_retargeted_directory_link() -> std::io::Result<()> {
+        use std::os::unix::fs::symlink;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        let alias = root.join("alias");
+        fs::create_dir(root.join("real"))?;
+        fs::write(root.join("real/leaf"), "")?;
+        symlink("real", &alias)?;
+
+        let mut retargeted = Ok(());
+        let mut paths = Vec::new();
+        WalkBuilder::new(root)
+            .unwrap()
+            .options(WalkFlags::FOLLOW_SYMLINK_PATHS)
+            .run_serial(|entry| {
+                let path = entry.relative_path();
+                if path == Path::new("alias") {
+                    retargeted = fs::remove_file(&alias).and_then(|()| symlink(".", &alias));
+                }
+                paths.push(path.to_owned());
+                WalkState::Continue
+            })
+            .unwrap();
+        retargeted?;
+        paths.sort();
+        assert_eq!(paths, ["alias", "real", "real/leaf"].map(PathBuf::from));
+        Ok(())
+    }
+
     #[test]
     fn build_plain_walkdir_mode() {
         let dir = make_tree();
@@ -895,6 +962,30 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
+    fn visit_applies_nested_rules_without_returning_a_rules_handle() {
+        let dir = make_tree();
+        fs::write(dir.path().join("src/.ignore"), "!keep.log\n").unwrap();
+        fs::write(dir.path().join("src/keep.log"), "").unwrap();
+        fs::write(dir.path().join("src/drop.log"), "").unwrap();
+
+        let paths = std::sync::Mutex::new(Vec::new());
+        WalkBuilder::new(dir.path())
+            .unwrap()
+            .threads(4)
+            .visit(|entry| {
+                paths.lock().unwrap().push(entry.relative_path().to_owned());
+                WalkState::Continue
+            })
+            .unwrap();
+        let mut actual = paths.into_inner().unwrap();
+        actual.sort();
+        assert_eq!(
+            actual,
+            ["Cargo.toml", "src", "src/keep.log", "src/main.rs"].map(std::path::PathBuf::from)
+        );
     }
 
     #[test]
