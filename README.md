@@ -225,16 +225,16 @@ for entry in results.iter() {
     println!("{} {:?}", entry.path().display(), entry.size());
 }
 
-// ignore-crate style traversal: nested .gitignore/.ignore, each repository's
-// .git/info/exclude and core.excludesFile (opt out of the last two with
-// WalkFlags::NO_GIT_EXCLUDE / WalkFlags::NO_GIT_GLOBAL):
+// .ignore takes precedence over .gitignore, even across directories.
+// SKIP_DOT_IGNORE selects Git rule precedence and repository config.
 WalkBuilder::new(".").options(WalkFlags::GITIGNORE).run(|entry| {
     println!("{}", entry.path().display());
 
     WalkState::Continue
 })?;
 
-// Also inherit parent ignore rules when walking a Git worktree subtree.
+// Inherit parent rules inside or outside a repository.
+// .gitignore rules stop at the nearest .git or .jj when there is one.
 let subtree = WalkBuilder::new("src")
     .options(WalkFlags::GITIGNORE | WalkFlags::GITIGNORE_PARENTS)
     .build()?;

@@ -208,6 +208,7 @@ pub const GitIgnore = struct {
     dir_cache: std.StringHashMap(bool),
 
     const Self = @This();
+    pub const Syntax = enum { git, ignore_compat };
 
     /// Load and parse .gitignore from current working directory
     /// Returns null if no .gitignore file exists
@@ -333,12 +334,16 @@ pub const GitIgnore = struct {
     /// Parse gitignore content from a borrowed string. The bytes are duped
     /// internally; the caller retains ownership of `content`.
     pub fn parse(allocator: Allocator, content: []const u8) !Self {
-        const owned = try allocator.dupe(u8, content);
-        errdefer allocator.free(owned);
+        return parseWithSyntax(allocator, content, .git);
+    }
+
+    pub fn parseWithSyntax(allocator: Allocator, content: []const u8, syntax: Syntax) !Self {
         const sources = try allocator.alloc([]const u8, 1);
-        sources[0] = owned;
-        errdefer allocator.free(sources);
-        return try parseOwnedMulti(allocator, sources);
+        sources[0] = allocator.dupe(u8, content) catch |err| {
+            allocator.free(sources);
+            return err;
+        };
+        return parseOwnedMultiWithSyntax(allocator, sources, syntax);
     }
 
     /// Parse multiple gitignore documents in one pass and take ownership of
@@ -346,6 +351,10 @@ pub const GitIgnore = struct {
     /// given order, so patterns from later files get higher indices and win
     /// ties (`.ignore` after `.gitignore` like ripgrep does)
     pub fn parseOwnedMulti(allocator: Allocator, sources: [][]const u8) !Self {
+        return parseOwnedMultiWithSyntax(allocator, sources, .git);
+    }
+
+    pub fn parseOwnedMultiWithSyntax(allocator: Allocator, sources: [][]const u8, syntax: Syntax) !Self {
         errdefer {
             for (sources) |src| allocator.free(src);
             allocator.free(sources);
@@ -371,14 +380,17 @@ pub const GitIgnore = struct {
         var first_negation_index: u16 = std.math.maxInt(u16);
         var index: u16 = 0;
 
-        for (sources) |content| {
+        for (sources) |doc| {
+            const bom = "\xef\xbb\xbf";
+            const content = if (syntax == .ignore_compat and mem.startsWith(u8, doc, bom)) doc[bom.len..] else doc;
             var line_iter = mem.splitScalar(u8, content, '\n');
             while (line_iter.next()) |raw_line| {
                 const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r')
                     raw_line[0 .. raw_line.len - 1]
                 else
                     raw_line;
-                const pattern = parseLine(line, index) orelse continue;
+                if (syntax == .ignore_compat and !std.unicode.utf8ValidateSlice(line)) break;
+                const pattern = parseLineWithSyntax(line, index, syntax) orelse continue;
 
                 try patterns_list.append(pattern);
 
@@ -629,16 +641,24 @@ pub const GitIgnore = struct {
 
     /// Parse a single line - returns pattern with text as slice into line
     fn parseLine(line: []const u8, index: u16) ?Pattern {
+        return parseLineWithSyntax(line, index, .git);
+    }
+
+    fn parseLineWithSyntax(line: []const u8, index: u16, syntax: Syntax) ?Pattern {
         var text = line;
 
         if (text.len == 0 or text[0] == '#') {
             return null;
         }
 
-        // Trim trailing unescaped spaces
-        while (text.len > 0 and text[text.len - 1] == ' ') {
-            if (text.len >= 2 and text[text.len - 2] == '\\') break;
-            text = text[0 .. text.len - 1];
+        if (syntax == .ignore_compat) {
+            text = trimIgnoreWhitespace(text);
+        } else {
+            // Trim trailing unescaped spaces
+            while (text.len > 0 and text[text.len - 1] == ' ') {
+                if (text.len >= 2 and text[text.len - 2] == '\\') break;
+                text = text[0 .. text.len - 1];
+            }
         }
 
         if (text.len == 0) return null;
@@ -654,7 +674,13 @@ pub const GitIgnore = struct {
         if (text[text.len - 1] == '/') {
             dir_only = true;
             text = text[0 .. text.len - 1];
+            if (syntax == .ignore_compat and mem.endsWith(u8, text, "\\")) text = text[0 .. text.len - 1];
             if (text.len == 0) return null;
+        }
+        if (syntax == .ignore_compat and mem.endsWith(u8, text, "\\")) {
+            var tail = text.len - 1;
+            while (tail > 0 and text[tail - 1] == '\\') tail -= 1;
+            if ((text.len - tail) % 2 != 0) return null;
         }
 
         // `**/**` is equivalent to `**`, so fold runs down to one before any
@@ -688,7 +714,8 @@ pub const GitIgnore = struct {
             }
         }
 
-        const is_literal = !hasWildcards(text);
+        const is_literal = !hasWildcards(text) or
+            (syntax == .ignore_compat and mem.indexOfAny(u8, text, "*?]") == null);
         // Literal patterns are compared byte-for-byte (hash lookups, memcmp),
         if (is_literal and mem.indexOfScalar(u8, text, '\\') != null) {
             text = unescapeLiteralInPlace(text);
@@ -743,6 +770,21 @@ pub const GitIgnore = struct {
             .suffix_u64 = suffix_u64,
             .index = index,
         };
+    }
+
+    fn trimIgnoreWhitespace(line: []const u8) []const u8 {
+        if (mem.endsWith(u8, line, "\\ ")) return line;
+        var end = line.len;
+        while (end > 0) {
+            var start = end - 1;
+            while ((line[start] & 0xc0) == 0x80) start -= 1;
+            const ch = std.unicode.utf8Decode(line[start..end]) catch unreachable;
+            switch (ch) {
+                0x09...0x0d, 0x20, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => end = start,
+                else => break,
+            }
+        }
+        return line[0..end];
     }
 
     /// Check if a path should be ignored - optimized version

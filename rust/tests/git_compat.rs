@@ -13,10 +13,11 @@ use common::{git_available, git_ignored_paths, git_init, git_kept};
 use zlob::walk::{WalkBuilder, WalkFlags, WalkState};
 use zlob::{ZlobFlags, zlob};
 
-/// The reference git runs with global and system config scrubbed (see
-/// `common::scrubbed`), so the walker must not read the developer's
-/// `core.excludesFile` either.
-const SCRUBBED: WalkFlags = WalkFlags::GITIGNORE.union(WalkFlags::NO_GIT_GLOBAL);
+/// Use Git rule precedence and exclude the developer's global rules,
+/// matching the Git commands in `common::scrubbed`.
+const SCRUBBED: WalkFlags = WalkFlags::GITIGNORE
+    .union(WalkFlags::SKIP_DOT_IGNORE)
+    .union(WalkFlags::NO_GIT_GLOBAL);
 
 const DIRS: &[&str] = &[
     "a",
@@ -456,10 +457,7 @@ fn subtree_walk_can_inherit_gitignore_rules() {
         fs::write(subtree.join(path), "x").unwrap();
     }
 
-    let options = SCRUBBED
-        | WalkFlags::GITIGNORE_PARENTS
-        | WalkFlags::NO_REPORT_DIRS
-        | WalkFlags::SKIP_DOT_IGNORE;
+    let options = SCRUBBED | WalkFlags::GITIGNORE_PARENTS | WalkFlags::NO_REPORT_DIRS;
     let expected = git_kept(&subtree);
     let ignored = git_ignored_paths(&subtree, &paths);
     assert!(zlob_kept(&subtree, 1).contains("blocked/inside.rs"));
@@ -702,7 +700,7 @@ fn info_exclude_and_core_excludes_file_match_git() {
     let walk_kept = |base: &Path| -> BTreeSet<String> {
         WalkBuilder::new(base)
             .unwrap()
-            .options(WalkFlags::GITIGNORE | WalkFlags::NO_REPORT_DIRS)
+            .options(WalkFlags::GITIGNORE | WalkFlags::SKIP_DOT_IGNORE | WalkFlags::NO_REPORT_DIRS)
             .threads(1)
             .collect()
             .unwrap()

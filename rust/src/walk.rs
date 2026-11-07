@@ -29,10 +29,15 @@ bitflags! {
     /// Bit values must match `ZLOB_WALK_*` in `include/zlob.h`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct WalkFlags: u32 {
-        /// Honor nested `.gitignore`/`.ignore` files, plus each repository's
-        /// `$GIT_DIR/info/exclude` and git's `core.excludesFile` (see
-        /// [`Self::NO_GIT_EXCLUDE`] / [`Self::NO_GIT_GLOBAL`]); also skips
-        /// `.git` dirs.
+        /// Honor `.gitignore` and `.ignore` files and skip `.git` directories.
+        ///
+        /// By default, the nearest matching `.ignore` rule takes precedence over
+        /// Git rules, even when a deeper `.gitignore` matches. Git rules stop at
+        /// the nearest `.git` or `.jj` boundary. Outside a repository, the
+        /// walker still reads `.gitignore` files.
+        ///
+        /// Repository `info/exclude` and the global excludes file have lower
+        /// precedence. Use [`Self::SKIP_DOT_IGNORE`] for Git rule precedence.
         const GITIGNORE       = 1 << 0;
         /// Skip hidden (dot) files and don't descend into dot-directories.
         const SKIP_HIDDEN     = 1 << 1;
@@ -46,27 +51,42 @@ bitflags! {
         const ABORT_ON_ERROR  = 1 << 5;
         /// With [`Self::GITIGNORE`]: still descend into `.git` directories.
         const KEEP_GIT_DIR    = 1 << 6;
-        /// With [`Self::GITIGNORE`]: do not read `$GIT_DIR/info/exclude`.
-        /// By default every repository met during the walk (a directory with a
-        /// `.git` entry, linked worktrees and submodules included) contributes
-        /// its `info/exclude`, layered below that repository's root
-        /// `.gitignore` exactly like git does.
+        /// With [`Self::GITIGNORE`], skip repository `$GIT_DIR/info/exclude`
+        /// rules. These rules have lower precedence than `.gitignore` rules.
+        /// Linked worktrees use their common repository's `info/exclude`.
         const NO_GIT_EXCLUDE  = 1 << 7;
-        /// With [`Self::GITIGNORE`]: do not read git's `core.excludesFile`
-        /// (repository config, else `~/.gitconfig` / `$XDG_CONFIG_HOME/git/config`,
-        /// else `~/.config/git/ignore`). Lowest precedence of all ignore sources.
+        /// With [`Self::GITIGNORE`], skip the lowest-priority excludes file.
+        ///
+        /// By default, the walker reads the user's `core.excludesFile` from
+        /// `~/.gitconfig` or `$XDG_CONFIG_HOME/git/config`, falling back to
+        /// `$XDG_CONFIG_HOME/git/ignore` (`~/.config/git/ignore` when
+        /// `XDG_CONFIG_HOME` is unset). Anchored global patterns are relative
+        /// to the process working directory.
+        ///
+        /// With [`Self::SKIP_DOT_IGNORE`], repository config can override
+        /// the user's `core.excludesFile`, and patterns are anchored to the
+        /// worktree root.
         const NO_GIT_GLOBAL   = 1 << 8;
 
-        /// With [`Self::GITIGNORE`], inherit ancestor ignore rules up to the
-        /// containing Git worktree. An ignored walk root yields no entries.
+        /// With [`Self::GITIGNORE`], inherit ancestor ignore rules.
+        ///
+        /// By default, `.ignore` rules can extend above the nearest Git boundary,
+        /// and the walk visits the explicitly selected directory even if an
+        /// ancestor rule excludes it. In a standalone tree, ancestor
+        /// `.gitignore` rules also apply.
+        ///
+        /// With [`Self::SKIP_DOT_IGNORE`], the walker uses `.gitignore` rules
+        /// up to the containing Git worktree when there is one. An ignored
+        /// walk root yields no entries.
         const GITIGNORE_PARENTS = 1 << 9;
 
         /// With [`Self::GITIGNORE`]: skip rules from `.gitignore` files.
         const SKIP_GITIGNORE  = 1 << 10;
-        /// With [`Self::GITIGNORE`]: skip rules from `.ignore` files.
+        /// With [`Self::GITIGNORE`], skip `.ignore` files and use Git rule
+        /// precedence, including repository overrides of `core.excludesFile`.
         const SKIP_DOT_IGNORE = 1 << 11;
 
-        /// `ignore`-crate like defaults: [`Self::GITIGNORE`] | [`Self::SKIP_HIDDEN`]
+        /// Honor ignore rules and skip hidden entries.
         const RECOMMENDED     = Self::GITIGNORE.bits() | Self::SKIP_HIDDEN.bits();
     }
 }
@@ -1332,7 +1352,13 @@ mod tests {
         let names = |flags: WalkFlags| -> Vec<String> {
             WalkBuilder::new(root)
                 .unwrap()
-                .options(flags | WalkFlags::GITIGNORE | WalkFlags::SORT | WalkFlags::NO_REPORT_DIRS)
+                .options(
+                    flags
+                        | WalkFlags::GITIGNORE
+                        | WalkFlags::SKIP_DOT_IGNORE
+                        | WalkFlags::SORT
+                        | WalkFlags::NO_REPORT_DIRS,
+                )
                 .threads(1)
                 .collect()
                 .unwrap()

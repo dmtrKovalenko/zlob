@@ -264,13 +264,15 @@ fn walkImpl(
     var transient_rules = IgnoreRules{ .allocator = allocator };
     defer transient_rules.deinit();
     const ignore_rules = retained_rules orelse &transient_rules;
+    ignore_rules.compat = options.respect_git and !options.skip_dot_ignore;
 
     // Root prefix: root/ (or "" for an empty root meaning cwd-relative
     // output, or "root" when it already ends with /).
     var prefix_buf: [types.MAX_PATH]u8 = undefined;
     var prefix_len: usize = 0;
     if (root.len > 0) {
-        if (root.len >= MAX_PATH - 1) {
+        const max_root_len: usize = if (ignore_rules.compat) MAX_PATH - 1 else MAX_PATH - 2;
+        if (root.len > max_root_len) {
             // Root doesn't fit the path-assembly buffer; report it like any
             // other directory error and produce an empty walk.
             if (options.err_callback) |cb| {
@@ -328,6 +330,13 @@ fn walkImpl(
         .finish = finish,
     };
 
+    if (ignore_rules.compat) {
+        sh.git.want_global = false;
+        sh.git.ignore_compat = true;
+        if (options.git_global) {
+            try ignore_rules.loadCompatGlobal(io);
+        }
+    }
     defer sh.git.deinit();
     if (options.respect_git and options.gitignore_parents) {
         try worker.loadParentIgnoreRules(&sh);

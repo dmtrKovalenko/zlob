@@ -226,28 +226,28 @@ pub const Options = struct {
     /// Report entries whose name starts with '.'. Hidden directories are not
     /// descended into when false.
     include_hidden: bool = true,
-    /// Honor .gitignore files (nested ones included). `.ignore` files are
-    /// honored too, with their patterns taking precedence over `.gitignore`.
-    /// Repository exclude files are honored as well, see `git_exclude` and
-    /// `git_global`.
+    /// Honor .gitignore files, including outside repositories. By default,
+    /// .ignore rules take precedence across directories, and Git rules
+    /// stop at the nearest .git or .jj boundary.
     respect_git: bool = true,
-    /// With respect_git, inherit ignore rules up to the containing Git worktree.
+    /// Inherit ancestor rules. Git rules stop at the enclosing repository
+    /// boundary when there is one. .ignore rules can extend above it.
     gitignore_parents: bool = false,
     /// Skip ".git" directories (only when respect_git is set).
     skip_git_dir: bool = true,
     /// With respect_git: honor `$GIT_DIR/info/exclude` of every repository
-    /// met during the walk (a directory holding `.git`), linked worktrees and
-    /// submodules included. Layered below that repository's root `.gitignore`
+    /// met during the walk, including linked worktrees.
+    /// Layered below that repository's root `.gitignore`
     /// as in git, so a `!negation` there un-ignores what info/exclude ignores.
     git_exclude: bool = true,
-    /// With respect_git: honor git's `core.excludesFile` inside repositories
-    /// (repository config, else `~/.gitconfig` / `$XDG_CONFIG_HOME/git/config`,
-    /// else the default `~/.config/git/ignore`; a relative path is relative
-    /// to the worktree root). Lowest precedence of all.
+    /// With respect_git: honor the user's global excludes inside repositories.
+    /// Anchored rules are relative to the process working directory. With
+    /// skip_dot_ignore, repository config can override the excludes file and
+    /// rules are anchored to the worktree root.
     git_global: bool = true,
     /// Skip rules from ".gitignore" when respect_git is set.
     skip_gitignore: bool = false,
-    /// Skip rules from ".ignore" when respect_git is set.
+    /// Skip ".ignore" and use Git rule precedence when respect_git is set.
     skip_dot_ignore: bool = false,
     /// Report directory entries (directories are traversed either way).
     report_dirs: bool = true,

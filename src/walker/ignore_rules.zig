@@ -5,6 +5,7 @@ const linux = std.os.linux;
 const types = @import("types.zig");
 const worker = @import("worker.zig");
 const GitIgnore = @import("../gitignore.zig").GitIgnore;
+const git_excludes = @import("git_excludes.zig");
 
 const IgnoreNode = worker.IgnoreNode;
 const MAX_DIR_CHAIN = 64;
@@ -27,9 +28,66 @@ pub const IgnoreRules = struct {
     extra: ?*IgnoreNode = null,
     walk_root: []const u8 = &.{},
     parents: ?*IgnoreNode = null,
-    /// Worktree-relative path of the walk root, including the final slash.
+    /// Prefix of the walk root when matching rules inherited from its
+    /// ancestors, including the final slash.
     scope_prefix: []const u8 = &.{},
     root_ignored: bool = false,
+    compat: bool = false,
+    compat_global: ?GitIgnore = null,
+    compat_cwd: ?[:0]const u8 = null,
+
+    pub fn loadCompatGlobal(self: *IgnoreRules, io: std.Io) error{OutOfMemory}!void {
+        const doc = git_excludes.loadCompatGlobal(self.allocator, io) orelse return;
+        defer self.allocator.free(doc);
+        const cwd = std.process.currentPathAlloc(io, self.allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return,
+        };
+        errdefer self.allocator.free(cwd);
+        self.compat_global = try GitIgnore.parseWithSyntax(self.allocator, doc, .ignore_compat);
+        self.compat_cwd = cwd;
+    }
+
+    pub fn compatVerdict(
+        self: *const IgnoreRules,
+        start: ?*IgnoreNode,
+        scoped: []const u8,
+        full: []const u8,
+        basename: []const u8,
+        is_dir: bool,
+    ) ?bool {
+        var node = start;
+        const use_global = if (node) |n| n.in_git_context else false;
+        var git_in_scope = true;
+        var git_match: ?bool = null;
+        while (node) |n| : (node = n.parent) {
+            switch (n.source) {
+                .dot_ignore => if (n.gi.checkInode(scoped[n.relative_offset..], basename, is_dir)) |answer| return answer,
+                .git => {
+                    if (git_in_scope and git_match == null) {
+                        git_match = n.gi.checkInode(scoped[n.relative_offset..], basename, is_dir);
+                    }
+                    git_in_scope = git_in_scope and !n.git_boundary;
+                },
+            }
+        }
+        if (git_match != null) return git_match;
+        if (use_global) {
+            if (self.compat_global) |*global| {
+                var path = full;
+                if (mem.startsWith(u8, path, "./")) path = path[2..];
+                const cwd = self.compat_cwd.?;
+                if (mem.startsWith(u8, path, cwd) and
+                    (path.len == cwd.len or std.fs.path.isSep(path[cwd.len]) or std.fs.path.isSep(cwd[cwd.len - 1])))
+                {
+                    path = path[cwd.len..];
+                    if (path.len > 0 and std.fs.path.isSep(path[0])) path = path[1..];
+                }
+                return global.checkInode(path, basename, is_dir);
+            }
+        }
+        return null;
+    }
 
     /// Returns `true` if the path needs to be ignored or not accessible
     pub fn isIgnoredPath(self: *const IgnoreRules, path: []const u8) bool {
@@ -87,7 +145,45 @@ pub const IgnoreRules = struct {
         const is_dir = lstatIsDir(abs_z) orelse return true;
 
         const basename = if (mem.lastIndexOfScalar(u8, relative, '/')) |p| relative[p + 1 ..] else relative;
-        return self.isIgnoredResolved(relative, basename, is_dir);
+        return if (self.compat)
+            self.isIgnoredPathCompat(relative, abs_z, basename, is_dir)
+        else
+            self.isIgnoredResolved(relative, basename, is_dir);
+    }
+
+    fn isIgnoredPathCompat(
+        self: *const IgnoreRules,
+        relative: []const u8,
+        full: []const u8,
+        basename: []const u8,
+        is_dir: bool,
+    ) bool {
+        if (relative.len == 0) return false;
+        if (relative.len >= types.MAX_PATH) return true;
+        var buffer: [2 * types.MAX_PATH]u8 = undefined;
+        const scoped = self.scopedPath(&buffer, relative);
+        const full_offset = full.len - relative.len;
+        var start: ?*IgnoreNode = self.by_dir.get("") orelse self.parents;
+        var end: usize = 0;
+        while (mem.indexOfScalarPos(u8, relative, end, '/')) |slash| {
+            const prefix = relative[0..slash];
+            const dir_name = relative[end..slash];
+            if (self.extra) |extra| {
+                if (extra.gi.checkInode(prefix, dir_name, true)) |answer| {
+                    if (answer) return true;
+                    start = self.by_dir.get(prefix) orelse start;
+                    end = slash + 1;
+                    continue;
+                }
+            }
+            if (self.compatVerdict(start, scoped[0 .. self.scope_prefix.len + slash], full[0 .. full_offset + slash], dir_name, true) == true) return true;
+            start = self.by_dir.get(prefix) orelse start;
+            end = slash + 1;
+        }
+        if (self.extra) |extra| {
+            if (extra.gi.checkInode(relative, basename, is_dir)) |answer| return answer;
+        }
+        return self.compatVerdict(start, scoped, full, basename, is_dir) orelse false;
     }
 
     fn isIgnoredResolved(
@@ -216,6 +312,10 @@ pub const IgnoreRules = struct {
         self.parents = null;
         if (self.scope_prefix.len > 0) self.allocator.free(self.scope_prefix);
         self.scope_prefix = &.{};
+        if (self.compat_global) |*global| global.deinit();
+        self.compat_global = null;
+        if (self.compat_cwd) |cwd| self.allocator.free(cwd);
+        self.compat_cwd = null;
         var it = self.by_dir.iterator();
         while (it.next()) |e| {
             self.allocator.free(e.key_ptr.*);
