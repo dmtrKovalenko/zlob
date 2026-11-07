@@ -37,7 +37,7 @@ bitflags! {
         /// walker still reads `.gitignore` files.
         ///
         /// Repository `info/exclude` and the global excludes file have lower
-        /// precedence. Use [`Self::SKIP_DOT_IGNORE`] for Git rule precedence.
+        /// precedence. Use [`Self::SKIP_DOT_IGNORE`] to skip `.ignore` rules.
         const GITIGNORE       = 1 << 0;
         /// Skip hidden (dot) files and don't descend into dot-directories.
         const SKIP_HIDDEN     = 1 << 1;
@@ -67,20 +67,15 @@ bitflags! {
 
         /// With [`Self::GITIGNORE`], inherit ancestor ignore rules.
         ///
-        /// By default, `.ignore` rules can extend above the nearest Git boundary,
-        /// and the walk visits the explicitly selected directory even if an
-        /// ancestor rule excludes it. In a standalone tree, ancestor
-        /// `.gitignore` rules also apply.
-        ///
-        /// With [`Self::SKIP_DOT_IGNORE`], the walker uses `.gitignore` rules
-        /// up to the containing Git worktree when there is one. An ignored
-        /// walk root yields no entries.
+        /// The nearest `.git` or `.jj` bounds Git rules. `.ignore` rules can
+        /// extend above it. In a standalone tree, ancestor `.gitignore` rules
+        /// also apply. The walk visits the explicitly selected directory even
+        /// if an ancestor rule excludes it.
         const GITIGNORE_PARENTS = 1 << 9;
 
         /// With [`Self::GITIGNORE`]: skip rules from `.gitignore` files.
         const SKIP_GITIGNORE  = 1 << 10;
-        /// With [`Self::GITIGNORE`], skip `.ignore` files and use Git rule
-        /// precedence.
+        /// With [`Self::GITIGNORE`], skip rules from `.ignore` files.
         const SKIP_DOT_IGNORE = 1 << 11;
 
         /// Honor ignore rules and skip hidden entries.

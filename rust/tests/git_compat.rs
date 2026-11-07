@@ -13,8 +13,7 @@ use common::{git_available, git_ignored_paths, git_init, git_kept};
 use zlob::walk::{WalkBuilder, WalkFlags, WalkState};
 use zlob::{ZlobFlags, zlob};
 
-/// Use Git rule precedence and exclude the developer's global rules,
-/// matching the Git commands in `common::scrubbed`.
+/// Use Git ignore sources and the same global exclusions as `common::scrubbed`.
 const SCRUBBED: WalkFlags = WalkFlags::GITIGNORE
     .union(WalkFlags::SKIP_DOT_IGNORE)
     .union(WalkFlags::NO_GIT_GLOBAL);
@@ -502,14 +501,22 @@ fn subtree_walk_can_inherit_gitignore_rules() {
         );
     }
 
+    // An explicitly selected root is entered even if its parent would prune it.
     let blocked = subtree.join("blocked");
     let walk = WalkBuilder::new(&blocked)
         .unwrap()
         .options(options)
         .collect()
         .unwrap();
-    assert_eq!(walk.len(), git_kept(&blocked).len());
-    assert!(walk.ignore_rules().unwrap().is_ignored("inside.rs"));
+    let kept: BTreeSet<_> = walk
+        .iter()
+        .map(|entry| entry.relative_path().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        kept,
+        BTreeSet::from([".gitignore".into(), "inside.rs".into()])
+    );
+    assert!(!walk.ignore_rules().unwrap().is_ignored("inside.rs"));
 }
 
 fn label_of(spec: &[(String, String)]) -> String {

@@ -246,7 +246,7 @@ pub const Options = struct {
     git_global: bool = true,
     /// Skip rules from ".gitignore" when respect_git is set.
     skip_gitignore: bool = false,
-    /// Skip ".ignore" and use Git rule precedence when respect_git is set.
+    /// Skip rules from ".ignore" when respect_git is set.
     skip_dot_ignore: bool = false,
     /// Report directory entries (directories are traversed either way).
     report_dirs: bool = true,

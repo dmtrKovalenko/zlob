@@ -366,8 +366,8 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
  * consulted, directories reported. With ZLOB_WALK_GITIGNORE, .ignore rules
  * take precedence over Git rules across directories. GITIGNORE_PARENTS
  * inherits .gitignore up to the nearest repository boundary when present
- * and through parent directories in standalone trees. SKIP_DOT_IGNORE
- * selects Git rule precedence. Both modes honor core.excludesFile. */
+ * and through parent directories in standalone trees. GITIGNORE also
+ * honors repository core.excludesFile and $GIT_DIR/info/exclude. */
 #define ZLOB_WALK_GITIGNORE   (1u << 0) /* honor (nested) .gitignore + .ignore; also skips .git */
 #define ZLOB_WALK_SKIP_HIDDEN (1u << 1) /* skip dotfiles and don't descend into dot-dirs */
 #define ZLOB_WALK_FOLLOW_SYMLINKS   (1u << 2)

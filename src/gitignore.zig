@@ -382,14 +382,13 @@ pub const GitIgnore = struct {
 
         for (sources) |doc| {
             const bom = "\xef\xbb\xbf";
-            const content = if (syntax == .ignore_compat and mem.startsWith(u8, doc, bom)) doc[bom.len..] else doc;
+            const content = if (mem.startsWith(u8, doc, bom)) doc[bom.len..] else doc;
             var line_iter = mem.splitScalar(u8, content, '\n');
             while (line_iter.next()) |raw_line| {
                 const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r')
                     raw_line[0 .. raw_line.len - 1]
                 else
                     raw_line;
-                if (syntax == .ignore_compat and !std.unicode.utf8ValidateSlice(line)) break;
                 const pattern = parseLineWithSyntax(line, index, syntax) orelse continue;
 
                 try patterns_list.append(pattern);
@@ -644,13 +643,19 @@ pub const GitIgnore = struct {
         return parseLineWithSyntax(line, index, .git);
     }
 
-    fn parseLineWithSyntax(line: []const u8, index: u16, syntax: Syntax) ?Pattern {
+    fn parseLineWithSyntax(line: []const u8, index: u16, document_syntax: Syntax) ?Pattern {
         var text = line;
 
         if (text.len == 0 or text[0] == '#') {
             return null;
         }
 
+        // Malformed UTF-8 can name a real file on POSIX. Parse that line as
+        // bytes so Unicode trimming remains safe and later rules still apply.
+        const syntax = if (document_syntax == .ignore_compat and !std.unicode.utf8ValidateSlice(line))
+            .git
+        else
+            document_syntax;
         if (syntax == .ignore_compat) {
             text = trimIgnoreWhitespace(text);
         } else {
@@ -1234,6 +1239,20 @@ test "parse comments and blank lines" {
     );
     defer gi.deinit();
     try std.testing.expectEqual(@as(usize, 0), gi.patterns.len);
+}
+
+test "parse ignore documents with a BOM and malformed UTF-8 lines" {
+    const content = "\xef\xbb\xbf*.tmp\n# caf\xe9\nraw-\x80  \n*.log\n!keep.log\ncompat\u{a0}\n";
+    for ([_]GitIgnore.Syntax{ .git, .ignore_compat }) |syntax| {
+        var gi = try GitIgnore.parseWithSyntax(std.testing.allocator, content, syntax);
+        defer gi.deinit();
+
+        try std.testing.expect(gi.isIgnored("a.tmp", false));
+        try std.testing.expect(gi.isIgnored("raw-\x80", false));
+        try std.testing.expect(gi.isIgnored("a.log", false));
+        try std.testing.expect(!gi.isIgnored("keep.log", false));
+        try std.testing.expectEqual(syntax == .ignore_compat, gi.isIgnored("compat", false));
+    }
 }
 
 test "parse simple patterns" {

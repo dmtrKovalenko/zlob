@@ -4,22 +4,8 @@ const mem = std.mem;
 const linux = std.os.linux;
 const types = @import("types.zig");
 const worker = @import("worker.zig");
-const GitIgnore = @import("../gitignore.zig").GitIgnore;
 
 const IgnoreNode = worker.IgnoreNode;
-const MAX_DIR_CHAIN = 64;
-
-pub const __internal_test_api = if (builtin.is_test) struct {
-    pub const max_dir_chain = MAX_DIR_CHAIN;
-
-    pub fn isIgnoredResolved(rules: *const IgnoreRules, normalized: []const u8, basename: []const u8, is_dir: bool) bool {
-        return rules.isIgnoredResolved(normalized, basename, is_dir);
-    }
-
-    pub fn isIgnoredPathSlow(rules: *const IgnoreRules, normalized: []const u8, basename: []const u8, is_dir: bool) bool {
-        return rules.isIgnoredPathSlow(normalized, basename, is_dir);
-    }
-} else struct {};
 
 pub const IgnoreRules = struct {
     allocator: std.mem.Allocator,
@@ -30,10 +16,10 @@ pub const IgnoreRules = struct {
     /// Prefix of the walk root when matching rules inherited from its
     /// ancestors, including the final slash.
     scope_prefix: []const u8 = &.{},
-    root_ignored: bool = false,
-    compat: bool = false,
 
-    pub fn compatVerdict(
+    /// The nearest matching .ignore wins. Git sources supply a verdict
+    /// only through the nearest repository boundary.
+    pub fn verdict(
         start: ?*IgnoreNode,
         scoped: []const u8,
         basename: []const u8,
@@ -112,13 +98,10 @@ pub const IgnoreRules = struct {
         const is_dir = lstatIsDir(abs_z) orelse return true;
 
         const basename = if (mem.lastIndexOfScalar(u8, relative, '/')) |p| relative[p + 1 ..] else relative;
-        return if (self.compat)
-            self.isIgnoredPathCompat(relative, basename, is_dir)
-        else
-            self.isIgnoredResolved(relative, basename, is_dir);
+        return self.isIgnoredResolved(relative, basename, is_dir);
     }
 
-    fn isIgnoredPathCompat(
+    fn isIgnoredResolved(
         self: *const IgnoreRules,
         relative: []const u8,
         basename: []const u8,
@@ -141,82 +124,14 @@ pub const IgnoreRules = struct {
                     continue;
                 }
             }
-            if (compatVerdict(start, scoped[0 .. self.scope_prefix.len + slash], dir_name, true) == true) return true;
+            if (verdict(start, scoped[0 .. self.scope_prefix.len + slash], dir_name, true) == true) return true;
             start = self.by_dir.get(prefix) orelse start;
             end = slash + 1;
         }
         if (self.extra) |extra| {
             if (extra.gi.checkInode(relative, basename, is_dir)) |answer| return answer;
         }
-        return compatVerdict(start, scoped, basename, is_dir) orelse false;
-    }
-
-    fn isIgnoredResolved(
-        self: *const IgnoreRules,
-        normalized: []const u8,
-        basename: []const u8,
-        is_dir: bool,
-    ) bool {
-        if (self.root_ignored) return true;
-
-        // Innermost first: extra rules, local directories, then inherited rules.
-        var ignore_nodes: [MAX_DIR_CHAIN + 1]GitIgnore.ScopedRules = undefined;
-        var count: usize = 0;
-
-        if (self.extra) |node| {
-            ignore_nodes[count] = .{ .gi = &node.gi, .offset = self.scope_prefix.len };
-            count += 1;
-        }
-
-        var end: usize = normalized.len;
-        while (mem.lastIndexOfScalar(u8, normalized[0..end], '/')) |slash| {
-            end = slash;
-            if (self.by_dir.get(normalized[0..slash])) |node| {
-                // if deeper than we can hold as a stack resolution go to the slow method
-                if (count == ignore_nodes.len) return self.isIgnoredPathSlow(normalized, basename, is_dir);
-                ignore_nodes[count] = .{ .gi = &node.gi, .offset = node.relative_offset };
-                count += 1;
-            }
-        }
-
-        // The loop does not visit the empty root prefix, so add it separately.
-        if (self.by_dir.get("")) |node| {
-            if (count == ignore_nodes.len) return self.isIgnoredPathSlow(normalized, basename, is_dir);
-            ignore_nodes[count] = .{ .gi = &node.gi, .offset = node.relative_offset };
-            count += 1;
-        }
-
-        var parent = self.parents;
-        while (parent) |node| : (parent = node.parent) {
-            if (count == ignore_nodes.len) return self.isIgnoredPathSlow(normalized, basename, is_dir);
-            ignore_nodes[count] = .{ .gi = &node.gi, .offset = node.relative_offset };
-            count += 1;
-        }
-
-        var buffer: [2 * types.MAX_PATH]u8 = undefined;
-        const path = self.scopedPath(&buffer, normalized);
-        const stack = GitIgnore.Stack{ .docs = ignore_nodes[0..count] };
-        return stack.verdictWithAncestors(path, basename, is_dir) orelse false;
-    }
-
-    /// Slow sequential fallback if the path exceeds 64 segments (which is very rare)
-    fn isIgnoredPathSlow(
-        self: *const IgnoreRules,
-        norm: []const u8,
-        basename: []const u8,
-        is_dir: bool,
-    ) bool {
-        if (self.root_ignored) return true;
-        var buffer: [2 * types.MAX_PATH]u8 = undefined;
-        const path = self.scopedPath(&buffer, norm);
-        var offset = self.scope_prefix.len;
-        // Discovery already checked the walk root and the ancestors above it.
-        while (mem.indexOfScalarPos(u8, path, offset, '/')) |slash| {
-            const ancestor = path[0..slash];
-            if (self.slowVerdict(ancestor, GitIgnore.basenameOf(ancestor), true) == true) return true;
-            offset = slash + 1;
-        }
-        return self.slowVerdict(path, basename, is_dir) orelse false;
+        return verdict(start, scoped, basename, is_dir) orelse false;
     }
 
     fn scopedPath(self: *const IgnoreRules, buffer: *[2 * types.MAX_PATH]u8, path: []const u8) []const u8 {
@@ -225,24 +140,6 @@ pub const IgnoreRules = struct {
         @memcpy(buffer[0..self.scope_prefix.len], self.scope_prefix);
         @memcpy(buffer[self.scope_prefix.len..end], path);
         return buffer[0..end];
-    }
-
-    fn slowVerdict(self: *const IgnoreRules, scoped: []const u8, basename: []const u8, is_dir: bool) ?bool {
-        const path = scoped[self.scope_prefix.len..];
-        if (self.extra) |node| {
-            if (node.gi.checkInode(path, basename, is_dir)) |answer| return answer;
-        }
-        var end: usize = path.len;
-        while (mem.lastIndexOfScalar(u8, path[0..end], '/')) |slash| {
-            end = slash;
-            if (self.by_dir.get(path[0..slash])) |node| {
-                if (node.gi.checkInode(scoped[node.relative_offset..], basename, is_dir)) |answer| return answer;
-            }
-        }
-        if (self.by_dir.get("")) |node| {
-            if (node.gi.checkInode(path, basename, is_dir)) |answer| return answer;
-        }
-        return worker.chainVerdict(self.parents, scoped, basename, is_dir);
     }
 
     pub fn put(self: *IgnoreRules, dir_rel: []const u8, node: *IgnoreNode) !void {
