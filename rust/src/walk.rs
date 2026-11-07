@@ -57,15 +57,12 @@ bitflags! {
         const NO_GIT_EXCLUDE  = 1 << 7;
         /// With [`Self::GITIGNORE`], skip the lowest-priority excludes file.
         ///
-        /// By default, the walker reads the user's `core.excludesFile` from
-        /// `~/.gitconfig` or `$XDG_CONFIG_HOME/git/config`, falling back to
-        /// `$XDG_CONFIG_HOME/git/ignore` (`~/.config/git/ignore` when
-        /// `XDG_CONFIG_HOME` is unset). Anchored global patterns are relative
-        /// to the process working directory.
-        ///
-        /// With [`Self::SKIP_DOT_IGNORE`], repository config can override
-        /// the user's `core.excludesFile`, and patterns are anchored to the
-        /// worktree root.
+        /// The repository's `core.excludesFile` takes precedence over the
+        /// user's setting in `$GIT_CONFIG_GLOBAL`, `~/.gitconfig`, or
+        /// `$XDG_CONFIG_HOME/git/config`. When the setting is absent, the
+        /// walker uses `$XDG_CONFIG_HOME/git/ignore` (`~/.config/git/ignore`
+        /// when `XDG_CONFIG_HOME` is unset). Anchored patterns are relative
+        /// to the worktree root.
         const NO_GIT_GLOBAL   = 1 << 8;
 
         /// With [`Self::GITIGNORE`], inherit ancestor ignore rules.
@@ -83,7 +80,7 @@ bitflags! {
         /// With [`Self::GITIGNORE`]: skip rules from `.gitignore` files.
         const SKIP_GITIGNORE  = 1 << 10;
         /// With [`Self::GITIGNORE`], skip `.ignore` files and use Git rule
-        /// precedence, including repository overrides of `core.excludesFile`.
+        /// precedence.
         const SKIP_DOT_IGNORE = 1 << 11;
 
         /// Honor ignore rules and skip hidden entries.
@@ -364,8 +361,8 @@ impl WalkBuilder {
         self.run_with_rules(self.threads, &visitor)
     }
 
-    /// Stream entries through `visitor` on the calling thread only.
-    /// This allows to pass non-Sync cb to the walker for example mutate reference
+    /// Stream entries on the calling thread so the visitor can borrow
+    /// mutable state without synchronization.
     ///
     /// Returns a [`WalkerOutcomeRules`] just like [`Self::run`].
     pub fn run_serial<F>(&self, mut visitor: F) -> Result<WalkerOutcomeRules>
@@ -391,6 +388,7 @@ impl WalkBuilder {
         })
     }
 
+    /// Request the native rules handle and transfer its ownership to the caller.
     fn run_with_rules<F>(&self, threads: u16, visitor: &F) -> Result<WalkerOutcomeRules>
     where
         F: Fn(WalkEntry<'_>) -> WalkState + Sync,
@@ -400,6 +398,8 @@ impl WalkBuilder {
         Ok(WalkerOutcomeRules { raw })
     }
 
+    /// Pass the visitor to the native walker. An absent output slot enables
+    /// release of ignore rules as subtrees finish.
     fn run_inner<F>(
         &self,
         threads: u16,
@@ -409,6 +409,8 @@ impl WalkBuilder {
     where
         F: Fn(WalkEntry<'_>) -> WalkState + Sync,
     {
+        /// Borrow the native entry for the duration of the callback and
+        /// translate the visitor's decision into the C API result.
         unsafe extern "C" fn zlob_callback<F>(
             entry: *const ffi::zlob_walk_entry_t,
             ctx: *mut c_void,
@@ -1325,22 +1327,22 @@ mod tests {
         assert_eq!(got, ["src/a.txt"]);
     }
 
-    // https://github.com/dmtrKovalenko/fff/pull/878: core.excludesFile from
-    // the repository config, lowest precedence of all.
+    /// Resolve a quoted repository excludes path and let `.gitignore`
+    /// re-include files that it excludes.
     #[test]
     fn honors_git_core_excludes_file() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::create_dir(root.join(".git")).unwrap();
         fs::create_dir(root.join(".worktrees")).unwrap();
-        fs::write(root.join(".git/my-excludes"), ".worktrees/\n*.tmp\n").unwrap();
+        fs::write(root.join(".git/my ~ excludes"), ".worktrees/\n*.tmp\n").unwrap();
         // Git config values treat `\` as an escape, so a Windows path is
         // written by hand with forward slashes.
-        let excludes = root.join(".git/my-excludes");
+        let excludes = root.join(".git/my ~ excludes");
         let excludes = excludes.to_string_lossy().replace('\\', "/");
         fs::write(
             root.join(".git/config"),
-            format!("[core]\n\tbare = false\n\texcludesFile = {excludes}\n"),
+            format!("[core]\n\tbare = false\n\texcludesFile = \"{excludes}\"\n"),
         )
         .unwrap();
         fs::write(root.join(".gitignore"), "!keep.tmp\n").unwrap();
@@ -1352,13 +1354,7 @@ mod tests {
         let names = |flags: WalkFlags| -> Vec<String> {
             WalkBuilder::new(root)
                 .unwrap()
-                .options(
-                    flags
-                        | WalkFlags::GITIGNORE
-                        | WalkFlags::SKIP_DOT_IGNORE
-                        | WalkFlags::SORT
-                        | WalkFlags::NO_REPORT_DIRS,
-                )
+                .options(flags | WalkFlags::GITIGNORE | WalkFlags::SORT | WalkFlags::NO_REPORT_DIRS)
                 .threads(1)
                 .collect()
                 .unwrap()

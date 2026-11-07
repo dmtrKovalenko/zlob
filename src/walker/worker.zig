@@ -88,7 +88,6 @@ pub const IgnoreNode = struct {
     chain_last: gitignore_mod.LastByteFilter = .{},
     source: enum { git, dot_ignore } = .git,
     git_boundary: bool = false,
-    in_git_context: bool = false,
 
     pub fn retain(self: *IgnoreNode) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -131,7 +130,7 @@ pub const SharedWorkerState = struct {
     /// `.gitignore` would give a deeper directory).
     extra_ignore_root: ?*IgnoreNode = null,
     /// Repository exclude files (`$GIT_DIR/info/exclude`, core.excludesFile),
-    /// consulted only for directories whose listing holds `.git`.
+    /// consulted only for directories with a repository boundary.
     git: git_excludes.Resolver,
     /// Linux only: the per-entry `statx()` mask, precomputed once from
     /// `options.meta` so the hot scan loop doesn't rebuild it per entry. Other
@@ -264,6 +263,7 @@ pub const Worker = struct {
     /// The listing's `.git` entry, if any: this directory is a repository
     /// root whose exclude files apply.
     dot_git: ?git_excludes.DotGit = null,
+    saw_exact_dot_git: bool = false,
     saw_dot_jj: bool = false,
     /// Kernel buffer for getdents64 / getattrlistbulk.
     io_buf: []align(8) u8 = &.{},
@@ -325,12 +325,13 @@ inline fn noteIgnoreFile(w: *Worker, name: []const u8, kind: EntryKind) void {
         w.saw_ignore = true;
     } else if (name.len == 4 and mem.eql(u8, name, ".git")) {
         w.dot_git = .fromKind(kind);
+        w.saw_exact_dot_git = true;
     } else if (w.sh.ignore_rules.compat) {
         // These are candidates on case-insensitive filesystems. All opens
         // and stats still use the canonical name to check the actual lookup.
         switch (name.len) {
             3 => w.saw_dot_jj = w.saw_dot_jj or std.ascii.eqlIgnoreCase(name, ".jj"),
-            4 => if (std.ascii.eqlIgnoreCase(name, ".git")) {
+            4 => if (w.dot_git == null and std.ascii.eqlIgnoreCase(name, ".git")) {
                 w.dot_git = .unknown;
             },
             7 => w.saw_ignore = w.saw_ignore or std.ascii.eqlIgnoreCase(name, ".ignore"),
@@ -476,6 +477,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     w.saw_gitignore = false;
     w.saw_ignore = false;
     w.dot_git = null;
+    w.saw_exact_dot_git = false;
     w.saw_dot_jj = false;
     scan.scanDir(sh, w, handle) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -537,6 +539,19 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     }
 }
 
+fn isGitDirectory(w: *const Worker, handle: Handle, name: []const u8) bool {
+    if (mem.eql(u8, name, ".git")) return true;
+    if (w.saw_exact_dot_git or !std.ascii.eqlIgnoreCase(name, ".git")) return false;
+
+    // Compare the entries themselves so a distinct directory reached through
+    // a symlink named `.git` does not become the repository metadata entry.
+    const dir: std.Io.Dir = if (is_posix_backend or is_windows_backend) .{ .handle = handle } else handle;
+    const canonical = dir.statFile(w.sh.io, ".git", .{ .follow_symlinks = false }) catch return false;
+    if (canonical.kind != .directory) return false;
+    const candidate = dir.statFile(w.sh.io, name, .{ .follow_symlinks = false }) catch return false;
+    return candidate.kind == .directory and candidate.inode == canonical.inode;
+}
+
 fn processEntry(
     sh: *SharedWorkerState,
     w: *Worker,
@@ -576,7 +591,7 @@ fn processEntry(
     const basename = w.path_buf[prefix_len..full.len :0];
     const relative_path = full[sh.root_prefix_len..];
 
-    if (is_dir and opts.respect_git and opts.skip_git_dir and mem.eql(u8, basename, ".git")) return;
+    if (is_dir and opts.respect_git and opts.skip_git_dir and name.len == 4 and isGitDirectory(w, handle, name)) return;
 
     if (chainMayIgnore(cur_ignore, sh.extra_ignore_root, basename[basename.len - 1])) {
         // Extra rules are walk-relative and take precedence over discovered rules.
@@ -593,7 +608,7 @@ fn processEntry(
                 break :blk path[0 .. start + basename.len];
             } else relative_path;
             const verdict = if (sh.ignore_rules.compat)
-                sh.ignore_rules.compatVerdict(cur_ignore, match_path, full, basename, is_dir)
+                IgnoreRules.compatVerdict(cur_ignore, match_path, basename, is_dir)
             else
                 chainVerdict(cur_ignore, match_path, basename, is_dir);
             if (verdict == true) return;
@@ -901,10 +916,12 @@ fn loadCompatNode(
         .unknown => hasBoundaryMarker(sh, handle, ".git"),
     } else false;
     const vcs = git_exists or (saw_dot_jj and hasBoundaryMarker(sh, handle, ".jj"));
-    const repo = if (git_exists and sh.options.git_exclude)
+    const repo = if (!vcs or !sh.git.enabled())
+        git_excludes.Docs{}
+    else if (git_exists)
         sh.git.load(dir, dot_git.?)
     else
-        git_excludes.Docs{};
+        sh.git.loadGlobal(dir);
     const git = if (saw_gitignore and !sh.options.skip_gitignore)
         readSmallFile(sh, handle, ".gitignore")
     else
@@ -970,12 +987,8 @@ fn parseIgnoreNode(
         .chain_last = gi.any_last,
         .source = source,
         .git_boundary = git_boundary,
-        .in_git_context = git_boundary or (parent != null and parent.?.in_git_context),
     };
     if (parent) |p| node.chain_last.merge(p.chain_last) else if (sh.extra_ignore_root) |x| node.chain_last.merge(x.chain_last);
-    if (git_boundary) {
-        if (sh.ignore_rules.compat_global) |*global| node.chain_last.merge(global.any_last);
-    }
     return node;
 }
 

@@ -240,10 +240,9 @@ pub const Options = struct {
     /// Layered below that repository's root `.gitignore`
     /// as in git, so a `!negation` there un-ignores what info/exclude ignores.
     git_exclude: bool = true,
-    /// With respect_git: honor the user's global excludes inside repositories.
-    /// Anchored rules are relative to the process working directory. With
-    /// skip_dot_ignore, repository config can override the excludes file and
-    /// rules are anchored to the worktree root.
+    /// With respect_git: honor core.excludesFile inside repositories, with
+    /// repository config taking precedence over global config. Rules are
+    /// anchored to the worktree root.
     git_global: bool = true,
     /// Skip rules from ".gitignore" when respect_git is set.
     skip_gitignore: bool = false,

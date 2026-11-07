@@ -226,7 +226,7 @@ for entry in results.iter() {
 }
 
 // .ignore takes precedence over .gitignore, even across directories.
-// SKIP_DOT_IGNORE selects Git rule precedence and repository config.
+// SKIP_DOT_IGNORE selects Git rule precedence.
 WalkBuilder::new(".").options(WalkFlags::GITIGNORE).run(|entry| {
     println!("{}", entry.path().display());
 

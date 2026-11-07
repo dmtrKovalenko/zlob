@@ -179,6 +179,33 @@ test "walk nested gitignore: deeper file overrides parent" {
     try testing.expect(found_git);
 }
 
+test "walk skips case aliases of the .git directory" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("git_dir_case");
+    defer t.deinit();
+
+    try t.mkdir(".GIT");
+    try t.write(".GIT/config", "");
+    const case_insensitive = blk: {
+        t.mkdir(".git") catch |err| switch (err) {
+            error.PathAlreadyExists => break :blk true,
+            else => return err,
+        };
+        try t.write(".git/config", "");
+        break :blk false;
+    };
+
+    var results = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .sort = true, .git_global = false });
+    defer results.deinit();
+    const expected: []const []const u8 = if (case_insensitive) &.{} else &.{ ".GIT", ".GIT/config" };
+    try testing.expectEqual(expected.len, results.entries.len);
+    for (results.entries, expected) |entry, path| try testing.expectEqualStrings(path, entry.relativePath());
+
+    var kept = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .skip_git_dir = false, .git_global = false });
+    defer kept.deinit();
+    try testing.expect(findEntry(&kept, ".GIT/config") != null);
+}
+
 test "walk gives .ignore precedence across nested repository boundaries" {
     var t: TestTree = .{ .io = undefined };
     try t.init("ignore_precedence");
@@ -366,7 +393,7 @@ test "walk reads symlinked ignore documents" {
     for (result.entries, expected) |entry, relative| try testing.expectEqualStrings(relative, entry.relativePath());
 }
 
-test "walk reports a terminal directory beyond PATH_MAX on macOS" {
+test "walk reports terminal entries beyond PATH_MAX on macOS" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var t: TestTree = .{ .io = undefined };
     try t.init("walk_long_terminal");
@@ -374,23 +401,33 @@ test "walk reports a terminal directory beyond PATH_MAX on macOS" {
     var dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
     defer dir.close(t.io);
     const child_name: [128]u8 = @splat('d');
+    const file_name: [child_name.len]u8 = @splat('f');
     var relative_path: std.ArrayList(u8) = .empty;
     defer relative_path.deinit(testing.allocator);
     while (t.root.len + 1 + relative_path.items.len < std.Io.Dir.max_path_bytes) {
+        if (relative_path.items.len > 0) try relative_path.append(testing.allocator, '/');
+        try relative_path.appendSlice(testing.allocator, &child_name);
+        if (t.root.len + 1 + relative_path.items.len >= std.Io.Dir.max_path_bytes) {
+            try dir.writeFile(t.io, .{ .sub_path = &file_name, .data = "" });
+        }
         try dir.createDir(t.io, &child_name, .default_dir);
         const child = try dir.openDir(t.io, &child_name, .{});
         dir.close(t.io);
         dir = child;
-        if (relative_path.items.len > 0) try relative_path.append(testing.allocator, '/');
-        try relative_path.appendSlice(testing.allocator, &child_name);
     }
     try dir.writeFile(t.io, .{ .sub_path = "leaf", .data = "" });
 
     var result = try walk.collect(testing.allocator, t.root, .{ .git_global = false });
     defer result.deinit();
     try testing.expect(findEntry(&result, relative_path.items) != null);
+    const basename_offset = relative_path.items.len - child_name.len;
     try relative_path.appendSlice(testing.allocator, "/leaf");
     try testing.expect(findEntry(&result, relative_path.items) == null);
+
+    relative_path.shrinkRetainingCapacity(basename_offset);
+    try relative_path.appendSlice(testing.allocator, &file_name);
+    const file = findEntry(&result, relative_path.items) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(walk.EntryKind.file, file.kind);
 }
 
 // Regression: https://github.com/dmtrKovalenko/fff/issues/723
@@ -598,6 +635,57 @@ test "walk visitor: skip_dir prunes, stop halts" {
         testing.allocator.destroy(rules);
     }
     try testing.expectEqual(@as(usize, 1), stop_ctx.count);
+}
+
+test "walk visit releases completed subtree rules before visiting a sibling" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("visit_releases_rules");
+    defer t.deinit();
+
+    // Equally sized sibling trees keep scratch allocation stable whichever
+    // directory the filesystem lists first.
+    var rule_bytes: usize = 0;
+    for ([_][]const u8{ "a", "b" }) |name| {
+        try t.mkdir(name);
+        var rule_buf: [4096]u8 = undefined;
+        var rules = std.Io.Writer.fixed(&rule_buf);
+        for (0..128) |i| try rules.print("ignored-{s}-{d}\n", .{ name, i });
+        rule_bytes = rules.buffered().len;
+
+        var path_buf: [64]u8 = undefined;
+        try t.write(try std.fmt.bufPrint(&path_buf, "{s}/.ignore", .{name}), rules.buffered());
+        try t.write(try std.fmt.bufPrint(&path_buf, "{s}/ignored-{s}-0", .{ name, name }), "");
+        try t.write(try std.fmt.bufPrint(&path_buf, "{s}/keep", .{name}), "");
+    }
+
+    const Context = struct {
+        allocator: *testing.FailingAllocator,
+        live_bytes: [2]usize = undefined,
+        file_count: usize = 0,
+
+        fn visit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            if (entry.kind != .file or std.mem.eql(u8, entry.basename(), ".ignore")) return .cont;
+            if (self.file_count < self.live_bytes.len) {
+                self.live_bytes[self.file_count] = self.allocator.allocated_bytes - self.allocator.freed_bytes;
+            }
+            self.file_count += 1;
+            return .cont;
+        }
+    };
+
+    // Use the standard allocator's byte counters without injecting failures.
+    var counting = testing.FailingAllocator.init(testing.allocator, .{});
+    var ctx = Context{ .allocator = &counting };
+    try walk.visit(counting.allocator(), t.root, .{ .threads = 1, .git_global = false }, .{
+        .context = @ptrCast(&ctx),
+        .visit = Context.visit,
+    });
+    try testing.expectEqual(ctx.live_bytes.len, ctx.file_count);
+    // The second callback must occur before teardown. Retaining the first
+    // document there would add its source and compiled rules to live memory.
+    try testing.expect(ctx.live_bytes[1] < ctx.live_bytes[0] + rule_bytes);
+    try testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
 }
 
 test "walk parallel matches serial results" {
@@ -1607,7 +1695,7 @@ test "walk honors info/exclude of a linked worktree through commondir" {
 
     var buf: [512]u8 = undefined;
     const wt_root = try std.fmt.bufPrint(&buf, "{s}/wt", .{t.root});
-    var results = try walk.collect(testing.allocator, wt_root, .{ .threads = 1, .git_global = false, .skip_dot_ignore = true });
+    var results = try walk.collect(testing.allocator, wt_root, .{ .threads = 1, .git_global = false });
     defer results.deinit();
     try testing.expect(findEntry(&results, "src/a.txt") != null);
     try testing.expect(findEntry(&results, "excluded/b.txt") == null);
@@ -1626,15 +1714,15 @@ test "walk honors core.excludesFile from the repository config" {
     // core.excludesFile, relative to the worktree root as in git (never to
     // the process cwd); it ignores build/ and *.tmp. The repo .gitignore
     // outranks it: `!keep.tmp` wins.
-    try t.write(".git/config", "[core]\n\trepositoryformatversion = 0\n\texcludesFile = .git/global-ignore\n");
-    try t.write(".git/global-ignore", "build/\n*.tmp\n");
+    try t.write(".git/config", "[core]\n\trepositoryformatversion = 0\n\texcludesFile = \".git/global ignore\"\n");
+    try t.write(".git/global ignore", "build/\n*.tmp\n");
     try t.write(".gitignore", "!keep.tmp\n");
     try t.write("build/out.o", "");
     try t.write("vendor/lib.c", "");
     try t.write("scratch.tmp", "");
     try t.write("keep.tmp", "");
 
-    var results = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .skip_dot_ignore = true });
+    var results = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .git_exclude = false });
     defer results.deinit();
     try testing.expect(findEntry(&results, "build") == null);
     try testing.expect(findEntry(&results, "build/out.o") == null);
@@ -1643,7 +1731,7 @@ test "walk honors core.excludesFile from the repository config" {
     try testing.expect(findEntry(&results, "vendor/lib.c") != null);
     try testing.expect(results.ignore_rules.isIgnoredPath("scratch.tmp"));
 
-    var off = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .git_global = false, .skip_dot_ignore = true });
+    var off = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .git_global = false, .git_exclude = false });
     defer off.deinit();
     try testing.expect(findEntry(&off, "build/out.o") != null);
     try testing.expect(findEntry(&off, "scratch.tmp") != null);

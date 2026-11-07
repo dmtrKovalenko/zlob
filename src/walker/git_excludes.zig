@@ -82,7 +82,6 @@ pub const Resolver = struct {
     io: std.Io,
     want_exclude: bool,
     want_global: bool,
-    ignore_compat: bool = false,
     mutex: std.Io.Mutex = .init,
     /// commondir -> what the repository itself says.
     repos: std.StringHashMapUnmanaged(Repo) = .empty,
@@ -133,10 +132,7 @@ pub const Resolver = struct {
     /// `.git` is not a repository.
     pub fn load(r: *Resolver, dir: []const u8, dot_git: DotGit) Docs {
         const gpa = r.gpa;
-        const common = (if (r.ignore_compat)
-            resolveCompatCommonDir(gpa, r.io, dir, dot_git)
-        else
-            resolveCommonDir(gpa, r.io, dir, dot_git)) orelse return .{};
+        const common = resolveCommonDir(gpa, r.io, dir, dot_git) orelse return .{};
 
         r.mutex.lockUncancelable(r.io);
         defer r.mutex.unlock(r.io);
@@ -155,18 +151,27 @@ pub const Resolver = struct {
         }
         const repo = gop.value_ptr.*;
 
-        var out: Docs = .{};
-        if (repo.info_exclude) |b| out.info_exclude = gpa.dupe(u8, b) catch null;
-        if (r.want_global) {
-            // A repository-level value replaces the global one, even when
-            // the file it names is missing or the value is empty.
-            if (repo.excludes_setting orelse r.globalSetting()) |path| {
-                if (path.len > 0) {
-                    if (r.excludesFile(dir, path)) |b| out.excludes_file = gpa.dupe(u8, b) catch null;
-                }
-            }
-        }
-        return out;
+        return .{
+            .info_exclude = if (repo.info_exclude) |b| gpa.dupe(u8, b) catch null else null,
+            .excludes_file = if (r.want_global) r.loadExcludesFile(dir, repo.excludes_setting) else null,
+        };
+    }
+
+    /// User excludes for a .jj boundary without its own Git config.
+    pub fn loadGlobal(r: *Resolver, dir: []const u8) Docs {
+        if (!r.want_global) return .{};
+        r.mutex.lockUncancelable(r.io);
+        defer r.mutex.unlock(r.io);
+        return .{ .excludes_file = r.loadExcludesFile(dir, null) };
+    }
+
+    /// Called with the cache locked. A repository-level value replaces the
+    /// global one, even when the named file is missing or the value is empty.
+    fn loadExcludesFile(r: *Resolver, dir: []const u8, repo_setting: ?[]const u8) ?[]u8 {
+        const path = repo_setting orelse r.globalSetting() orelse return null;
+        if (path.len == 0) return null;
+        const doc = r.excludesFile(dir, path) orelse return null;
+        return r.gpa.dupe(u8, doc) catch null;
     }
 
     fn globalSetting(r: *Resolver) ?[]const u8 {
@@ -256,42 +261,6 @@ pub fn resolveCommonDir(gpa: Allocator, io: std.Io, dir: []const u8, dot_git: Do
     return std.fs.path.resolve(gpa, &.{ gitdir, common_rel }) catch null;
 }
 
-fn resolveCompatCommonDir(gpa: Allocator, io: std.Io, dir: []const u8, dot_git: DotGit) ?[]u8 {
-    const dot = std.fs.path.join(gpa, &.{ dir, ".git" }) catch return null;
-    const kind = switch (dot_git) {
-        .directory => std.Io.File.Kind.directory,
-        .file => std.Io.File.Kind.file,
-        .unknown => (std.Io.Dir.cwd().statFile(io, dot, .{}) catch {
-            gpa.free(dot);
-            return null;
-        }).kind,
-    };
-    if (kind == .directory) return dot;
-    defer gpa.free(dot);
-    if (kind != .file) return null;
-    const pointer = readFile(gpa, io, dot) orelse return null;
-    defer gpa.free(pointer);
-    const first_line = firstCompatLine(pointer) orelse return null;
-    const marker = "gitdir: ";
-    if (!mem.startsWith(u8, first_line, marker)) return null;
-    // The ignore crate interprets a relative pointer against the process
-    // directory and requires a commondir file even for a submodule pointer.
-    const gitdir = first_line[marker.len..];
-    const commondir_file = std.fs.path.join(gpa, &.{ gitdir, "commondir" }) catch return null;
-    defer gpa.free(commondir_file);
-    const common = readFile(gpa, io, commondir_file) orelse return null;
-    defer gpa.free(common);
-    const line = firstCompatLine(common) orelse return null;
-    if (mem.startsWith(u8, line, ".")) return std.fs.path.join(gpa, &.{ gitdir, line }) catch null;
-    return gpa.dupe(u8, line) catch null;
-}
-
-fn firstCompatLine(bytes: []const u8) ?[]const u8 {
-    const end = mem.indexOfScalar(u8, bytes, '\n') orelse bytes.len;
-    const line = if (end < bytes.len and end > 0 and bytes[end - 1] == '\r') bytes[0 .. end - 1] else bytes[0..end];
-    return if (std.unicode.utf8ValidateSlice(line)) line else null;
-}
-
 /// The path after `gitdir:` in a `.git` file, or null when the file is
 /// something else entirely.
 pub fn gitdirPointerTarget(content: []const u8) ?[]const u8 {
@@ -330,47 +299,6 @@ pub fn resolveGlobalSetting(gpa: Allocator, io: std.Io) ?[]u8 {
     if (setting) |s| return s;
     const x = xdg orelse return null;
     return std.fs.path.join(gpa, &.{ x, "git", "ignore" }) catch null;
-}
-
-pub fn loadCompatGlobal(gpa: Allocator, io: std.Io) ?[]u8 {
-    const home = homeDir(gpa);
-    defer if (home) |path| gpa.free(path);
-    const xdg = getEnvAlloc(gpa, "XDG_CONFIG_HOME") orelse
-        if (home) |path| (std.fs.path.join(gpa, &.{ path, ".config" }) catch null) else null;
-    defer if (xdg) |path| gpa.free(path);
-    const from_home = if (home) |path| compatSettingFromFile(gpa, io, &.{ path, ".gitconfig" }, home) else null;
-    const path = from_home orelse blk: {
-        const config_dir = xdg orelse return null;
-        break :blk compatSettingFromFile(gpa, io, &.{ config_dir, "git", "config" }, home) orelse
-            (std.fs.path.join(gpa, &.{ config_dir, "git", "ignore" }) catch return null);
-    };
-    defer gpa.free(path);
-    const status = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
-    if (status.kind != .file) return null;
-    return readFile(gpa, io, path);
-}
-
-fn compatSettingFromFile(gpa: Allocator, io: std.Io, parts: []const []const u8, home: ?[]const u8) ?[]u8 {
-    const path = std.fs.path.join(gpa, parts) catch return null;
-    defer gpa.free(path);
-    const config = readFile(gpa, io, path) orelse return null;
-    defer gpa.free(config);
-    // Match the ignore crate's first whitespace-delimited excludesfile
-    // setting, independently of the section, rather than parsing Git config.
-    const whitespace = " \t\r\n\x0b\x0c";
-    var lines = mem.splitScalar(u8, config, '\n');
-    while (lines.next()) |line| {
-        const eq = mem.indexOfScalar(u8, line, '=') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(mem.trim(u8, line[0..eq], whitespace), "excludesfile")) continue;
-        var value = mem.trim(u8, line[eq + 1 ..], whitespace);
-        if (mem.startsWith(u8, value, "\"")) value = mem.trimStart(u8, value[1..], whitespace);
-        if (mem.endsWith(u8, value, "\"")) value = mem.trimEnd(u8, value[0 .. value.len - 1], whitespace);
-        if (value.len == 0 or mem.indexOfAny(u8, value, whitespace) != null) continue;
-        if (!std.unicode.utf8ValidateSlice(value)) return null;
-        if (home) |dir| return mem.replaceOwned(u8, gpa, value, "~", dir) catch null;
-        return gpa.dupe(u8, value) catch null;
-    }
-    return null;
 }
 
 fn settingFromFile(gpa: Allocator, io: std.Io, parts: []const []const u8) ?[]u8 {
@@ -635,7 +563,7 @@ fn expectDocs(r: *Resolver, f: *Fixture, dir: []const u8, dot_git: DotGit, info:
     if (excludes) |e| try testing.expectEqualStrings(e, docs.excludes_file orelse return error.MissingExcludesFile) else try testing.expect(docs.excludes_file == null);
 }
 
-test "Resolver: repo config, relative paths, worktree pointer, non-repo .git" {
+test "Resolver: repo config and relative worktree and submodule pointers" {
     var f: Fixture = .{ .io = undefined };
     try f.init();
     defer f.deinit();
@@ -650,6 +578,10 @@ test "Resolver: repo config, relative paths, worktree pointer, non-repo .git" {
     try f.mkdir("wt");
     try f.write("wt/.git", "gitdir: ../main/.git/worktrees/wt\n");
     try f.write("wt/local-ignore", "*.wt\n");
+    try f.mkdir("main/.git/modules/sub/info");
+    try f.write("main/.git/modules/sub/info/exclude", "*.sub\n");
+    try f.mkdir("main/sub");
+    try f.write("main/sub/.git", "gitdir: ../.git/modules/sub\n");
     try f.mkdir("bogus");
     try f.write("bogus/.git", "hello\n");
     try f.mkdir("plain/.git/info");
@@ -663,6 +595,7 @@ test "Resolver: repo config, relative paths, worktree pointer, non-repo .git" {
     // shared info/exclude and config, but its own relative excludes file
     try expectDocs(&r, &f, "wt", .file, "# comment\nexcluded/\n", "*.wt\n");
     try expectDocs(&r, &f, "wt", .unknown, "# comment\nexcluded/\n", "*.wt\n");
+    try expectDocs(&r, &f, "main/sub", .file, "*.sub\n", null);
     try expectDocs(&r, &f, "bogus", .file, null, null);
     try expectDocs(&r, &f, "missing", .unknown, null, null);
     // comments-only template: no document; no repo setting: global (missing)

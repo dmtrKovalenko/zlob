@@ -330,13 +330,6 @@ fn walkImpl(
         .finish = finish,
     };
 
-    if (ignore_rules.compat) {
-        sh.git.want_global = false;
-        sh.git.ignore_compat = true;
-        if (options.git_global) {
-            try ignore_rules.loadCompatGlobal(io);
-        }
-    }
     defer sh.git.deinit();
     if (options.respect_git and options.gitignore_parents) {
         try worker.loadParentIgnoreRules(&sh);
