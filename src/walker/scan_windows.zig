@@ -240,6 +240,7 @@ pub fn readSmallFileAt(
     dir: w.HANDLE,
     name: []const u8,
     max_size: usize,
+    no_follow: bool,
 ) ?[]u8 {
     if (!supported) unreachable;
     var name_w: [255]u16 = undefined;
@@ -265,12 +266,22 @@ pub fn readSmallFileAt(
         .{
             .IO = .SYNCHRONOUS_NONALERT,
             .NON_DIRECTORY_FILE = true,
+            .OPEN_REPARSE_POINT = no_follow,
         },
         null,
         0,
     );
     if (rc != .SUCCESS) return null;
     defer w.CloseHandle(handle);
+
+    if (no_follow) {
+        // Inspect the opened entry itself so replacing a rule file with a
+        // symlink between the directory scan and the open cannot redirect it.
+        var attributes: w.FILE.ATTRIBUTE_TAG_INFO = undefined;
+        if (w.ntdll.NtQueryInformationFile(handle, &iosb, &attributes, @sizeOf(w.FILE.ATTRIBUTE_TAG_INFO), .AttributeTag) != .SUCCESS) return null;
+        const file_attributes: w.FILE.ATTRIBUTE = @bitCast(attributes.FileAttributes);
+        if (file_attributes.REPARSE_POINT and attributes.ReparseTag.IsSurrogate) return null;
+    }
 
     var list: std.ArrayList(u8) = .empty;
     defer list.deinit(gpa);

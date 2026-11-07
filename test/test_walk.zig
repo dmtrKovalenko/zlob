@@ -5,7 +5,6 @@ const builtin = @import("builtin");
 const testing = std.testing;
 const zlob = @import("zlob");
 const walk = zlob.walk;
-const GitIgnore = @import("zlob_core").GitIgnore;
 
 const TestTree = struct {
     io: std.Io,
@@ -177,6 +176,298 @@ test "walk nested gitignore: deeper file overrides parent" {
         if (std.mem.eql(u8, e.relativePath(), ".git/config")) found_git = true;
     }
     try testing.expect(found_git);
+}
+
+test "walk skips case aliases of the .git directory" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("git_dir_case");
+    defer t.deinit();
+
+    try t.mkdir(".GIT");
+    try t.write(".GIT/config", "");
+    const case_insensitive = blk: {
+        t.mkdir(".git") catch |err| switch (err) {
+            error.PathAlreadyExists => break :blk true,
+            else => return err,
+        };
+        try t.write(".git/config", "");
+        break :blk false;
+    };
+
+    var results = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .sort = true, .git_global = false });
+    defer results.deinit();
+    const expected: []const []const u8 = if (case_insensitive) &.{} else &.{ ".GIT", ".GIT/config" };
+    try testing.expectEqual(expected.len, results.entries.len);
+    for (results.entries, expected) |entry, path| try testing.expectEqualStrings(path, entry.relativePath());
+
+    var kept = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .skip_git_dir = false, .git_global = false });
+    defer kept.deinit();
+    try testing.expect(findEntry(&kept, ".GIT/config") != null);
+}
+
+test "walk gives .ignore precedence across nested repository boundaries" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("ignore_precedence");
+    defer t.deinit();
+
+    try t.mkdir("outer");
+    try t.mkdir("outer/.git");
+    try t.mkdir("outer/.git/info");
+    try t.mkdir("outer/nested");
+    try t.mkdir("outer/nested/.git");
+    try t.mkdir("outer/jujutsu");
+    try t.mkdir("outer/jujutsu/.jj");
+    try t.mkdir("outer/sub");
+    try t.write(".ignore", "/outer/ancestor\n");
+    try t.write("outer/.gitignore", "git-rule\n");
+    try t.write("outer/.git/info/exclude", "local-rule\n");
+    try t.write("outer/.ignore", "dot-rule\n!allowed\n");
+    try t.write("outer/sub/.gitignore", "!dot-rule\nallowed\n");
+    try t.write("outer/sub/dot-rule", "");
+    try t.write("outer/sub/allowed", "");
+    try t.write("outer/ancestor", "");
+    try t.write("outer/git-rule", "");
+    try t.write("outer/local-rule", "");
+    for ([_][]const u8{ "nested", "jujutsu" }) |directory| {
+        var path_buf: [64]u8 = undefined;
+        for ([_][]const u8{ "dot-rule", "git-rule", "local-rule" }) |name| {
+            try t.write(try std.fmt.bufPrint(&path_buf, "outer/{s}/{s}", .{ directory, name }), "");
+        }
+    }
+
+    var root_buf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "{s}/outer", .{t.root});
+    var result = try walk.collect(testing.allocator, root, .{
+        .gitignore_parents = true,
+        .git_global = false,
+        .threads = 4,
+        .sort = true,
+    });
+    defer result.deinit();
+
+    const expected = [_][]const u8{
+        ".gitignore",         ".ignore",     "jujutsu",         "jujutsu/.jj",       "jujutsu/git-rule",
+        "jujutsu/local-rule", "nested",      "nested/git-rule", "nested/local-rule", "sub",
+        "sub/.gitignore",     "sub/allowed",
+    };
+    try testing.expectEqual(expected.len, result.entries.len);
+    for (result.entries, expected) |entry, relative| try testing.expectEqualStrings(relative, entry.relativePath());
+    try testing.expect(result.ignore_rules.isIgnoredPath("ancestor"));
+    try testing.expect(result.ignore_rules.isIgnoredPath("nested/dot-rule"));
+    try testing.expect(!result.ignore_rules.isIgnoredPath("nested/git-rule"));
+    try testing.expect(!result.ignore_rules.isIgnoredPath("sub/allowed"));
+
+    var git_only = try walk.collect(testing.allocator, root, .{
+        .gitignore_parents = true,
+        .git_global = false,
+        .skip_dot_ignore = true,
+        .threads = 4,
+        .sort = true,
+    });
+    defer git_only.deinit();
+    const git_expected = [_][]const u8{
+        ".gitignore",       ".ignore",           "ancestor",           "jujutsu",        "jujutsu/.jj",
+        "jujutsu/dot-rule", "jujutsu/git-rule",  "jujutsu/local-rule", "nested",         "nested/dot-rule",
+        "nested/git-rule",  "nested/local-rule", "sub",                "sub/.gitignore", "sub/dot-rule",
+    };
+    try testing.expectEqual(git_expected.len, git_only.entries.len);
+    for (git_only.entries, git_expected) |entry, relative| try testing.expectEqualStrings(relative, entry.relativePath());
+    try testing.expect(!git_only.ignore_rules.isIgnoredPath("nested/git-rule"));
+    try testing.expect(git_only.ignore_rules.isIgnoredPath("sub/allowed"));
+
+    var nested_buf: [256]u8 = undefined;
+    const nested_root = try std.fmt.bufPrint(&nested_buf, "{s}/outer/nested", .{t.root});
+    var nested = try walk.collect(testing.allocator, nested_root, .{
+        .gitignore_parents = true,
+        .git_global = false,
+        .sort = true,
+    });
+    defer nested.deinit();
+    const nested_expected = [_][]const u8{ "git-rule", "local-rule" };
+    try testing.expectEqual(nested_expected.len, nested.entries.len);
+    for (nested.entries, nested_expected) |entry, relative| try testing.expectEqualStrings(relative, entry.relativePath());
+    try testing.expect(nested.ignore_rules.isIgnoredPath("dot-rule"));
+    try testing.expect(!nested.ignore_rules.isIgnoredPath("git-rule"));
+}
+
+test "walk applies local and inherited gitignore outside a repository" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const cwd = std.Io.Dir.cwd();
+    const alloc = testing.allocator;
+    const temp_path = testing.environ.getAlloc(alloc, if (builtin.os.tag == .windows) "TEMP" else "TMPDIR") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => if (builtin.os.tag == .windows) return error.SkipZigTest else try alloc.dupe(u8, "/tmp"),
+        else => return err,
+    };
+    defer alloc.free(temp_path);
+    // The Zig test cache is usually inside the zlob checkout. Use the
+    // system temporary directory and check for an enclosing repository.
+    const absolute_temp_path = try cwd.realPathFileAlloc(io, temp_path, alloc);
+    defer alloc.free(absolute_temp_path);
+    var ancestor: []const u8 = absolute_temp_path;
+    while (true) {
+        const dir = try cwd.openDir(io, ancestor, .{});
+        defer dir.close(io);
+        for ([_][]const u8{ ".git", ".jj" }) |marker| {
+            if (dir.access(io, marker, .{})) |_| return error.SkipZigTest else |err| {
+                if (err != error.FileNotFound) return err;
+            }
+        }
+        ancestor = std.fs.path.dirname(ancestor) orelse break;
+    }
+
+    const temp = try cwd.openDir(io, absolute_temp_path, .{});
+    defer temp.close(io);
+    var name_buf: [80]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "zlob-walk-plain-{d}", .{std.Io.Timestamp.now(io, .real).toNanoseconds()});
+    try temp.createDir(io, name, .default_dir);
+    defer temp.deleteTree(io, name) catch {};
+    const fixture = try temp.openDir(io, name, .{});
+    defer fixture.close(io);
+
+    try fixture.createDir(io, "sub", .default_dir);
+    try fixture.writeFile(io, .{ .sub_path = ".gitignore", .data = "/sub/parent-git-rule\n" });
+    try fixture.writeFile(io, .{ .sub_path = ".ignore", .data = "/sub/parent-dot-rule\n" });
+    try fixture.writeFile(io, .{ .sub_path = "sub/.gitignore", .data = "local-git-rule\n" });
+    try fixture.writeFile(io, .{ .sub_path = "sub/.ignore", .data = "local-dot-rule\n" });
+    for ([_][]const u8{ "sub/keep", "sub/local-git-rule", "sub/local-dot-rule", "sub/parent-git-rule", "sub/parent-dot-rule" }) |file| {
+        try fixture.writeFile(io, .{ .sub_path = file, .data = "" });
+    }
+
+    const root = try fixture.realPathFileAlloc(io, "sub", alloc);
+    defer alloc.free(root);
+    const Case = struct {
+        inherit: bool,
+        skip_dot_ignore: bool = false,
+        expected: []const []const u8,
+    };
+    const cases = [_]Case{
+        .{ .inherit = false, .expected = &.{ ".gitignore", ".ignore", "keep", "parent-dot-rule", "parent-git-rule" } },
+        .{ .inherit = true, .expected = &.{ ".gitignore", ".ignore", "keep" } },
+        .{ .inherit = true, .skip_dot_ignore = true, .expected = &.{ ".gitignore", ".ignore", "keep", "local-dot-rule", "parent-dot-rule" } },
+    };
+    for (cases) |case| {
+        var result = try walk.collect(alloc, root, .{
+            .gitignore_parents = case.inherit,
+            .skip_dot_ignore = case.skip_dot_ignore,
+            .git_global = false,
+            .sort = true,
+        });
+        defer result.deinit();
+        try testing.expectEqual(case.expected.len, result.entries.len);
+        for (result.entries, case.expected) |entry, relative| try testing.expectEqualStrings(relative, entry.relativePath());
+        try testing.expectEqual(case.inherit, result.ignore_rules.isIgnoredPath("parent-git-rule"));
+        try testing.expectEqual(case.inherit and !case.skip_dot_ignore, result.ignore_rules.isIgnoredPath("parent-dot-rule"));
+    }
+}
+
+test "walk enters an explicitly selected root ignored by its parent" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("ignore_explicit_root");
+    defer t.deinit();
+
+    try t.mkdir(".git");
+    try t.mkdir("sub");
+    try t.write(".gitignore", "sub/\n/sub/hidden\n");
+    try t.write("sub/hidden", "");
+    try t.write("sub/visible", "");
+
+    var root_buf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "{s}/sub", .{t.root});
+    for ([_]bool{ false, true }) |skip_dot_ignore| {
+        var result = try walk.collect(testing.allocator, root, .{
+            .gitignore_parents = true,
+            .git_global = false,
+            .skip_dot_ignore = skip_dot_ignore,
+        });
+        defer result.deinit();
+        try testing.expectEqual(@as(usize, 1), result.entries.len);
+        try testing.expectEqualStrings("visible", result.entries[0].relativePath());
+        try testing.expect(result.ignore_rules.isIgnoredPath("hidden"));
+    }
+}
+
+test "walk follows .ignore symlinks and skips symlinked .gitignore rules" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("ignore_rule_links");
+    defer t.deinit();
+
+    try t.mkdir(".git");
+    try t.mkdir("sub");
+    try t.write("git-rules", "*.tmp\n");
+    try t.write("dot-rules", "*.log\n");
+    try t.write("a.tmp", "");
+    try t.write("a.log", "");
+    try t.write("sub/b.tmp", "");
+    try t.write("sub/b.log", "");
+    var dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
+    defer dir.close(t.io);
+    for ([_][]const u8{ ".gitignore", ".ignore" }, [_][]const u8{ "git-rules", "dot-rules" }) |link, target| {
+        dir.symLink(t.io, target, link, .{}) catch |err| {
+            if (builtin.os.tag == .windows and (err == error.PermissionDenied or err == error.AccessDenied))
+                return error.SkipZigTest;
+            return err;
+        };
+    }
+
+    var result = try walk.collect(testing.allocator, t.root, .{
+        .git_global = false,
+        .sort = true,
+    });
+    defer result.deinit();
+    const expected = [_][]const u8{ ".gitignore", ".ignore", "a.tmp", "dot-rules", "git-rules", "sub", "sub/b.tmp" };
+    try testing.expectEqual(expected.len, result.entries.len);
+    for (result.entries, expected) |entry, relative| try testing.expectEqualStrings(relative, entry.relativePath());
+
+    var root_buf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "{s}/sub", .{t.root});
+    var inherited = try walk.collect(testing.allocator, root, .{
+        .gitignore_parents = true,
+        .git_global = false,
+    });
+    defer inherited.deinit();
+    try testing.expectEqual(@as(usize, 1), inherited.entries.len);
+    try testing.expectEqualStrings("b.tmp", inherited.entries[0].relativePath());
+}
+
+test "walk reports terminal entries beyond PATH_MAX on macOS" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("walk_long_terminal");
+    defer t.deinit();
+    var dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
+    defer dir.close(t.io);
+    const child_name: [128]u8 = @splat('d');
+    const file_name: [child_name.len]u8 = @splat('f');
+    var relative_path: std.ArrayList(u8) = .empty;
+    defer relative_path.deinit(testing.allocator);
+    while (t.root.len + 1 + relative_path.items.len < std.Io.Dir.max_path_bytes) {
+        if (relative_path.items.len > 0) try relative_path.append(testing.allocator, '/');
+        try relative_path.appendSlice(testing.allocator, &child_name);
+        if (t.root.len + 1 + relative_path.items.len >= std.Io.Dir.max_path_bytes) {
+            try dir.writeFile(t.io, .{ .sub_path = &file_name, .data = "" });
+        }
+        try dir.createDir(t.io, &child_name, .default_dir);
+        const child = try dir.openDir(t.io, &child_name, .{});
+        dir.close(t.io);
+        dir = child;
+    }
+    try dir.writeFile(t.io, .{ .sub_path = "leaf", .data = "" });
+
+    const alloc = testing.allocator;
+    const leaf = try std.fmt.allocPrint(alloc, "{s}/leaf", .{relative_path.items});
+    defer alloc.free(leaf);
+    const basename_offset = relative_path.items.len - child_name.len;
+    const file_path = try std.fmt.allocPrint(alloc, "{s}{s}", .{ relative_path.items[0..basename_offset], &file_name });
+    defer alloc.free(file_path);
+
+    for ([_]bool{ false, true }) |skip_dot_ignore| {
+        var result = try walk.collect(alloc, t.root, .{ .git_global = false, .skip_dot_ignore = skip_dot_ignore });
+        defer result.deinit();
+        try testing.expect(findEntry(&result, relative_path.items) != null);
+        try testing.expect(findEntry(&result, leaf) == null);
+        const file = findEntry(&result, file_path) orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(walk.EntryKind.file, file.kind);
+    }
 }
 
 // Regression: https://github.com/dmtrKovalenko/fff/issues/723
@@ -384,6 +675,57 @@ test "walk visitor: skip_dir prunes, stop halts" {
         testing.allocator.destroy(rules);
     }
     try testing.expectEqual(@as(usize, 1), stop_ctx.count);
+}
+
+test "walk visit releases completed subtree rules before visiting a sibling" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("visit_releases_rules");
+    defer t.deinit();
+
+    // Equally sized sibling trees keep scratch allocation stable whichever
+    // directory the filesystem lists first.
+    var rule_bytes: usize = 0;
+    for ([_][]const u8{ "a", "b" }) |name| {
+        try t.mkdir(name);
+        var rule_buf: [4096]u8 = undefined;
+        var rules = std.Io.Writer.fixed(&rule_buf);
+        for (0..128) |i| try rules.print("ignored-{s}-{d}\n", .{ name, i });
+        rule_bytes = rules.buffered().len;
+
+        var path_buf: [64]u8 = undefined;
+        try t.write(try std.fmt.bufPrint(&path_buf, "{s}/.ignore", .{name}), rules.buffered());
+        try t.write(try std.fmt.bufPrint(&path_buf, "{s}/ignored-{s}-0", .{ name, name }), "");
+        try t.write(try std.fmt.bufPrint(&path_buf, "{s}/keep", .{name}), "");
+    }
+
+    const Context = struct {
+        allocator: *testing.FailingAllocator,
+        live_bytes: [2]usize = undefined,
+        file_count: usize = 0,
+
+        fn visit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            if (entry.kind != .file or std.mem.eql(u8, entry.basename(), ".ignore")) return .cont;
+            if (self.file_count < self.live_bytes.len) {
+                self.live_bytes[self.file_count] = self.allocator.allocated_bytes - self.allocator.freed_bytes;
+            }
+            self.file_count += 1;
+            return .cont;
+        }
+    };
+
+    // Use the standard allocator's byte counters without injecting failures.
+    var counting = testing.FailingAllocator.init(testing.allocator, .{});
+    var ctx = Context{ .allocator = &counting };
+    try walk.visit(counting.allocator(), t.root, .{ .threads = 1, .git_global = false }, .{
+        .context = @ptrCast(&ctx),
+        .visit = Context.visit,
+    });
+    try testing.expectEqual(ctx.live_bytes.len, ctx.file_count);
+    // The second callback must occur before teardown. Retaining the first
+    // document there would add its source and compiled rules to live memory.
+    try testing.expect(ctx.live_bytes[1] < ctx.live_bytes[0] + rule_bytes);
+    try testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
 }
 
 test "walk parallel matches serial results" {
@@ -1007,105 +1349,55 @@ test "walk retains reusable IgnoreRules: nesting, negation, .ignore precedence" 
     try testing.expect(rules.isIgnoredPath("/etc/passwd"));
 }
 
-fn testNode(alloc: std.mem.Allocator, dir_rel: []const u8, doc: []const u8) !*walk.__internal_test_api.IgnoreNode {
-    const gi = try GitIgnore.parse(alloc, doc);
-    const node = try alloc.create(walk.__internal_test_api.IgnoreNode);
-    node.* = .{
-        .parent = null,
-        .gi = gi,
-        .relative_offset = @intCast(if (dir_rel.len > 0) dir_rel.len + 1 else 0),
-        .refs = .init(1),
-    };
-    return node;
-}
+test "retained rules prune directories and apply nested negation" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("retained_rules_pruning");
+    defer t.deinit();
 
-fn expectFastEqualsSlow(rules: *const walk.IgnoreRules, norm: []const u8, is_dir: bool) !void {
-    const basename = if (std.mem.lastIndexOfScalar(u8, norm, '/')) |p| norm[p + 1 ..] else norm;
-    const fast = walk.__internal_test_api.isIgnoredResolved(rules, norm, basename, is_dir);
-    const slow = walk.__internal_test_api.isIgnoredPathSlow(rules, norm, basename, is_dir);
-    testing.expectEqual(slow, fast) catch |err| {
-        std.debug.print("mismatch for '{s}' (is_dir={}): fast={} slow={}\n", .{ norm, is_dir, fast, slow });
-        return err;
-    };
-}
+    try t.mkdir("build");
+    try t.mkdir("src");
+    try t.mkdir("src/gen");
+    try t.write(".gitignore", "build/\n*.log\n");
+    try t.write("src/.gitignore", "!keep.log\ngen/\n");
+    try t.write("a.log", "");
+    try t.write("build/x.c", "");
+    try t.write("src/keep.log", "");
+    try t.write("src/other.log", "");
+    try t.write("src/gen/out.o", "");
+    try t.write("src/main.zig", "");
 
-test "isIgnoredResolved: nested rules, ancestor pruning, negation, fast==slow" {
-    const alloc = testing.allocator;
-    var rules: walk.IgnoreRules = .{ .allocator = alloc };
-    defer rules.deinit();
-
-    // root/.gitignore prunes `build/` entirely and ignores *.log everywhere.
-    try rules.put("", try testNode(alloc, "", "build/\n*.log\n"));
-    // root ref is held by `put`; drop the local creation ref.
-    (rules.by_dir.get("").?).release(alloc);
-
-    // src/.gitignore re-includes keep.log (negation) and ignores gen/.
-    try rules.put("src", try testNode(alloc, "src", "!keep.log\ngen/\n"));
-    (rules.by_dir.get("src").?).release(alloc);
-
-    // Concrete expectations -------------------------------------------------
-    // *.log ignored at root scope.
-    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "a.log", "a.log", false));
-    // build/ pruned: anything beneath it is ignored regardless of depth.
-    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "build/x/y.c", "y.c", false));
-    // src/keep.log is re-included by the nested negation → NOT ignored.
-    try testing.expect(!walk.__internal_test_api.isIgnoredResolved(&rules, "src/keep.log", "keep.log", false));
-    // src/other.log still hits the root *.log rule.
-    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "src/other.log", "other.log", false));
-    // src/gen/ pruned by the nested rule.
-    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "src/gen/out.o", "out.o", false));
-    // A plain source file is not ignored.
-    try testing.expect(!walk.__internal_test_api.isIgnoredResolved(&rules, "src/main.zig", "main.zig", false));
-
-    // Differential: fast path must equal slow path for a spread of queries,
-    // both file and dir forms.
-    const cases = [_][]const u8{
-        "a.log",               "build",           "build/x",
-        "build/x/y.c",         "src",             "src/keep.log",
-        "src/other.log",       "src/gen",         "src/gen/out.o",
-        "src/main.zig",        "src/nested/deep", "src/nested/deep/f.log",
-        "unrelated/thing.txt", "keep.log",        "src/gen/sub/x.log",
-    };
-    for (cases) |c| {
-        try expectFastEqualsSlow(&rules, c, false);
-        try expectFastEqualsSlow(&rules, c, true);
+    var result = try walk.collect(testing.allocator, t.root, .{ .git_global = false });
+    defer result.deinit();
+    const rules = result.ignore_rules;
+    for ([_][]const u8{ "a.log", "build/x.c", "src/other.log", "src/gen/out.o" }) |path| {
+        try testing.expect(rules.isIgnoredPath(path));
+    }
+    for ([_][]const u8{ "src/keep.log", "src/main.zig" }) |path| {
+        try testing.expect(!rules.isIgnoredPath(path));
     }
 }
 
-test "isIgnoredResolved: a nested negation re-includes a parent-excluded dir" {
-    // Regression: the ancestor phase used to ask "does any ruleset in scope
-    // ignore this ancestor?" and return true on the first hit, walking the chain
-    // shallowest-first. That let a shallow rule win over a deeper negation, so
-    // an ancestor git had re-included still pruned its whole subtree.
-    //
-    // Ground truth (git 2.x):
-    //   $ printf 'build/*\n' > .gitignore
-    //   $ printf '!keep\n'   > build/.gitignore
-    //   $ git ls-files -o --exclude-standard
-    //   .gitignore  build/.gitignore  build/keep/k.txt
-    const alloc = testing.allocator;
-    var rules: walk.IgnoreRules = .{ .allocator = alloc };
-    defer rules.deinit();
+test "retained rules re-include a directory through nested negation" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("retained_rules_negation");
+    defer t.deinit();
 
-    try rules.put("", try testNode(alloc, "", "build/*\n"));
-    (rules.by_dir.get("").?).release(alloc);
-    try rules.put("build", try testNode(alloc, "build", "!keep\n"));
-    (rules.by_dir.get("build").?).release(alloc);
+    try t.mkdir("build");
+    try t.mkdir("build/keep");
+    try t.mkdir("build/other");
+    try t.write(".gitignore", "build/*\n");
+    try t.write("build/.gitignore", "!keep\n");
+    try t.write("build/keep/k.txt", "");
+    try t.write("build/other/x.o", "");
 
-    // `build/keep` is excluded by the root rule but re-included by the deeper
-    // one, which has precedence — so neither it nor its contents are ignored.
-    try testing.expect(!walk.__internal_test_api.isIgnoredResolved(&rules, "build/keep", "keep", true));
-    try testing.expect(!walk.__internal_test_api.isIgnoredResolved(&rules, "build/keep/k.txt", "k.txt", false));
-    // A sibling the nested file says nothing about stays excluded.
-    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "build/other", "other", true));
-    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, "build/other/x.o", "x.o", false));
-
-    for ([_][]const u8{
-        "build",           "build/keep",  "build/keep/k.txt",
-        "build/keep/deep", "build/other", "build/other/x.o",
-    }) |case| {
-        try expectFastEqualsSlow(&rules, case, false);
-        try expectFastEqualsSlow(&rules, case, true);
+    var result = try walk.collect(testing.allocator, t.root, .{ .git_global = false });
+    defer result.deinit();
+    const rules = result.ignore_rules;
+    for ([_][]const u8{ "build/keep", "build/keep/k.txt" }) |path| {
+        try testing.expect(!rules.isIgnoredPath(path));
+    }
+    for ([_][]const u8{ "build/other", "build/other/x.o" }) |path| {
+        try testing.expect(rules.isIgnoredPath(path));
     }
 }
 
@@ -1276,37 +1568,32 @@ test "ZLOB_PARALLEL errfunc is delivered and can abort" {
     try testing.expectEqual(zlob_flags.ZLOB_ABORTED, rc);
 }
 
-test "isIgnoredResolved: overflow beyond the directory-chain limit falls back and matches" {
-    const alloc = testing.allocator;
-    var rules: walk.IgnoreRules = .{ .allocator = alloc };
-    defer rules.deinit();
+test "retained rules handle deeply nested ignore files" {
+    var t: TestTree = .{ .io = undefined };
+    try t.init("retained_rules_deep");
+    defer t.deinit();
 
-    // Create a .gitignore at every directory level well past the fixed stack
-    // limit. The chain must fall back to the slow scan without changing its
-    // verdict; every level ignores `dead`.
-    var path_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer path_buf.deinit(alloc);
-    const levels = walk.__internal_test_api.max_dir_chain + 5;
-    var i: usize = 0;
-    while (i < levels) : (i += 1) {
-        const dir = path_buf.items;
-        const node = try testNode(alloc, dir, "dead\n");
-        try rules.put(dir, node);
-        node.release(alloc);
-        if (path_buf.items.len > 0) try path_buf.append(alloc, '/');
-        try path_buf.appendSlice(alloc, "d");
+    var path_buf: [160]u8 = undefined;
+    var path: std.Io.Writer = .fixed(&path_buf);
+    try t.write(".gitignore", "dead\n");
+    for (0..70) |_| {
+        try path.writeAll("d");
+        try t.mkdir(path.buffered());
+        var rule_path: [160]u8 = undefined;
+        try t.write(try std.fmt.bufPrint(&rule_path, "{s}/.gitignore", .{path.buffered()}), "!keep\n");
+        try path.writeAll("/");
     }
+    var leaf_buf: [160]u8 = undefined;
+    const dead = try std.fmt.bufPrint(&leaf_buf, "{s}dead", .{path.buffered()});
+    try t.write(dead, "");
+    var keep_buf: [160]u8 = undefined;
+    const keep = try std.fmt.bufPrint(&keep_buf, "{s}keep", .{path.buffered()});
+    try t.write(keep, "");
 
-    // A leaf that is `dead` under the deepest dir must still be ignored via the
-    // slow fallback, and the fast/slow cores must agree at a shallow depth.
-    var leaf: std.ArrayListUnmanaged(u8) = .empty;
-    defer leaf.deinit(alloc);
-    try leaf.appendSlice(alloc, path_buf.items);
-    try leaf.appendSlice(alloc, "/dead");
-    try testing.expect(walk.__internal_test_api.isIgnoredResolved(&rules, leaf.items, "dead", false));
-
-    try expectFastEqualsSlow(&rules, "d/d/d/keep", false);
-    try expectFastEqualsSlow(&rules, "d/d/d/dead", false);
+    var result = try walk.collect(testing.allocator, t.root, .{ .git_global = false });
+    defer result.deinit();
+    try testing.expect(result.ignore_rules.isIgnoredPath(dead));
+    try testing.expect(!result.ignore_rules.isIgnoredPath(keep));
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,15 +1699,15 @@ test "walk honors core.excludesFile from the repository config" {
     // core.excludesFile, relative to the worktree root as in git (never to
     // the process cwd); it ignores build/ and *.tmp. The repo .gitignore
     // outranks it: `!keep.tmp` wins.
-    try t.write(".git/config", "[core]\n\trepositoryformatversion = 0\n\texcludesFile = .git/global-ignore\n");
-    try t.write(".git/global-ignore", "build/\n*.tmp\n");
+    try t.write(".git/config", "[core]\n\trepositoryformatversion = 0\n\texcludesFile = \".git/global ignore\"\n");
+    try t.write(".git/global ignore", "build/\n*.tmp\n");
     try t.write(".gitignore", "!keep.tmp\n");
     try t.write("build/out.o", "");
     try t.write("vendor/lib.c", "");
     try t.write("scratch.tmp", "");
     try t.write("keep.tmp", "");
 
-    var results = try walk.collect(testing.allocator, t.root, .{ .threads = 1 });
+    var results = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .git_exclude = false });
     defer results.deinit();
     try testing.expect(findEntry(&results, "build") == null);
     try testing.expect(findEntry(&results, "build/out.o") == null);
@@ -1429,7 +1716,7 @@ test "walk honors core.excludesFile from the repository config" {
     try testing.expect(findEntry(&results, "vendor/lib.c") != null);
     try testing.expect(results.ignore_rules.isIgnoredPath("scratch.tmp"));
 
-    var off = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .git_global = false });
+    var off = try walk.collect(testing.allocator, t.root, .{ .threads = 1, .git_global = false, .git_exclude = false });
     defer off.deinit();
     try testing.expect(findEntry(&off, "build/out.o") != null);
     try testing.expect(findEntry(&off, "scratch.tmp") != null);
@@ -1620,8 +1907,8 @@ test "short-read EOF: probe rejects a non-whitelisted filesystem (procfs)" {
     try testing.expect(!dirent.trustShortReaddir(fd));
 }
 
-test "short-read EOF: dense random-name trees match std iteration (cache dir)" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+test "batched directory reads: dense random-name trees match std iteration (cache dir)" {
+    if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.SkipZigTest;
     try checkShortEofTree(".zig-cache/walk-tests");
 }
 

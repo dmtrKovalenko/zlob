@@ -80,6 +80,7 @@ pub const DirEntries = if (!supported) struct {} else struct {
     len: usize = 0,
     pos: usize = 0,
     basep: u64 = 0,
+    eof: bool = false,
 
     pub const Entry = struct { name: []const u8, kind: walk.EntryKind };
 
@@ -90,7 +91,16 @@ pub const DirEntries = if (!supported) struct {} else struct {
     pub const Error = error{ReadFailed};
 
     fn refill(self: *DirEntries) Error!bool {
+        if (self.eof) return false;
+        // XNU's extended getdirentries64 ABI reserves the last four bytes
+        // of buffers >= 1024 bytes for flags. Clear stale flags on kernels
+        // without the extension and only read them outside the returned data.
+        const flags: ?*align(1) u32 = if (self.buf.len >= 1024)
+            @ptrCast(&self.buf[self.buf.len - @sizeOf(u32)])
+        else
+            null;
         while (true) {
+            if (flags) |f| f.* = 0;
             const r = __getdirentries64(self.fd, self.buf.ptr, self.buf.len, &self.basep);
             if (r < 0) {
                 if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
@@ -98,6 +108,10 @@ pub const DirEntries = if (!supported) struct {} else struct {
             }
             if (r == 0) return false;
             self.len = @intCast(r);
+            if (flags) |f| {
+                const GETDIRENTRIES64_EOF = 1;
+                self.eof = self.len <= self.buf.len - @sizeOf(u32) and f.* & GETDIRENTRIES64_EOF != 0;
+            }
             self.pos = 0;
             return true;
         }

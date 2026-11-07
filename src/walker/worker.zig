@@ -31,6 +31,9 @@ const VisitAction = types.VisitAction;
 const MAX_PATH = types.MAX_PATH;
 const NAME_MAX = types.NAME_MAX;
 const NAME_BUF = types.NAME_BUF_Z_LENGTH;
+// A path read from a directory listing can fit even when opening that
+// child's assembled path would exceed the operating system's limit.
+const MAX_ENTRY_PATH = MAX_PATH + NAME_MAX;
 const closeFd = types.closeFd;
 const closeHandle = types.closeHandle;
 
@@ -83,6 +86,8 @@ pub const IgnoreNode = struct {
     relative_offset: u32,
     refs: std.atomic.Value(u32),
     chain_last: gitignore_mod.LastByteFilter = .{},
+    source: enum { git, dot_ignore } = .git,
+    git_boundary: bool = false,
 
     pub fn retain(self: *IgnoreNode) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -125,7 +130,7 @@ pub const SharedWorkerState = struct {
     /// `.gitignore` would give a deeper directory).
     extra_ignore_root: ?*IgnoreNode = null,
     /// Repository exclude files (`$GIT_DIR/info/exclude`, core.excludesFile),
-    /// consulted only for directories whose listing holds `.git`.
+    /// consulted only for directories with a repository boundary.
     git: git_excludes.Resolver,
     /// Linux only: the per-entry `statx()` mask, precomputed once from
     /// `options.meta` so the hot scan loop doesn't rebuild it per entry. Other
@@ -161,6 +166,7 @@ pub const SharedWorkerState = struct {
     openat2_unavailable: std.atomic.Value(bool) = .init(false),
     /// Reusable ignore rules. Workers register each parsed `.gitignore`/ `.ignore`
     ignore_rules: *IgnoreRules,
+    retain_rules: bool,
     retain_mutex: std.Io.Mutex = .init,
     /// Lazy worker spawning: helper threads are created only once the walk has
     /// demonstrably parallel work, so shallow trees never pay the spawn cost.
@@ -240,7 +246,7 @@ pub const Worker = struct {
     id: u32,
     sh: *SharedWorkerState,
     /// Full-path assembly buffer; [0..root_prefix_len) holds "root/".
-    path_buf: [MAX_PATH + 1]u8 = undefined,
+    path_buf: [MAX_ENTRY_PATH + 1]u8 = undefined,
     /// Per-directory name bytes (reset per task, capacity retained).
     names: std.ArrayList(u8) = .empty,
     entries: std.ArrayList(Scratch) = .empty,
@@ -257,6 +263,8 @@ pub const Worker = struct {
     /// The listing's `.git` entry, if any: this directory is a repository
     /// root whose exclude files apply.
     dot_git: ?git_excludes.DotGit = null,
+    saw_exact_dot_git: bool = false,
+    saw_dot_jj: bool = false,
     /// Kernel buffer for getdents64 / getattrlistbulk.
     io_buf: []align(8) u8 = &.{},
     /// Worktree-relative match path, allocated only when inheriting rules.
@@ -276,7 +284,7 @@ pub const Worker = struct {
         errdefer if (w.io_buf.len > 0) sh.allocator.free(w.io_buf);
         const scope_prefix = sh.ignore_rules.scope_prefix;
         if (scope_prefix.len > 0) {
-            const path = try sh.allocator.alloc(u8, scope_prefix.len + MAX_PATH);
+            const path = try sh.allocator.alloc(u8, scope_prefix.len + MAX_ENTRY_PATH);
             @memcpy(path[0..scope_prefix.len], scope_prefix);
             w.scoped_path = path;
         }
@@ -295,11 +303,10 @@ pub const Worker = struct {
     }
 };
 
-pub fn freeTask(sh: *SharedWorkerState, t: *DirTask) void {
+pub fn freeTask(sh: *SharedWorkerState, t: DirTask) void {
     if (t.parent) |p| p.release(sh);
     if (t.ignore) |ig| ig.release(sh.allocator);
     sh.allocator.free(t.rel);
-    sh.allocator.destroy(t);
 }
 
 fn workerThreadMain(ctx: *anyopaque) void {
@@ -318,6 +325,19 @@ inline fn noteIgnoreFile(w: *Worker, name: []const u8, kind: EntryKind) void {
         w.saw_ignore = true;
     } else if (name.len == 4 and mem.eql(u8, name, ".git")) {
         w.dot_git = .fromKind(kind);
+        w.saw_exact_dot_git = true;
+    } else if (w.sh.options.respect_git) {
+        // These are candidates on case-insensitive filesystems. All opens
+        // and stats still use the canonical name to check the actual lookup.
+        switch (name.len) {
+            3 => w.saw_dot_jj = w.saw_dot_jj or std.ascii.eqlIgnoreCase(name, ".jj"),
+            4 => if (w.dot_git == null and std.ascii.eqlIgnoreCase(name, ".git")) {
+                w.dot_git = .unknown;
+            },
+            7 => w.saw_ignore = w.saw_ignore or std.ascii.eqlIgnoreCase(name, ".ignore"),
+            10 => w.saw_gitignore = w.saw_gitignore or std.ascii.eqlIgnoreCase(name, ".gitignore"),
+            else => {},
+        }
     }
 }
 
@@ -382,9 +402,10 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
     // walker.zig relies on that).
     var may_spawn = state.threads.len > 0;
 
-    while (state.queue.pop(state.io, worker.id)) |task| {
+    while (state.queue.pop(state.io, worker.id)) |next_task| {
+        var task = next_task;
         if (!state.abort_signal.load(.acquire)) {
-            processDir(state, worker, task) catch |err| switch (err) {
+            processDir(state, worker, &task) catch |err| switch (err) {
                 error.OutOfMemory => state.fail(.oom),
                 error.ReadFailed => state.fail(.read_failed),
                 error.PermissionDenied => state.fail(.permission_denied),
@@ -456,6 +477,8 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     w.saw_gitignore = false;
     w.saw_ignore = false;
     w.dot_git = null;
+    w.saw_exact_dot_git = false;
+    w.saw_dot_jj = false;
     scan.scanDir(sh, w, handle) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -483,12 +506,16 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     defer if (own_ignore) ignore.?.release(sh.allocator);
     const load_gitignore = w.saw_gitignore and !sh.options.skip_gitignore;
     const load_dot_ignore = w.saw_ignore and !sh.options.skip_dot_ignore;
-    if (sh.options.respect_git and (load_gitignore or load_dot_ignore or (w.dot_git != null and sh.git.enabled()))) {
+    const load_vcs = w.dot_git != null or w.saw_dot_jj;
+    if (sh.options.respect_git and (load_gitignore or load_dot_ignore or load_vcs)) {
         @branchHint(.unlikely);
-        if (try loadIgnoreNode(sh, handle, task, w, prefix_len)) |node| {
+        const dir = if (prefix_len == 0) "." else w.path_buf[0..@max(prefix_len - 1, 1)];
+        const dir_offset = if (task.rel.len > 0) task.rel.len + 1 else 0;
+        const offset = sh.ignore_rules.scope_prefix.len + dir_offset;
+        if (try loadIgnoreNode(sh, handle, task.ignore, dir, offset, w.dot_git, w.saw_dot_jj, load_gitignore, load_dot_ignore)) |node| {
             ignore = node;
             own_ignore = true;
-            {
+            if (sh.retain_rules) {
                 sh.retain_mutex.lockUncancelable(sh.io);
                 defer sh.retain_mutex.unlock(sh.io);
                 sh.ignore_rules.put(task.rel, node) catch return error.OutOfMemory;
@@ -510,6 +537,19 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
         const ino: u64 = if (have_inos) w.inos.items[i] else 0;
         try processEntry(sh, w, task, handle, name, se.kind, meta, se.metadata_deferred, ino, ignore, prefix_len, entry_depth, may_descend, &child_ref, &handle_consumed);
     }
+}
+
+fn isGitDirectory(w: *const Worker, handle: Handle, name: []const u8) bool {
+    if (mem.eql(u8, name, ".git")) return true;
+    if (w.saw_exact_dot_git or !std.ascii.eqlIgnoreCase(name, ".git")) return false;
+
+    // Compare the entries themselves so a distinct directory reached through
+    // a symlink named `.git` does not become the repository metadata entry.
+    const dir: std.Io.Dir = if (is_posix_backend or is_windows_backend) .{ .handle = handle } else handle;
+    const canonical = dir.statFile(w.sh.io, ".git", .{ .follow_symlinks = false }) catch return false;
+    if (canonical.kind != .directory) return false;
+    const candidate = dir.statFile(w.sh.io, name, .{ .follow_symlinks = false }) catch return false;
+    return candidate.kind == .directory and candidate.inode == canonical.inode;
 }
 
 fn processEntry(
@@ -537,22 +577,21 @@ fn processEntry(
     if (!opts.include_hidden and name[0] == '.') return;
 
     var is_dir = entry_kind == .directory;
-    if (opts.respect_git and opts.skip_git_dir and is_dir and
-        mem.eql(u8, name, ".git"))
+    const path_len = prefix_len + name.len;
+    const too_long_to_open = path_len >= MAX_PATH;
+    if (too_long_to_open and (!opts.respect_git or path_len > MAX_ENTRY_PATH or
+        entry_kind == .sym_link or entry_kind == .unknown))
     {
-        @branchHint(.unlikely);
-        return;
-    }
-
-    if (prefix_len + name.len >= MAX_PATH) {
         @branchHint(.cold);
         return;
     }
     @memcpy(w.path_buf[prefix_len..][0..name.len], name);
     w.path_buf[prefix_len + name.len] = 0;
     const full = w.path_buf[0 .. prefix_len + name.len];
-    const basename = full[prefix_len..];
+    const basename = w.path_buf[prefix_len..full.len :0];
     const relative_path = full[sh.root_prefix_len..];
+
+    if (is_dir and opts.respect_git and opts.skip_git_dir and name.len == 4 and isGitDirectory(w, handle, name)) return;
 
     if (chainMayIgnore(cur_ignore, sh.extra_ignore_root, basename[basename.len - 1])) {
         // Extra rules are walk-relative and take precedence over discovered rules.
@@ -568,7 +607,7 @@ fn processEntry(
                 @memcpy(path[start..][0..basename.len], basename);
                 break :blk path[0 .. start + basename.len];
             } else relative_path;
-            if (chainVerdict(cur_ignore, match_path, basename, is_dir) == true) return;
+            if (IgnoreRules.verdict(cur_ignore, match_path, basename, is_dir) == true) return;
         }
     }
 
@@ -640,6 +679,7 @@ fn processEntry(
         return;
 
     if (is_dir and may_descend and action != .skip_dir) {
+        if (too_long_to_open) return reportError(sh, full, error.NameTooLong);
         const cr = child_ref.* orelse blk: {
             const cr = try sh.allocator.create(HandleRef);
             cr.* = .{ .handle = handle, .refs = .init(1) };
@@ -651,15 +691,12 @@ fn processEntry(
         const rel = full[sh.root_prefix_len..];
         const child_rel = try sh.allocator.dupe(u8, rel);
         errdefer sh.allocator.free(child_rel);
-        const child = try sh.allocator.create(DirTask);
-        errdefer sh.allocator.destroy(child);
-
         cr.retain();
         errdefer cr.release(sh);
         if (cur_ignore) |ig| ig.retain();
         errdefer if (cur_ignore) |ig| ig.release(sh.allocator);
 
-        child.* = .{
+        const child: DirTask = .{
             .rel = child_rel,
             .depth = entry_depth,
             .ignore = cur_ignore,
@@ -810,53 +847,48 @@ fn chainMayIgnore(start: ?*IgnoreNode, extra: ?*IgnoreNode, last: u8) bool {
     return f.mayContainByte(last);
 }
 
-/// Deepest-first resolution across nested .gitignore files: the first decisive
-/// answer wins, mirroring git.
-///
-/// Deliberately not routed through `GitIgnore.verdictWithAncestors`. That exists
-/// for callers which must resolve a path in isolation, and its ancestor phase is
-/// pure overhead here: the walker prunes structurally and never descends into an
-/// ignored directory, so by the time an entry is tested every ancestor is
-/// already known not to be ignored. Wrapping this chain in a stack adapter just
-/// to reach the shared loop cost more scaffolding than the loop itself, so it
-/// walks the parent links directly and skips empty documents on the way.
-pub inline fn chainVerdict(start: ?*IgnoreNode, rel: []const u8, basename: []const u8, is_dir: bool) ?bool {
-    var node: ?*IgnoreNode = start;
-    while (node) |n| : (node = n.parent) {
-        if (!n.gi.is_empty) {
-            if (n.gi.checkInode(rel[n.relative_offset..], basename, is_dir)) |verdict| return verdict;
-        }
-    }
-    return null;
-}
-
 fn loadIgnoreNode(
     sh: *SharedWorkerState,
     handle: Handle,
-    task: *DirTask,
-    w: *const Worker,
-    prefix_len: usize,
+    parent: ?*IgnoreNode,
+    dir: []const u8,
+    offset: usize,
+    dot_git: ?git_excludes.DotGit,
+    saw_dot_jj: bool,
+    saw_gitignore: bool,
+    saw_dot_ignore: bool,
 ) WalkError!?*IgnoreNode {
-    // Repository-wide exclude files when this directory holds `.git`. Lowest
-    // precedence, so they go first: core.excludesFile, then info/exclude.
-    var repo: git_excludes.Docs = .{};
-    if (w.dot_git) |dot_git| {
-        if (sh.git.enabled()) {
-            @branchHint(.unlikely);
-            // "root/rel/" minus the slash; an empty prefix is the cwd itself
-            // and a one-byte prefix is the filesystem root.
-            const dir: []const u8 = if (prefix_len == 0) "." else w.path_buf[0..@max(prefix_len - 1, 1)];
-            repo = sh.git.load(dir, dot_git);
+    const git_exists = if (dot_git) |hint| switch (hint) {
+        .directory, .file => true,
+        .unknown => hasBoundaryMarker(sh, handle, ".git"),
+    } else false;
+    const vcs = git_exists or (saw_dot_jj and hasBoundaryMarker(sh, handle, ".jj"));
+    const repo = if (!vcs or !sh.git.enabled())
+        git_excludes.Docs{}
+    else if (git_exists)
+        sh.git.load(dir, dot_git.?)
+    else
+        sh.git.loadGlobal(dir);
+    const git = if (saw_gitignore)
+        readSmallFile(sh, handle, ".gitignore", .no_follow)
+    else
+        null;
+    const git_node = try parseIgnoreNode(sh, parent, offset, repo, git, .git, vcs);
+    errdefer if (git_node) |node| node.release(sh.allocator);
+    if (saw_dot_ignore) {
+        const ign = readSmallFile(sh, handle, ".ignore", .follow);
+        if (try parseIgnoreNode(sh, git_node orelse parent, offset, .{}, ign, .dot_ignore, false)) |node| {
+            if (git_node) |g| g.release(sh.allocator);
+            return node;
         }
     }
-    // Read both files (whichever exist) and hand them straight to the
-    // parser. `.ignore` is second so its patterns get higher indices and
-    // win ties — ripgrep precedence, no concat needed.
-    const git = if (w.saw_gitignore and !sh.options.skip_gitignore) readSmallFile(sh, handle, ".gitignore") else null;
-    const ign = if (w.saw_ignore and !sh.options.skip_dot_ignore) readSmallFile(sh, handle, ".ignore") else null;
+    return git_node;
+}
 
-    const dir_offset = if (task.rel.len > 0) task.rel.len + 1 else 0;
-    return parseIgnoreNode(sh, task.ignore, sh.ignore_rules.scope_prefix.len + dir_offset, repo, git, ign);
+fn hasBoundaryMarker(sh: *SharedWorkerState, handle: Handle, name: []const u8) bool {
+    const dir: std.Io.Dir = if (is_posix_backend or is_windows_backend) .{ .handle = handle } else handle;
+    _ = dir.statFile(sh.io, name, .{ .follow_symlinks = true }) catch return false;
+    return true;
 }
 
 fn parseIgnoreNode(
@@ -864,26 +896,27 @@ fn parseIgnoreNode(
     parent: ?*IgnoreNode,
     offset: usize,
     repo: git_excludes.Docs,
-    git: ?[]u8,
-    ign: ?[]u8,
+    rules: ?[]u8,
+    source: @FieldType(IgnoreNode, "source"),
+    git_boundary: bool,
 ) WalkError!?*IgnoreNode {
-    const n: usize = repo.count() + @intFromBool(git != null) + @intFromBool(ign != null);
-    if (n == 0) return null;
+    const n: usize = repo.count() + @intFromBool(rules != null);
+    if (n == 0 and !git_boundary) return null;
     const sources = sh.allocator.alloc([]const u8, n) catch {
         repo.deinit(sh.allocator);
-        if (git) |b| sh.allocator.free(b);
-        if (ign) |b| sh.allocator.free(b);
+        if (rules) |b| sh.allocator.free(b);
         return error.OutOfMemory;
     };
     var i: usize = 0;
-    for ([_]?[]u8{ repo.excludes_file, repo.info_exclude, git, ign }) |src| {
+    for ([_]?[]u8{ repo.excludes_file, repo.info_exclude, rules }) |src| {
         if (src) |b| {
             sources[i] = b;
             i += 1;
         }
     }
 
-    var gi = GitIgnore.parseOwnedMulti(sh.allocator, sources) catch |err| {
+    const syntax: GitIgnore.Syntax = if (source == .dot_ignore) .ignore_compat else .git;
+    var gi = GitIgnore.parseOwnedMultiWithSyntax(sh.allocator, sources, syntax) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return null;
     };
@@ -899,13 +932,14 @@ fn parseIgnoreNode(
         .relative_offset = @intCast(offset),
         .refs = .init(1),
         .chain_last = gi.any_last,
+        .source = source,
+        .git_boundary = git_boundary,
     };
     if (parent) |p| node.chain_last.merge(p.chain_last) else if (sh.extra_ignore_root) |x| node.chain_last.merge(x.chain_last);
     return node;
 }
 
-/// Build the ancestor chain in traversal order so an ignored directory
-/// stops discovery before a deeper ignore file could re-include it.
+/// Build the ancestor rule chain from the filesystem root to the walk root.
 pub fn loadParentIgnoreRules(sh: *SharedWorkerState) WalkError!void {
     const root = if (sh.root_path.len == 0) "." else sh.root_path;
     const absolute = std.Io.Dir.cwd().realPathFileAlloc(sh.io, root, sh.allocator) catch |err| switch (err) {
@@ -915,63 +949,50 @@ pub fn loadParentIgnoreRules(sh: *SharedWorkerState) WalkError!void {
     defer sh.allocator.free(absolute);
     if (absolute.len >= MAX_PATH) return;
 
+    var dirs: [MAX_PATH / 2 + 1][]const u8 = undefined;
+    var count: usize = 0;
     var dir: []const u8 = absolute;
-    const worktree = while (true) {
-        if (git_excludes.resolveCommonDir(sh.allocator, sh.io, dir, .unknown)) |common| {
-            sh.allocator.free(common);
-            break dir;
-        }
-        dir = std.fs.path.dirname(dir) orelse return;
-    };
-    if (worktree.len == absolute.len) return;
-
-    const scope_start = worktree.len + @intFromBool(!std.fs.path.isSep(worktree[worktree.len - 1]));
-    var scope_buffer: [MAX_PATH]u8 = undefined;
-    const scope = scope_buffer[0 .. absolute.len - scope_start + 1];
-    @memcpy(scope[0 .. scope.len - 1], absolute[scope_start..]);
-    scope[scope.len - 1] = '/';
-    if (builtin.os.tag == .windows) {
-        for (scope) |*byte| {
-            if (byte.* == '\\') byte.* = '/';
-        }
+    while (std.fs.path.dirname(dir)) |parent| {
+        dirs[count] = parent;
+        count += 1;
+        dir = parent;
     }
-
     var parents: ?*IgnoreNode = null;
-    defer if (parents) |parent| parent.release(sh.allocator);
-    var offset: usize = 0;
-    while (mem.indexOfScalarPos(u8, scope, offset, '/')) |end| {
-        const handle: ?Handle = openRoot(sh, dir) catch |err| switch (err) {
+    errdefer if (parents) |parent| parent.release(sh.allocator);
+    while (count > 0) {
+        count -= 1;
+        const path = dirs[count];
+        const handle = openRoot(sh, path) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => null,
+            else => continue,
         };
-        defer if (handle) |h| closeHandle(h, sh.io);
-
-        const repo = if (offset == 0 and sh.git.enabled()) sh.git.load(dir, .unknown) else git_excludes.Docs{};
-        const git = if (handle != null and !sh.options.skip_gitignore) readSmallFile(sh, handle.?, ".gitignore") else null;
-        const ign = if (handle != null and !sh.options.skip_dot_ignore) readSmallFile(sh, handle.?, ".ignore") else null;
-        if (try parseIgnoreNode(sh, parents, offset, repo, git, ign)) |node| {
+        defer closeHandle(handle, sh.io);
+        const offset = path.len + @intFromBool(!std.fs.path.isSep(path[path.len - 1]));
+        if (try loadIgnoreNode(sh, handle, parents, path, offset, .unknown, true, !sh.options.skip_gitignore, !sh.options.skip_dot_ignore)) |node| {
             if (parents) |parent| parent.release(sh.allocator);
             parents = node;
         }
-        if (chainVerdict(parents, scope[0..end], scope[offset..end], true) == true) {
-            sh.ignore_rules.root_ignored = true;
-            return;
+    }
+    if (parents == null) return;
+    const need_slash = !std.fs.path.isSep(absolute[absolute.len - 1]);
+    const prefix = try sh.allocator.alloc(u8, absolute.len + @intFromBool(need_slash));
+    @memcpy(prefix[0..absolute.len], absolute);
+    if (need_slash) prefix[absolute.len] = '/';
+    if (builtin.os.tag == .windows) {
+        for (prefix) |*byte| {
+            if (byte.* == '\\') byte.* = '/';
         }
-        dir = absolute[0 .. scope_start + end];
-        offset = end + 1;
     }
-    if (parents != null) {
-        sh.ignore_rules.scope_prefix = try sh.allocator.dupe(u8, scope);
-        sh.ignore_rules.parents = parents;
-        parents = null;
-    }
+    sh.ignore_rules.scope_prefix = prefix;
+    sh.ignore_rules.parents = parents;
 }
 
 const max_gitignore_size = 1024 * 1024;
+const RuleFileSymlinks = enum { follow, no_follow };
 
-fn readSmallFile(sh: *SharedWorkerState, handle: Handle, name: [:0]const u8) ?[]u8 {
+fn readSmallFile(sh: *SharedWorkerState, handle: Handle, name: [:0]const u8, symlinks: RuleFileSymlinks) ?[]u8 {
     if (is_posix_backend) {
-        const fd = posix.openatZ(handle, name, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, 0) catch return null;
+        const fd = posix.openatZ(handle, name, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = symlinks == .no_follow, .NONBLOCK = true }, 0) catch return null;
         defer closeFd(fd);
 
         // tries to read the file into the small bufefer cause most of gitignore files are tiny
@@ -991,9 +1012,12 @@ fn readSmallFile(sh: *SharedWorkerState, handle: Handle, name: [:0]const u8) ?[]
         }
         return list.toOwnedSlice(sh.allocator) catch null;
     } else if (is_windows_backend) {
-        return win.readSmallFileAt(sh.allocator, handle, name, max_gitignore_size);
+        return win.readSmallFileAt(sh.allocator, handle, name, max_gitignore_size, symlinks == .no_follow);
     } else {
-        return handle.readFileAlloc(sh.io, name, sh.allocator, .limited(max_gitignore_size)) catch null;
+        const file = handle.openFile(sh.io, name, .{ .follow_symlinks = symlinks == .follow }) catch return null;
+        defer file.close(sh.io);
+        var reader = file.reader(sh.io, &.{});
+        return reader.interface.allocRemaining(sh.allocator, .limited(max_gitignore_size)) catch null;
     }
 }
 

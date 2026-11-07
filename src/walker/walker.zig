@@ -29,13 +29,8 @@ pub const ZlobFlags = types.ZlobFlags;
 pub const GitIgnore = @import("../gitignore.zig").GitIgnore;
 pub const IgnoreRules = ignore_rules_mod.IgnoreRules;
 
-/// internal constructors and resolution hooks used by `test/test_walk.zig`.
-/// the namespace is empty in normal library builds.
+/// Sorting hook for `test/test_walk.zig`.
 pub const __internal_test_api = if (builtin.is_test) struct {
-    pub const IgnoreNode = worker.IgnoreNode;
-    pub const max_dir_chain = ignore_rules_mod.__internal_test_api.max_dir_chain;
-    pub const isIgnoredResolved = ignore_rules_mod.__internal_test_api.isIgnoredResolved;
-    pub const isIgnoredPathSlow = ignore_rules_mod.__internal_test_api.isIgnoredPathSlow;
     pub const sortPathsParallel = sorting.sortPathsParallel;
 } else struct {};
 
@@ -106,6 +101,11 @@ pub fn run(allocator: Allocator, root: []const u8, options: Options, visitor: Vi
 
     try walkImpl(allocator, root, options, runSink, @constCast(&visitor), effectiveThreads(&options), rules, null);
     return rules;
+}
+
+/// Stream entries, releasing discovered ignore rules as each subtree completes.
+pub fn visit(allocator: Allocator, root: []const u8, options: Options, visitor: Visitor) WalkError!void {
+    try walkImpl(allocator, root, options, runSink, @constCast(&visitor), effectiveThreads(&options), null, null);
 }
 
 /// Walks and returns all entries. Optimized for allocation, so use this only if you need in-memory result
@@ -252,17 +252,21 @@ fn walkImpl(
     sink: worker.SinkFn,
     sink_ctx: *anyopaque,
     n_workers: u32,
-    ignore_rules: *IgnoreRules,
+    retained_rules: ?*IgnoreRules,
     finish: ?worker.FinishFn,
 ) WalkError!void {
     const MAX_PATH = types.MAX_PATH;
+    var transient_rules = IgnoreRules{ .allocator = allocator };
+    defer transient_rules.deinit();
+    const ignore_rules = retained_rules orelse &transient_rules;
 
     // Root prefix: root/ (or "" for an empty root meaning cwd-relative
     // output, or "root" when it already ends with /).
     var prefix_buf: [types.MAX_PATH]u8 = undefined;
     var prefix_len: usize = 0;
     if (root.len > 0) {
-        if (root.len >= MAX_PATH - 1) {
+        const max_root_len: usize = if (options.respect_git) MAX_PATH - 1 else MAX_PATH - 2;
+        if (root.len > max_root_len) {
             // Root doesn't fit the path-assembly buffer; report it like any
             // other directory error and produce an empty walk.
             if (options.err_callback) |cb| {
@@ -316,13 +320,13 @@ fn walkImpl(
         .git = .init(allocator, io, options.git_exclude, options.git_global),
         .statx_mask = scan_linux.statxMask(options.meta),
         .ignore_rules = ignore_rules,
+        .retain_rules = retained_rules != null,
         .finish = finish,
     };
 
     defer sh.git.deinit();
     if (options.respect_git and options.gitignore_parents) {
         try worker.loadParentIgnoreRules(&sh);
-        if (ignore_rules.root_ignored) return;
     }
 
     try sh.queue.init(allocator, n_workers);
@@ -351,15 +355,10 @@ fn walkImpl(
     sh.workers = workers;
     sh.threads = threads;
 
-    const root_task = try allocator.create(DirTask);
-    const root_rel = allocator.dupe(u8, "") catch |err| {
-        allocator.destroy(root_task);
-        return err;
-    };
     const parents = ignore_rules.parents;
     if (parents) |node| node.retain();
-    root_task.* = .{
-        .rel = root_rel,
+    const root_task: DirTask = .{
+        .rel = &.{},
         .depth = 0,
         .ignore = parents,
         .parent = null,
