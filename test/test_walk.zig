@@ -1305,6 +1305,61 @@ test "walk Darwin symlinks: skipping one link leaves its target available to the
     try testing.expectEqual(ctx.kept, ctx.leaf_parent);
 }
 
+test "walk Darwin symlinks: a queued link can become a file without aborting" {
+    if (builtin.os.tag != .macos or !builtin.link_libc) return error.SkipZigTest;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("symlink_to_file");
+    defer t.deinit();
+
+    try t.mkdir("tree");
+    try t.write("tree/leaf", "");
+    const dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
+    defer dir.close(t.io);
+    try dir.symLink(t.io, ".", "tree/a", .{});
+    try dir.symLink(t.io, ".", "tree/b", .{});
+    try dir.symLink(t.io, "leaf", "replacement", .{});
+
+    const Context = struct {
+        dir: std.Io.Dir,
+        io: std.Io,
+        first_link: ?u8 = null,
+        rename_error: ?std.Io.Dir.RenameError = null,
+        retargeted: bool = false,
+
+        fn visit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            if (entry.kind != .sym_link) return .cont;
+            if (self.first_link) |first| {
+                // The first link's directory stat has already succeeded and
+                // its open is queued behind the rest of this serial listing.
+                var queued_path = "tree/a".*;
+                queued_path[queued_path.len - 1] = first;
+                self.dir.rename("replacement", self.dir, &queued_path, self.io) catch |err| {
+                    self.rename_error = err;
+                    return .stop;
+                };
+                self.retargeted = true;
+            } else {
+                self.first_link = entry.basename()[0];
+            }
+            return .cont;
+        }
+    };
+
+    var root_buf: [512]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "{s}/tree", .{t.root});
+    var ctx = Context{ .dir = dir, .io = t.io };
+    try walk.visit(testing.allocator, root, .{
+        .threads = 1,
+        .follow_symlinks = true,
+        .respect_git = false,
+        .abort_on_error = true,
+    }, .{ .context = &ctx, .visit = Context.visit });
+
+    if (ctx.rename_error) |err| return err;
+    try testing.expect(ctx.retargeted);
+}
+
 test "walk follow_symlinks reports visited-set allocation failures" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var t: TestTree = .{ .io = undefined };
@@ -1326,12 +1381,36 @@ test "walk follow_symlinks reports visited-set allocation failures" {
             }, .{ .visit = visit });
         }
 
+        fn allocOnce(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const failing: *testing.FailingAllocator = @ptrCast(@alignCast(ctx));
+            const result = failing.allocator().rawAlloc(len, alignment, ra);
+            if (result == null and failing.has_induced_failure) {
+                failing.fail_index = std.math.maxInt(usize);
+            }
+            return result;
+        }
+
         fn visit(_: ?*anyopaque, _: *const walk.Entry) walk.VisitAction {
             return .cont;
         }
     };
 
-    try testing.checkAllAllocationFailures(testing.allocator, Walker.run, .{t.root});
+    var counting = testing.FailingAllocator.init(testing.allocator, .{});
+    try Walker.run(counting.allocator(), t.root);
+    try testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+
+    // Let subsequent allocations succeed so they cannot mask a swallowed OOM.
+    for (0..counting.alloc_index) |fail_index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const persistent = failing.allocator();
+        var vtable = persistent.vtable.*;
+        vtable.alloc = Walker.allocOnce;
+        const one_shot = std.mem.Allocator{ .ptr = persistent.ptr, .vtable = &vtable };
+        errdefer std.debug.print("walk failed to handle allocation failure at index {d}\n", .{fail_index});
+        try testing.expectError(error.OutOfMemory, Walker.run(one_shot, t.root));
+        try testing.expect(failing.has_induced_failure);
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }
 
 test "walk error callback: receives path and errno, nonzero return aborts" {

@@ -766,6 +766,9 @@ fn openTaskDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!?Ha
 
     const handle = open_result catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
+        // The visitor already saw this link. Its target may have stopped
+        // being a directory since the stat that queued the descent.
+        if (backend == .darwin_bulk and task.follow_link and err == error.NotDir) return null;
         const plen = taskPrefixLen(sh, w, task);
         const display = if (plen > 0) w.path_buf[0 .. plen - 1] else sh.root_path;
         try reportError(sh, display, err);
