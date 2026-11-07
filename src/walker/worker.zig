@@ -52,6 +52,7 @@ pub const FinishFn = *const fn (ctx: *anyopaque, worker_id: u32, sh: *SharedWork
 
 const Failure = enum(u8) { none = 0, aborted = 1, oom = 2, read_failed = 3, permission_denied = 4, name_too_long = 5 };
 const InodeKey = struct { dev: u64, ino: u64 };
+const DarwinVisit = enum { queued_link, visited };
 
 // ---------------------------------------------------------------------------
 // Refcounted resources shared across tasks
@@ -157,7 +158,7 @@ pub const SharedWorkerState = struct {
     noatime_ok: std.atomic.Value(bool) = .init(true),
     /// Symlink-cycle bookkeeping, only touched when follow_symlinks is set.
     visited_mutex: std.Io.Mutex = .init,
-    visited: std.AutoHashMapUnmanaged(InodeKey, void) = .empty,
+    visited: std.AutoHashMapUnmanaged(InodeKey, if (backend == .darwin_bulk) DarwinVisit else void) = .empty,
     /// (dev, ino) of the walk root, seeded by `recordRootVisited`; the root
     /// task inherits it and every child task derives its key from there.
     root_key: InodeKey = .{ .dev = 0, .ino = 0 },
@@ -229,6 +230,27 @@ pub const SharedWorkerState = struct {
         defer sh.visited_mutex.unlock(sh.io);
         const gop = try sh.visited.getOrPut(sh.allocator, key);
         return gop.found_existing;
+    }
+
+    fn darwinVisitedBefore(sh: *SharedWorkerState, key: InodeKey, state: DarwinVisit) Allocator.Error!bool {
+        sh.visited_mutex.lockUncancelable(sh.io);
+        defer sh.visited_mutex.unlock(sh.io);
+        const gop = try sh.visited.getOrPut(sh.allocator, key);
+        if (!gop.found_existing) gop.value_ptr.* = state;
+        return gop.found_existing;
+    }
+
+    fn darwinLinkVisited(sh: *SharedWorkerState, key: InodeKey, expected: InodeKey) Allocator.Error!bool {
+        sh.visited_mutex.lockUncancelable(sh.io);
+        defer sh.visited_mutex.unlock(sh.io);
+        if (!std.meta.eql(key, expected) and sh.visited.get(expected) == .queued_link) {
+            _ = sh.visited.remove(expected);
+        }
+        const gop = try sh.visited.getOrPut(sh.allocator, key);
+        if (gop.found_existing and gop.value_ptr.* == .visited) return true;
+        // This target may have been queued by another link that changed too.
+        gop.value_ptr.* = .visited;
+        return false;
     }
 };
 
@@ -449,10 +471,9 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     var handle_consumed = false;
     defer if (!handle_consumed) closeHandle(handle, sh.io);
 
-    if (backend == .darwin_bulk and sh.options.follow_symlinks) {
-        // Claim the opened directory after the visitor and traversal filters
-        // allow descent. A link can be retargeted before the queued open, and
-        // a mount or firmlink can make its listing inode differ from the target.
+    if (backend == .darwin_bulk and sh.options.follow_symlinks and (task.depth == 0 or task.follow_link)) {
+        // Seed the opened root and recheck links that might have changed
+        // targets between discovery and open.
         var st: std.c.Stat = undefined;
         if (std.c.fstat(handle, &st) != 0) {
             const plen = taskPrefixLen(sh, w, task);
@@ -462,7 +483,11 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
             .dev = @bitCast(@as(i64, @intCast(st.dev))),
             .ino = @intCast(st.ino),
         };
-        if (try sh.visitedBefore(key)) return;
+        if (task.depth == 0) {
+            _ = try sh.darwinVisitedBefore(key, .visited);
+        } else if (try sh.darwinLinkVisited(key, .{ .dev = task.dev, .ino = task.ino })) {
+            return;
+        }
     }
 
     // The root is the first and only task before any helper thread is
@@ -625,7 +650,7 @@ fn processEntry(
     }
 
     // Linux usually gets directory keys from the listing and rechecks mount
-    // crossings after opening. Darwin claims the opened directory instead.
+    // crossings after opening. Darwin claims directories after pruning.
     var child_key: InodeKey = .{ .dev = task.dev, .ino = ino };
     if (backend != .darwin_bulk and !is_dir and opts.follow_symlinks and entry_kind == .sym_link) {
         // stat(FOLLOW): a directory target not yet visited is descended
@@ -688,11 +713,20 @@ fn processEntry(
     const follow_link = backend == .darwin_bulk and opts.follow_symlinks and entry_kind == .sym_link;
     if ((is_dir or follow_link) and may_descend and action != .skip_dir) {
         if (sh.pattern != null and !dirInPatternScope(sh.pattern_prefix, relative_path)) return;
-        if (follow_link) {
-            const target = statForSymlink(sh, handle, name, true) orelse return;
-            if (!target.is_dir) return;
-        }
         if (too_long_to_open) return reportError(sh, full, error.NameTooLong);
+        if (backend == .darwin_bulk and opts.follow_symlinks) {
+            // Preserve discovery order, but do not claim paths that the
+            // visitor or traversal filters prevent us from opening.
+            const target = statForSymlink(sh, handle, name, follow_link);
+            if (follow_link and (target == null or !target.?.is_dir)) return;
+            if (target) |directory| {
+                if (directory.is_dir) {
+                    const state: DarwinVisit = if (follow_link) .queued_link else .visited;
+                    if (try sh.darwinVisitedBefore(directory.key, state)) return;
+                    child_key = directory.key;
+                }
+            }
+        }
         const cr = child_ref.* orelse blk: {
             const cr = try sh.allocator.create(HandleRef);
             cr.* = .{ .handle = handle, .refs = .init(1) };
@@ -766,9 +800,14 @@ fn openTaskDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!?Ha
 
     const handle = open_result catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
-        // The visitor already saw this link. Its target may have stopped
-        // being a directory since the stat that queued the descent.
-        if (backend == .darwin_bulk and task.follow_link and err == error.NotDir) return null;
+        // The visitor already saw this link. It can stop resolving to a
+        // directory between the stat and the queued open.
+        if (backend == .darwin_bulk and task.follow_link) {
+            switch (err) {
+                error.NotDir, error.FileNotFound, error.SymLinkLoop => return null,
+                else => {},
+            }
+        }
         const plen = taskPrefixLen(sh, w, task);
         const display = if (plen > 0) w.path_buf[0 .. plen - 1] else sh.root_path;
         try reportError(sh, display, err);

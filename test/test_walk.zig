@@ -1198,59 +1198,86 @@ test "walk follow_symlinks: result size is independent of scheduling" {
     }
 }
 
-test "walk Darwin symlinks: a retargeted link cannot re-enter the open root" {
+test "walk Darwin symlinks: retargeting a queued link leaves the other link traversable" {
     if (builtin.os.tag != .macos or !builtin.link_libc) return error.SkipZigTest;
-    var t: TestTree = .{ .io = undefined };
-    try t.init("symlink_retarget");
-    defer t.deinit();
-
-    try t.mkdir("tree");
-    try t.mkdir("outside");
-    try t.write("tree/root.txt", "");
-    try t.write("outside/outside.txt", "");
-    const dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
-    defer dir.close(t.io);
-    try dir.symLink(t.io, "../outside", "tree/link", .{});
-    try dir.symLink(t.io, ".", "replacement", .{});
 
     const Context = struct {
         dir: std.Io.Dir,
         io: std.Io,
+        first_link: ?u8 = null,
+        unchanged_link: ?u8 = null,
         rename_error: ?std.Io.Dir.RenameError = null,
-        retargeted: bool = false,
         root_files: usize = 0,
-        link_descendants: usize = 0,
+        retargeted_descendants: usize = 0,
+        leaf_count: usize = 0,
+        leaf_parent: ?u8 = null,
 
         fn visit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
             const self: *@This() = @ptrCast(@alignCast(ctx.?));
             const path = entry.relativePath();
-            if (std.mem.eql(u8, path, "link")) {
-                // The link now resolves to the walk root when its task opens it.
-                self.dir.rename("replacement", self.dir, "tree/link", self.io) catch |err| {
-                    self.rename_error = err;
-                    return .stop;
-                };
-                self.retargeted = true;
+            if (entry.kind == .sym_link and path.len == 1) {
+                if (self.first_link) |first| {
+                    // The serial worker has statted and queued the first link.
+                    // Its task cannot open it until this listing is finished.
+                    var queued_path = "tree/a".*;
+                    queued_path[queued_path.len - 1] = first;
+                    self.dir.rename("replacement", self.dir, &queued_path, self.io) catch |err| {
+                        self.rename_error = err;
+                        return .stop;
+                    };
+                    self.unchanged_link = path[0];
+                } else {
+                    self.first_link = path[0];
+                }
             }
-            if (std.mem.eql(u8, path, "root.txt")) self.root_files += 1;
-            if (std.mem.startsWith(u8, path, "link/")) self.link_descendants += 1;
+            if (std.mem.eql(u8, entry.basename(), "root.txt")) self.root_files += 1;
+            if (path.len > 1 and path[1] == '/' and self.first_link == path[0]) {
+                self.retargeted_descendants += 1;
+            }
+            if (std.mem.eql(u8, entry.basename(), "leaf")) {
+                self.leaf_count += 1;
+                self.leaf_parent = path[0];
+            }
             return .cont;
         }
     };
 
-    var root_buf: [512]u8 = undefined;
-    const root = try std.fmt.bufPrint(&root_buf, "{s}/tree", .{t.root});
-    var ctx = Context{ .dir = dir, .io = t.io };
-    try walk.visit(testing.allocator, root, .{
-        .threads = 1,
-        .follow_symlinks = true,
-        .respect_git = false,
-    }, .{ .context = &ctx, .visit = Context.visit });
+    for ([_][]const u8{ ".", "root.txt", "missing" }) |target| {
+        errdefer std.debug.print("queued link retargeted to {s}\n", .{target});
+        var t: TestTree = .{ .io = undefined };
+        try t.init("symlink_retarget");
+        defer t.deinit();
 
-    if (ctx.rename_error) |err| return err;
-    try testing.expect(ctx.retargeted);
-    try testing.expectEqual(@as(usize, 1), ctx.root_files);
-    try testing.expectEqual(@as(usize, 0), ctx.link_descendants);
+        try t.mkdir("tree");
+        try t.mkdir("outside_a");
+        try t.mkdir("outside_b");
+        try t.write("tree/root.txt", "");
+        try t.write("outside_a/leaf", "");
+        try t.write("outside_b/leaf", "");
+        const dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
+        defer dir.close(t.io);
+        try dir.symLink(t.io, "../outside_a", "tree/a", .{});
+        try dir.symLink(t.io, "../outside_b", "tree/b", .{});
+        try dir.symLink(t.io, target, "replacement", .{});
+
+        var root_buf: [512]u8 = undefined;
+        const root = try std.fmt.bufPrint(&root_buf, "{s}/tree", .{t.root});
+        var ctx = Context{ .dir = dir, .io = t.io };
+        try walk.visit(testing.allocator, root, .{
+            .threads = 1,
+            .max_depth = 2,
+            .follow_symlinks = true,
+            .respect_git = false,
+            .abort_on_error = true,
+        }, .{ .context = &ctx, .visit = Context.visit });
+
+        if (ctx.rename_error) |err| return err;
+        try testing.expect(ctx.unchanged_link != null);
+        try testing.expectEqual(@as(usize, 1), ctx.root_files);
+        try testing.expectEqual(@as(usize, 0), ctx.retargeted_descendants);
+        try testing.expectEqual(@as(usize, 1), ctx.leaf_count);
+        try testing.expectEqual(ctx.unchanged_link, ctx.leaf_parent);
+    }
 }
 
 test "walk Darwin symlinks: skipping one link leaves its target available to the next" {
@@ -1305,59 +1332,76 @@ test "walk Darwin symlinks: skipping one link leaves its target available to the
     try testing.expectEqual(ctx.kept, ctx.leaf_parent);
 }
 
-test "walk Darwin symlinks: a queued link can become a file without aborting" {
+test "walk Darwin symlinks: filtered alias paths leave direct descendants visible" {
     if (builtin.os.tag != .macos or !builtin.link_libc) return error.SkipZigTest;
     var t: TestTree = .{ .io = undefined };
-    try t.init("symlink_to_file");
+    try t.init("symlink_filtered_aliases");
     defer t.deinit();
 
-    try t.mkdir("tree");
-    try t.write("tree/leaf", "");
+    try t.mkdir("a");
+    try t.mkdir("a/sub");
+    try t.write("a/sub/file", "");
+    try t.mkdir("b");
+    try t.mkdir("b/sub");
+    try t.write("b/sub/file", "");
     const dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
     defer dir.close(t.io);
-    try dir.symLink(t.io, ".", "tree/a", .{});
-    try dir.symLink(t.io, ".", "tree/b", .{});
-    try dir.symLink(t.io, "leaf", "replacement", .{});
+    try dir.symLink(t.io, "../b", "a/link", .{});
+    try dir.symLink(t.io, "../a", "b/link", .{});
+
+    // Each filter excludes leaves reached through either alias while still
+    // matching both direct paths. The cross-links make this independent of
+    // the order the two top-level directories are listed.
+    for ([_]walk.Options{
+        .{ .max_depth = 3 },
+        .{ .pattern = "*/sub/file" },
+        .{ .extra_ignore = "*/link/sub/file\n" },
+    }, 0..) |filter, index| {
+        errdefer std.debug.print("alias filter case {d}\n", .{index});
+        var options = filter;
+        options.threads = 1;
+        options.follow_symlinks = true;
+        options.respect_git = false;
+        options.sort = true;
+        var results = try walk.collect(testing.allocator, t.root, options);
+        defer results.deinit();
+
+        var files: std.ArrayList([]const u8) = .empty;
+        defer files.deinit(testing.allocator);
+        for (results.entries) |*entry| {
+            if (entry.kind == .file) try files.append(testing.allocator, entry.relativePath());
+        }
+        try testing.expectEqualDeep(@as([]const []const u8, &.{ "a/sub/file", "b/sub/file" }), files.items);
+    }
 
     const Context = struct {
-        dir: std.Io.Dir,
-        io: std.Io,
-        first_link: ?u8 = null,
-        rename_error: ?std.Io.Dir.RenameError = null,
-        retargeted: bool = false,
+        a_files: usize = 0,
+        b_files: usize = 0,
+        other_files: usize = 0,
 
         fn visit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
             const self: *@This() = @ptrCast(@alignCast(ctx.?));
-            if (entry.kind != .sym_link) return .cont;
-            if (self.first_link) |first| {
-                // The first link's directory stat has already succeeded and
-                // its open is queued behind the rest of this serial listing.
-                var queued_path = "tree/a".*;
-                queued_path[queued_path.len - 1] = first;
-                self.dir.rename("replacement", self.dir, &queued_path, self.io) catch |err| {
-                    self.rename_error = err;
-                    return .stop;
-                };
-                self.retargeted = true;
-            } else {
-                self.first_link = entry.basename()[0];
+            const path = entry.relativePath();
+            if (entry.kind == .directory and std.mem.endsWith(u8, path, "/link/sub")) return .skip_dir;
+            if (entry.kind == .file) {
+                if (std.mem.eql(u8, path, "a/sub/file")) {
+                    self.a_files += 1;
+                } else if (std.mem.eql(u8, path, "b/sub/file")) {
+                    self.b_files += 1;
+                } else {
+                    self.other_files += 1;
+                }
             }
             return .cont;
         }
     };
-
-    var root_buf: [512]u8 = undefined;
-    const root = try std.fmt.bufPrint(&root_buf, "{s}/tree", .{t.root});
-    var ctx = Context{ .dir = dir, .io = t.io };
-    try walk.visit(testing.allocator, root, .{
+    var ctx = Context{};
+    try walk.visit(testing.allocator, t.root, .{
         .threads = 1,
         .follow_symlinks = true,
         .respect_git = false,
-        .abort_on_error = true,
     }, .{ .context = &ctx, .visit = Context.visit });
-
-    if (ctx.rename_error) |err| return err;
-    try testing.expect(ctx.retargeted);
+    try testing.expectEqual(Context{ .a_files = 1, .b_files = 1 }, ctx);
 }
 
 test "walk follow_symlinks reports visited-set allocation failures" {
@@ -1371,6 +1415,11 @@ test "walk follow_symlinks reports visited-set allocation failures" {
     const dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
     defer dir.close(t.io);
     try dir.symLink(t.io, "target", "alias", .{});
+    // Distinct directories force a visited-set allocation after the root.
+    var name_buf: [32]u8 = undefined;
+    for (0..12) |i| {
+        try t.mkdir(try std.fmt.bufPrint(&name_buf, "dir{d}", .{i}));
+    }
 
     const Walker = struct {
         fn run(allocator: std.mem.Allocator, root: []const u8) !void {
