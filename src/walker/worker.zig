@@ -224,10 +224,10 @@ pub const SharedWorkerState = struct {
         }
     }
 
-    fn visitedBefore(sh: *SharedWorkerState, key: InodeKey) bool {
+    fn visitedBefore(sh: *SharedWorkerState, key: InodeKey) Allocator.Error!bool {
         sh.visited_mutex.lockUncancelable(sh.io);
         defer sh.visited_mutex.unlock(sh.io);
-        const gop = sh.visited.getOrPut(sh.allocator, key) catch return true;
+        const gop = try sh.visited.getOrPut(sh.allocator, key);
         return gop.found_existing;
     }
 };
@@ -462,7 +462,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
             .dev = @bitCast(@as(i64, @intCast(st.dev))),
             .ino = @intCast(st.ino),
         };
-        if (sh.visitedBefore(key)) return;
+        if (try sh.visitedBefore(key)) return;
     }
 
     // The root is the first and only task before any helper thread is
@@ -479,7 +479,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     // must already run with trust cleared, not just its children's.
     const verify_first = builtin.os.tag == .linux and sh.options.follow_symlinks and task.depth != 0 and task.verify_key;
     if (verify_first) {
-        if (!resolveTaskKey(sh, task, handle, 0)) return;
+        if (!try resolveTaskKey(sh, task, handle, 0)) return;
     }
 
     w.names.clearRetainingCapacity();
@@ -505,7 +505,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     // against the "." record the scan just produced (no syscall when they
     // agree, see resolveTaskKey).
     if (builtin.os.tag == .linux and sh.options.follow_symlinks and task.depth != 0 and !verify_first) {
-        if (!resolveTaskKey(sh, task, handle, w.dot_ino)) return;
+        if (!try resolveTaskKey(sh, task, handle, w.dot_ino)) return;
     }
 
     const prefix_len = taskPrefixLen(sh, w, task);
@@ -635,7 +635,7 @@ fn processEntry(
             // the rest of the walk. Ordered before the child task is pushed,
             // so the worker that scans it observes the cleared flag.
             if (res.is_dir and res.key.dev != sh.root_dev) sh.trust_short.store(false, .release);
-            is_dir = res.is_dir and !sh.visitedBefore(res.key);
+            is_dir = res.is_dir and !try sh.visitedBefore(res.key);
             child_key = res.key;
         }
     } else if (backend != .darwin_bulk and is_dir and opts.follow_symlinks) {
@@ -646,10 +646,10 @@ fn processEntry(
         // once, so the result size does not depend on which path won the
         // race; only the subtree's placement does.
         if (ino != 0) {
-            if (sh.visitedBefore(child_key)) is_dir = false;
+            if (try sh.visitedBefore(child_key)) is_dir = false;
         } else if (statForSymlink(sh, handle, name, false)) |res| {
             // Listing gave no inode (non-Linux backends, DT_UNKNOWN).
-            if (sh.visitedBefore(res.key)) is_dir = false;
+            if (try sh.visitedBefore(res.key)) is_dir = false;
             child_key = res.key;
         }
     }
@@ -1110,7 +1110,7 @@ fn openat2NoXdevNoatime(sh: *SharedWorkerState, dirfd: posix.fd_t, name_z: [*:0]
 /// those pay one statx to learn the real (dev, ino). The task's own key is
 /// already in the visited set, so only a *different* real key can mean the
 /// directory was visited before; then this returns false.
-fn resolveTaskKey(sh: *SharedWorkerState, task: *DirTask, handle: Handle, dot_ino: u64) bool {
+fn resolveTaskKey(sh: *SharedWorkerState, task: *DirTask, handle: Handle, dot_ino: u64) Allocator.Error!bool {
     if (!task.verify_key and dot_ino != 0 and dot_ino == task.ino and dot_ino != BTRFS_FIRST_FREE_OBJECTID) {
         @branchHint(.likely);
         return true;
@@ -1130,13 +1130,13 @@ fn resolveTaskKey(sh: *SharedWorkerState, task: *DirTask, handle: Handle, dot_in
     // already read without trust; the btrfs-subvolume case stays on the
     // root's device and its scan is unaffected.
     if (key.dev != sh.root_dev) sh.trust_short.store(false, .release);
-    if (sh.visitedBefore(key)) return false;
+    if (try sh.visitedBefore(key)) return false;
     task.dev = key.dev;
     task.ino = key.ino;
     return true;
 }
 
-pub fn recordRootVisited(sh: *SharedWorkerState) void {
+pub fn recordRootVisited(sh: *SharedWorkerState) Allocator.Error!void {
     const root = if (sh.root_path.len == 0) "." else sh.root_path;
     if (is_windows_backend) {
         return; // symlink following unimplemented on the ntdll backend
@@ -1164,7 +1164,7 @@ pub fn recordRootVisited(sh: *SharedWorkerState) void {
         const stat = std.Io.Dir.cwd().statFile(sh.io, root, .{ .follow_symlinks = true }) catch return;
         sh.root_key = .{ .dev = 0, .ino = @intCast(stat.inode) };
     }
-    _ = sh.visitedBefore(sh.root_key);
+    _ = try sh.visitedBefore(sh.root_key);
 }
 
 /// Stats the handle as fast as possible

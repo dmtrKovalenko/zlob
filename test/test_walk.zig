@@ -1305,6 +1305,35 @@ test "walk Darwin symlinks: skipping one link leaves its target available to the
     try testing.expectEqual(ctx.kept, ctx.leaf_parent);
 }
 
+test "walk follow_symlinks reports visited-set allocation failures" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("symlink_oom");
+    defer t.deinit();
+
+    try t.mkdir("target");
+    try t.write("target/leaf", "");
+    const dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
+    defer dir.close(t.io);
+    try dir.symLink(t.io, "target", "alias", .{});
+
+    const Walker = struct {
+        fn run(allocator: std.mem.Allocator, root: []const u8) !void {
+            try walk.visit(allocator, root, .{
+                .threads = 1,
+                .follow_symlinks = true,
+                .respect_git = false,
+            }, .{ .visit = visit });
+        }
+
+        fn visit(_: ?*anyopaque, _: *const walk.Entry) walk.VisitAction {
+            return .cont;
+        }
+    };
+
+    try testing.checkAllAllocationFailures(testing.allocator, Walker.run, .{t.root});
+}
+
 test "walk error callback: receives path and errno, nonzero return aborts" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no POSIX chmod
     var t: TestTree = .{ .io = undefined };

@@ -333,7 +333,7 @@ fn walkImpl(
     defer sh.queue.deinit(allocator);
     defer sh.visited.deinit(allocator);
 
-    if (options.follow_symlinks and types.backend != .darwin_bulk) worker.recordRootVisited(&sh);
+    if (options.follow_symlinks and types.backend != .darwin_bulk) try worker.recordRootVisited(&sh);
 
     // All fallible allocations happen before the root task is queued so an
     // early error can't leak in-flight tasks.
