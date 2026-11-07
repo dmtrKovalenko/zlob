@@ -1198,6 +1198,113 @@ test "walk follow_symlinks: result size is independent of scheduling" {
     }
 }
 
+test "walk Darwin symlinks: a retargeted link cannot re-enter the open root" {
+    if (builtin.os.tag != .macos or !builtin.link_libc) return error.SkipZigTest;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("symlink_retarget");
+    defer t.deinit();
+
+    try t.mkdir("tree");
+    try t.mkdir("outside");
+    try t.write("tree/root.txt", "");
+    try t.write("outside/outside.txt", "");
+    const dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
+    defer dir.close(t.io);
+    try dir.symLink(t.io, "../outside", "tree/link", .{});
+    try dir.symLink(t.io, ".", "replacement", .{});
+
+    const Context = struct {
+        dir: std.Io.Dir,
+        io: std.Io,
+        rename_error: ?std.Io.Dir.RenameError = null,
+        retargeted: bool = false,
+        root_files: usize = 0,
+        link_descendants: usize = 0,
+
+        fn visit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            const path = entry.relativePath();
+            if (std.mem.eql(u8, path, "link")) {
+                // The link now resolves to the walk root when its task opens it.
+                self.dir.rename("replacement", self.dir, "tree/link", self.io) catch |err| {
+                    self.rename_error = err;
+                    return .stop;
+                };
+                self.retargeted = true;
+            }
+            if (std.mem.eql(u8, path, "root.txt")) self.root_files += 1;
+            if (std.mem.startsWith(u8, path, "link/")) self.link_descendants += 1;
+            return .cont;
+        }
+    };
+
+    var root_buf: [512]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "{s}/tree", .{t.root});
+    var ctx = Context{ .dir = dir, .io = t.io };
+    try walk.visit(testing.allocator, root, .{
+        .threads = 1,
+        .follow_symlinks = true,
+        .respect_git = false,
+    }, .{ .context = &ctx, .visit = Context.visit });
+
+    if (ctx.rename_error) |err| return err;
+    try testing.expect(ctx.retargeted);
+    try testing.expectEqual(@as(usize, 1), ctx.root_files);
+    try testing.expectEqual(@as(usize, 0), ctx.link_descendants);
+}
+
+test "walk Darwin symlinks: skipping one link leaves its target available to the next" {
+    if (builtin.os.tag != .macos or !builtin.link_libc) return error.SkipZigTest;
+    var t: TestTree = .{ .io = undefined };
+    try t.init("symlink_skip_first");
+    defer t.deinit();
+
+    try t.mkdir("tree");
+    try t.mkdir("outside");
+    try t.write("outside/leaf", "");
+    const dir = try std.Io.Dir.cwd().openDir(t.io, t.root, .{});
+    defer dir.close(t.io);
+    try dir.symLink(t.io, "../outside", "tree/a", .{});
+    try dir.symLink(t.io, "../outside", "tree/b", .{});
+
+    const Context = struct {
+        skipped: ?u8 = null,
+        kept: ?u8 = null,
+        leaf_parent: ?u8 = null,
+        leaf_count: usize = 0,
+
+        fn visit(ctx: ?*anyopaque, entry: *const walk.Entry) walk.VisitAction {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            const path = entry.relativePath();
+            if (entry.kind == .sym_link) {
+                // Whichever link is listed first must leave the target unclaimed.
+                if (self.skipped == null) {
+                    self.skipped = path[0];
+                    return .skip_dir;
+                }
+                self.kept = path[0];
+            } else if (std.mem.eql(u8, entry.basename(), "leaf")) {
+                self.leaf_parent = path[0];
+                self.leaf_count += 1;
+            }
+            return .cont;
+        }
+    };
+
+    var root_buf: [512]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "{s}/tree", .{t.root});
+    var ctx = Context{};
+    try walk.visit(testing.allocator, root, .{
+        .threads = 1,
+        .follow_symlinks = true,
+        .respect_git = false,
+    }, .{ .context = &ctx, .visit = Context.visit });
+
+    try testing.expect(ctx.skipped != null and ctx.kept != null and ctx.skipped != ctx.kept);
+    try testing.expectEqual(@as(usize, 1), ctx.leaf_count);
+    try testing.expectEqual(ctx.kept, ctx.leaf_parent);
+}
+
 test "walk error callback: receives path and errno, nonzero return aborts" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no POSIX chmod
     var t: TestTree = .{ .io = undefined };

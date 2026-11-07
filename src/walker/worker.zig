@@ -365,7 +365,7 @@ pub inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: types.RawEn
     if (sh.options.meta.any()) {
         try w.metas.append(sh.allocator, raw.meta);
     }
-    if (sh.options.follow_symlinks) {
+    if (backend != .darwin_bulk and sh.options.follow_symlinks) {
         try w.inos.append(sh.allocator, raw.ino);
     }
 }
@@ -387,9 +387,6 @@ pub inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []co
         .name_len = @intCast(name.len),
         .kind = kind,
     });
-    if (sh.options.follow_symlinks) {
-        try w.inos.append(sh.allocator, 0);
-    }
 }
 
 pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
@@ -451,6 +448,22 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     const handle = (try openTaskDir(sh, w, task)) orelse return;
     var handle_consumed = false;
     defer if (!handle_consumed) closeHandle(handle, sh.io);
+
+    if (backend == .darwin_bulk and sh.options.follow_symlinks) {
+        // Claim the opened directory after the visitor and traversal filters
+        // allow descent. A link can be retargeted before the queued open, and
+        // a mount or firmlink can make its listing inode differ from the target.
+        var st: std.c.Stat = undefined;
+        if (std.c.fstat(handle, &st) != 0) {
+            const plen = taskPrefixLen(sh, w, task);
+            return reportError(sh, w.path_buf[0..plen -| 1], error.ReadFailed);
+        }
+        const key: InodeKey = .{
+            .dev = @bitCast(@as(i64, @intCast(st.dev))),
+            .ino = @intCast(st.ino),
+        };
+        if (sh.visitedBefore(key)) return;
+    }
 
     // The root is the first and only task before any helper thread is
     // spawned, so this plain store is published to them by the spawn.
@@ -527,7 +540,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     const entry_depth: u16 = task.depth +| 1;
     const may_descend = opts.max_depth == 0 or entry_depth < opts.max_depth;
     const want_meta = opts.meta.any();
-    const have_inos = opts.follow_symlinks and w.inos.items.len == w.entries.items.len;
+    const have_inos = backend != .darwin_bulk and opts.follow_symlinks and w.inos.items.len == w.entries.items.len;
     var child_ref: ?*HandleRef = null;
     defer if (child_ref) |cr| cr.release(sh);
 
@@ -611,13 +624,10 @@ fn processEntry(
         }
     }
 
-    // Cycle key the child task will carry under follow_symlinks. Real
-    // directories are keyed by the listing's d_ino under the parent's device
-    // (exact within one filesystem; a mount or btrfs-subvolume crossing is
-    // re-keyed when the child is opened, see `resolveTaskKey`), so only
-    // symlinks -- whose target lives elsewhere -- pay a statx here.
+    // Linux usually gets directory keys from the listing and rechecks mount
+    // crossings after opening. Darwin claims the opened directory instead.
     var child_key: InodeKey = .{ .dev = task.dev, .ino = ino };
-    if (!is_dir and opts.follow_symlinks and entry_kind == .sym_link) {
+    if (backend != .darwin_bulk and !is_dir and opts.follow_symlinks and entry_kind == .sym_link) {
         // stat(FOLLOW): a directory target not yet visited is descended
         if (statForSymlink(sh, handle, name, true)) |res| {
             // Leaving the root's device may land on a filesystem the
@@ -628,7 +638,7 @@ fn processEntry(
             is_dir = res.is_dir and !sh.visitedBefore(res.key);
             child_key = res.key;
         }
-    } else if (is_dir and opts.follow_symlinks) {
+    } else if (backend != .darwin_bulk and is_dir and opts.follow_symlinks) {
         // A real directory whose inode was already claimed (reached first
         // through a symlink, on another thread or earlier in this one) is
         // still reported -- only the descent is skipped. Every directory is
@@ -675,10 +685,13 @@ fn processEntry(
         }
     }
 
-    if (is_dir and sh.pattern != null and !dirInPatternScope(sh.pattern_prefix, relative_path))
-        return;
-
-    if (is_dir and may_descend and action != .skip_dir) {
+    const follow_link = backend == .darwin_bulk and opts.follow_symlinks and entry_kind == .sym_link;
+    if ((is_dir or follow_link) and may_descend and action != .skip_dir) {
+        if (sh.pattern != null and !dirInPatternScope(sh.pattern_prefix, relative_path)) return;
+        if (follow_link) {
+            const target = statForSymlink(sh, handle, name, true) orelse return;
+            if (!target.is_dir) return;
+        }
         if (too_long_to_open) return reportError(sh, full, error.NameTooLong);
         const cr = child_ref.* orelse blk: {
             const cr = try sh.allocator.create(HandleRef);
@@ -703,6 +716,7 @@ fn processEntry(
             .parent = cr,
             .dev = child_key.dev,
             .ino = child_key.ino,
+            .follow_link = follow_link,
         };
         try sh.queue.push(sh.allocator, sh.io, w.id, child);
     }
@@ -770,7 +784,7 @@ fn openChild(sh: *SharedWorkerState, parent: Handle, name: []const u8, task: *Di
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
-            .NOFOLLOW = !sh.options.follow_symlinks,
+            .NOFOLLOW = !sh.options.follow_symlinks or (backend == .darwin_bulk and !task.follow_link),
         };
         if (builtin.os.tag == .linux and sh.options.follow_symlinks) {
             // The task's inherited (dev, d_ino) key is only right while the
