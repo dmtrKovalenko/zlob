@@ -4,18 +4,19 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 use proptest::prelude::*;
 
 mod common;
 use common::{git_available, git_ignored_paths, git_init, git_kept};
-use zlob::walk::{WalkBuilder, WalkFlags};
+use zlob::walk::{WalkBuilder, WalkFlags, WalkState};
 use zlob::{ZlobFlags, zlob};
 
-/// The reference git runs with global and system config scrubbed (see
-/// `common::scrubbed`), so the walker must not read the developer's
-/// `core.excludesFile` either.
-const SCRUBBED: WalkFlags = WalkFlags::GITIGNORE.union(WalkFlags::NO_GIT_GLOBAL);
+/// Use Git ignore sources and the same global exclusions as `common::scrubbed`.
+const SCRUBBED: WalkFlags = WalkFlags::GITIGNORE
+    .union(WalkFlags::SKIP_DOT_IGNORE)
+    .union(WalkFlags::NO_GIT_GLOBAL);
 
 const DIRS: &[&str] = &[
     "a",
@@ -407,6 +408,7 @@ fn zlob_kept(root: &Path, threads: usize) -> BTreeSet<String> {
         .collect()
 }
 
+/// Compare inherited Git ignore rules for collected, streamed, and retained paths.
 #[test]
 fn subtree_walk_can_inherit_gitignore_rules() {
     if !git_available() {
@@ -426,6 +428,7 @@ fn subtree_walk_can_inherit_gitignore_rules() {
     fs::write(repo.join("project/.gitignore"), "/src/intermediate.txt\n").unwrap();
     fs::write(repo.join(".git/info/exclude"), "/project/src/private.txt\n").unwrap();
     fs::write(subtree.join(".gitignore"), "!keep.log\n/local.txt\n").unwrap();
+    fs::write(subtree.join(".ignore"), "!app.log\nmain.rs\n").unwrap();
     fs::write(
         subtree.join("nested/.gitignore"),
         "!keep.log\n/nested.txt\n",
@@ -459,17 +462,32 @@ fn subtree_walk_can_inherit_gitignore_rules() {
     let ignored = git_ignored_paths(&subtree, &paths);
     assert!(zlob_kept(&subtree, 1).contains("blocked/inside.rs"));
     for &threads in THREAD_COUNTS {
-        let walk = WalkBuilder::new(&subtree)
-            .unwrap()
-            .options(options)
-            .threads(threads)
-            .collect()
-            .unwrap();
+        let mut builder = WalkBuilder::new(&subtree).unwrap();
+        builder.options(options).threads(threads);
+        let walk = builder.collect().unwrap();
         let kept: BTreeSet<_> = walk
             .iter()
             .map(|entry| entry.relative_path().to_string_lossy().into_owned())
             .collect();
         assert_eq!(kept, expected, "files at {threads} threads");
+
+        let visited = Mutex::new(Vec::new());
+        builder
+            .visit(|entry| {
+                visited
+                    .lock()
+                    .unwrap()
+                    .push(entry.relative_path().to_string_lossy().into_owned());
+                WalkState::Continue
+            })
+            .unwrap();
+        let mut visited = visited.into_inner().unwrap();
+        visited.sort();
+        assert_eq!(
+            visited,
+            expected.iter().cloned().collect::<Vec<_>>(),
+            "streamed files at {threads} threads"
+        );
 
         let rules = walk.ignore_rules().unwrap();
         let ignored_by_walk = paths
@@ -483,14 +501,22 @@ fn subtree_walk_can_inherit_gitignore_rules() {
         );
     }
 
+    // An explicitly selected root is entered even if its parent would prune it.
     let blocked = subtree.join("blocked");
     let walk = WalkBuilder::new(&blocked)
         .unwrap()
         .options(options)
         .collect()
         .unwrap();
-    assert_eq!(walk.len(), git_kept(&blocked).len());
-    assert!(walk.ignore_rules().unwrap().is_ignored("inside.rs"));
+    let kept: BTreeSet<_> = walk
+        .iter()
+        .map(|entry| entry.relative_path().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        kept,
+        BTreeSet::from([".gitignore".into(), "inside.rs".into()])
+    );
+    assert!(!walk.ignore_rules().unwrap().is_ignored("inside.rs"));
 }
 
 fn label_of(spec: &[(String, String)]) -> String {
@@ -618,11 +644,8 @@ fn curated_patterns_match_git() {
     );
 }
 
-/// `$GIT_DIR/info/exclude` and `core.excludesFile` are part of git's ignore
-/// stack (below the repo root `.gitignore`), so the walker reads them too --
-/// in the main checkout and in a linked worktree, whose `.git` is a pointer
-/// file and whose exclude lives behind `commondir`.
-/// https://github.com/dmtrKovalenko/fff/pull/983, /pull/878
+/// Compare both walker modes with Git's repository-wide exclude rules in a
+/// main checkout and linked worktree, including relative and empty overrides.
 #[test]
 fn info_exclude_and_core_excludes_file_match_git() {
     if !git_available() {
@@ -648,7 +671,7 @@ fn info_exclude_and_core_excludes_file_match_git() {
     fs::write(root.join(".gitignore"), "!keep.log\n!keep.tmp\n").unwrap();
     git_init(&root);
     fs::write(root.join(".git/info/exclude"), "excluded/\n*.log\n").unwrap();
-    let excludes = dir.path().join("excludes-file");
+    let excludes = dir.path().join("excludes # file");
     fs::write(&excludes, "*.tmp\nbuild/\n").unwrap();
 
     // Real git, with only the repository config in play (the shared helpers
@@ -680,18 +703,28 @@ fn info_exclude_and_core_excludes_file_match_git() {
             .collect()
     };
     let walk_kept = |base: &Path| -> BTreeSet<String> {
-        WalkBuilder::new(base)
-            .unwrap()
-            .options(WalkFlags::GITIGNORE | WalkFlags::NO_REPORT_DIRS)
-            .threads(1)
-            .collect()
-            .unwrap()
-            .iter()
-            .map(|e| e.relative_path().to_string_lossy().into_owned())
-            // `ls-files --others` lists untracked files only; keep.rs gets
-            // committed below so the worktree can be created.
-            .filter(|p| p != ".git" && p != "keep.rs")
-            .collect()
+        let collect = |options: WalkFlags| -> BTreeSet<String> {
+            WalkBuilder::new(base)
+                .unwrap()
+                .options(options)
+                .threads(1)
+                .collect()
+                .unwrap()
+                .iter()
+                .map(|e| e.relative_path().to_string_lossy().into_owned())
+                // `ls-files --others` lists untracked files only; keep.rs gets
+                // committed below so the worktree can be created.
+                .filter(|p| p != ".git" && p != "keep.rs")
+                .collect()
+        };
+        let options = WalkFlags::GITIGNORE | WalkFlags::NO_REPORT_DIRS;
+        let kept = collect(options);
+        assert_eq!(
+            kept,
+            collect(options | WalkFlags::SKIP_DOT_IGNORE),
+            "{base:?}"
+        );
+        kept
     };
     git(
         &["config", "core.excludesFile", excludes.to_str().unwrap()],
@@ -765,6 +798,13 @@ fn info_exclude_and_core_excludes_file_match_git() {
     assert!(
         wt_view.contains("scratch.tmp") && !wt_view.contains("build/out.o"),
         "sanity: the worktree applies its own local-ignore, got {wt_view:?}"
+    );
+
+    git(&["config", "core.excludesFile", ""], &root);
+    assert_eq!(
+        walk_kept(&root),
+        untracked(git_kept(&root)),
+        "empty repository override"
     );
 }
 

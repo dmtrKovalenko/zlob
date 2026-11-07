@@ -363,9 +363,11 @@ int zlob_pattern_match_paths_indices_at_slice(const zlob_pattern_t *p,
 
 /* Walk behavior flags (zlob_walk_options_t.flags). All-zero options give a
  * plain walkdir-style traversal: hidden files included, .gitignore not
- * consulted, directories reported. Inside every repository the walk meets,
- * ZLOB_WALK_GITIGNORE also honors $GIT_DIR/info/exclude and git's
- * core.excludesFile, below the .gitignore next to .git (git precedence). */
+ * consulted, directories reported. With ZLOB_WALK_GITIGNORE, .ignore rules
+ * take precedence over Git rules across directories. GITIGNORE_PARENTS
+ * inherits .gitignore up to the nearest repository boundary when present
+ * and through parent directories in standalone trees. GITIGNORE also
+ * honors repository core.excludesFile and $GIT_DIR/info/exclude. */
 #define ZLOB_WALK_GITIGNORE   (1u << 0) /* honor (nested) .gitignore + .ignore; also skips .git */
 #define ZLOB_WALK_SKIP_HIDDEN (1u << 1) /* skip dotfiles and don't descend into dot-dirs */
 #define ZLOB_WALK_FOLLOW_SYMLINKS   (1u << 2)
@@ -447,10 +449,9 @@ typedef struct zlob_walk_entry {
 typedef int (*zlob_walk_cb)(const zlob_walk_entry_t *entry, void *ctx);
 
 /**
- * Walking the file tree and calling the callback per every entry
- * respecting the options and metadata settings. Starts from the root path.
- *
- * When finished walking writes the inferred ignore rules ot the out_rules ptr
+ * Stream entries under root through cb. Pass NULL for out_rules to release
+ * ignore rules as workers finish their subtrees. Otherwise, on success,
+ * *out_rules receives a handle owned by the caller (see zlob_ignore_rules_free).
  */
 int zlob_walk(const char *root, const zlob_walk_options_t *options, zlob_walk_cb cb, void *ctx,
               void **out_rules);

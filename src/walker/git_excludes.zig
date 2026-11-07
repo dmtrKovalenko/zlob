@@ -151,18 +151,27 @@ pub const Resolver = struct {
         }
         const repo = gop.value_ptr.*;
 
-        var out: Docs = .{};
-        if (repo.info_exclude) |b| out.info_exclude = gpa.dupe(u8, b) catch null;
-        if (r.want_global) {
-            // A repository-level value replaces the global one, even when
-            // the file it names is missing or the value is empty.
-            if (repo.excludes_setting orelse r.globalSetting()) |path| {
-                if (path.len > 0) {
-                    if (r.excludesFile(dir, path)) |b| out.excludes_file = gpa.dupe(u8, b) catch null;
-                }
-            }
-        }
-        return out;
+        return .{
+            .info_exclude = if (repo.info_exclude) |b| gpa.dupe(u8, b) catch null else null,
+            .excludes_file = if (r.want_global) r.loadExcludesFile(dir, repo.excludes_setting) else null,
+        };
+    }
+
+    /// User excludes for a .jj boundary without its own Git config.
+    pub fn loadGlobal(r: *Resolver, dir: []const u8) Docs {
+        if (!r.want_global) return .{};
+        r.mutex.lockUncancelable(r.io);
+        defer r.mutex.unlock(r.io);
+        return .{ .excludes_file = r.loadExcludesFile(dir, null) };
+    }
+
+    /// Called with the cache locked. A repository-level value replaces the
+    /// global one, even when the named file is missing or the value is empty.
+    fn loadExcludesFile(r: *Resolver, dir: []const u8, repo_setting: ?[]const u8) ?[]u8 {
+        const path = repo_setting orelse r.globalSetting() orelse return null;
+        if (path.len == 0) return null;
+        const doc = r.excludesFile(dir, path) orelse return null;
+        return r.gpa.dupe(u8, doc) catch null;
     }
 
     fn globalSetting(r: *Resolver) ?[]const u8 {
@@ -554,7 +563,7 @@ fn expectDocs(r: *Resolver, f: *Fixture, dir: []const u8, dot_git: DotGit, info:
     if (excludes) |e| try testing.expectEqualStrings(e, docs.excludes_file orelse return error.MissingExcludesFile) else try testing.expect(docs.excludes_file == null);
 }
 
-test "Resolver: repo config, relative paths, worktree pointer, non-repo .git" {
+test "Resolver: repo config and relative worktree and submodule pointers" {
     var f: Fixture = .{ .io = undefined };
     try f.init();
     defer f.deinit();
@@ -569,6 +578,10 @@ test "Resolver: repo config, relative paths, worktree pointer, non-repo .git" {
     try f.mkdir("wt");
     try f.write("wt/.git", "gitdir: ../main/.git/worktrees/wt\n");
     try f.write("wt/local-ignore", "*.wt\n");
+    try f.mkdir("main/.git/modules/sub/info");
+    try f.write("main/.git/modules/sub/info/exclude", "*.sub\n");
+    try f.mkdir("main/sub");
+    try f.write("main/sub/.git", "gitdir: ../.git/modules/sub\n");
     try f.mkdir("bogus");
     try f.write("bogus/.git", "hello\n");
     try f.mkdir("plain/.git/info");
@@ -582,6 +595,7 @@ test "Resolver: repo config, relative paths, worktree pointer, non-repo .git" {
     // shared info/exclude and config, but its own relative excludes file
     try expectDocs(&r, &f, "wt", .file, "# comment\nexcluded/\n", "*.wt\n");
     try expectDocs(&r, &f, "wt", .unknown, "# comment\nexcluded/\n", "*.wt\n");
+    try expectDocs(&r, &f, "main/sub", .file, "*.sub\n", null);
     try expectDocs(&r, &f, "bogus", .file, null, null);
     try expectDocs(&r, &f, "missing", .unknown, null, null);
     // comments-only template: no document; no repo setting: global (missing)

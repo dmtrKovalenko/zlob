@@ -210,6 +210,13 @@ walker designed to replace the Rust `walkdir` and `ignore` crates, available fro
 
 Traversal can also be narrowed with a one or many (z)glob patterns.
 
+When upgrading, check walks that use `GITIGNORE`. A matching `.ignore` rule
+now takes precedence over Git rules even across directories. Use
+`SKIP_DOT_IGNORE` to skip `.ignore` rules. The nearest `.git` or `.jj`
+bounds Git rules, and `GITIGNORE_PARENTS` inherits `.gitignore` in standalone
+trees too. An explicitly selected directory is visited even if an ancestor
+rule excludes it.
+
 Here is how you can use it from different languages, starting with Rust:
 
 ```rust
@@ -225,16 +232,13 @@ for entry in results.iter() {
     println!("{} {:?}", entry.path().display(), entry.size());
 }
 
-// ignore-crate style traversal: nested .gitignore/.ignore, each repository's
-// .git/info/exclude and core.excludesFile (opt out of the last two with
-// WalkFlags::NO_GIT_EXCLUDE / WalkFlags::NO_GIT_GLOBAL):
 WalkBuilder::new(".").options(WalkFlags::GITIGNORE).run(|entry| {
     println!("{}", entry.path().display());
 
     WalkState::Continue
 })?;
 
-// Also inherit parent ignore rules when walking a Git worktree subtree.
+// Inherit parent rules when the walk starts in a subdirectory.
 let subtree = WalkBuilder::new("src")
     .options(WalkFlags::GITIGNORE | WalkFlags::GITIGNORE_PARENTS)
     .build()?;
