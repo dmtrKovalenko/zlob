@@ -24,6 +24,8 @@ pub const DirTask = struct {
     /// The open could not guarantee it stayed on `dev` (mount crossing, or no
     /// openat2): re-derive the key with one statx once the dir is open.
     verify_key: bool = false,
+    /// Darwin permits following a child only if the listing identified a link.
+    follow_link: bool = false,
 };
 
 const LocalQueue = struct {

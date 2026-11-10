@@ -52,6 +52,7 @@ pub const FinishFn = *const fn (ctx: *anyopaque, worker_id: u32, sh: *SharedWork
 
 const Failure = enum(u8) { none = 0, aborted = 1, oom = 2, read_failed = 3, permission_denied = 4, name_too_long = 5 };
 const InodeKey = struct { dev: u64, ino: u64 };
+const DarwinVisit = enum { queued_link, visited };
 
 // ---------------------------------------------------------------------------
 // Refcounted resources shared across tasks
@@ -157,7 +158,7 @@ pub const SharedWorkerState = struct {
     noatime_ok: std.atomic.Value(bool) = .init(true),
     /// Symlink-cycle bookkeeping, only touched when follow_symlinks is set.
     visited_mutex: std.Io.Mutex = .init,
-    visited: std.AutoHashMapUnmanaged(InodeKey, void) = .empty,
+    visited: std.AutoHashMapUnmanaged(InodeKey, if (backend == .darwin_bulk) DarwinVisit else void) = .empty,
     /// (dev, ino) of the walk root, seeded by `recordRootVisited`; the root
     /// task inherits it and every child task derives its key from there.
     root_key: InodeKey = .{ .dev = 0, .ino = 0 },
@@ -224,11 +225,32 @@ pub const SharedWorkerState = struct {
         }
     }
 
-    fn visitedBefore(sh: *SharedWorkerState, key: InodeKey) bool {
+    fn visitedBefore(sh: *SharedWorkerState, key: InodeKey) Allocator.Error!bool {
         sh.visited_mutex.lockUncancelable(sh.io);
         defer sh.visited_mutex.unlock(sh.io);
-        const gop = sh.visited.getOrPut(sh.allocator, key) catch return true;
+        const gop = try sh.visited.getOrPut(sh.allocator, key);
         return gop.found_existing;
+    }
+
+    fn darwinVisitedBefore(sh: *SharedWorkerState, key: InodeKey, state: DarwinVisit) Allocator.Error!bool {
+        sh.visited_mutex.lockUncancelable(sh.io);
+        defer sh.visited_mutex.unlock(sh.io);
+        const gop = try sh.visited.getOrPut(sh.allocator, key);
+        if (!gop.found_existing) gop.value_ptr.* = state;
+        return gop.found_existing;
+    }
+
+    fn darwinLinkVisited(sh: *SharedWorkerState, key: InodeKey, expected: InodeKey) Allocator.Error!bool {
+        sh.visited_mutex.lockUncancelable(sh.io);
+        defer sh.visited_mutex.unlock(sh.io);
+        if (!std.meta.eql(key, expected) and sh.visited.get(expected) == .queued_link) {
+            _ = sh.visited.remove(expected);
+        }
+        const gop = try sh.visited.getOrPut(sh.allocator, key);
+        if (gop.found_existing and gop.value_ptr.* == .visited) return true;
+        // This target may have been queued by another link that changed too.
+        gop.value_ptr.* = .visited;
+        return false;
     }
 };
 
@@ -365,7 +387,7 @@ pub inline fn appendScratch(sh: *SharedWorkerState, w: *Worker, raw: types.RawEn
     if (sh.options.meta.any()) {
         try w.metas.append(sh.allocator, raw.meta);
     }
-    if (sh.options.follow_symlinks) {
+    if (backend != .darwin_bulk and sh.options.follow_symlinks) {
         try w.inos.append(sh.allocator, raw.ino);
     }
 }
@@ -387,9 +409,6 @@ pub inline fn appendScratchNoMeta(sh: *SharedWorkerState, w: *Worker, name: []co
         .name_len = @intCast(name.len),
         .kind = kind,
     });
-    if (sh.options.follow_symlinks) {
-        try w.inos.append(sh.allocator, 0);
-    }
 }
 
 pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
@@ -452,6 +471,25 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     var handle_consumed = false;
     defer if (!handle_consumed) closeHandle(handle, sh.io);
 
+    if (backend == .darwin_bulk and sh.options.follow_symlinks and (task.depth == 0 or task.follow_link)) {
+        // Seed the opened root and recheck links that might have changed
+        // targets between discovery and open.
+        var st: std.c.Stat = undefined;
+        if (std.c.fstat(handle, &st) != 0) {
+            const plen = taskPrefixLen(sh, w, task);
+            return reportError(sh, w.path_buf[0..plen -| 1], error.ReadFailed);
+        }
+        const key: InodeKey = .{
+            .dev = @bitCast(@as(i64, @intCast(st.dev))),
+            .ino = @intCast(st.ino),
+        };
+        if (task.depth == 0) {
+            _ = try sh.darwinVisitedBefore(key, .visited);
+        } else if (try sh.darwinLinkVisited(key, .{ .dev = task.dev, .ino = task.ino })) {
+            return;
+        }
+    }
+
     // The root is the first and only task before any helper thread is
     // spawned, so this plain store is published to them by the spawn.
     if (comptime backend == .linux_getdents) {
@@ -466,7 +504,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     // must already run with trust cleared, not just its children's.
     const verify_first = builtin.os.tag == .linux and sh.options.follow_symlinks and task.depth != 0 and task.verify_key;
     if (verify_first) {
-        if (!resolveTaskKey(sh, task, handle, 0)) return;
+        if (!try resolveTaskKey(sh, task, handle, 0)) return;
     }
 
     w.names.clearRetainingCapacity();
@@ -492,7 +530,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     // against the "." record the scan just produced (no syscall when they
     // agree, see resolveTaskKey).
     if (builtin.os.tag == .linux and sh.options.follow_symlinks and task.depth != 0 and !verify_first) {
-        if (!resolveTaskKey(sh, task, handle, w.dot_ino)) return;
+        if (!try resolveTaskKey(sh, task, handle, w.dot_ino)) return;
     }
 
     const prefix_len = taskPrefixLen(sh, w, task);
@@ -527,7 +565,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     const entry_depth: u16 = task.depth +| 1;
     const may_descend = opts.max_depth == 0 or entry_depth < opts.max_depth;
     const want_meta = opts.meta.any();
-    const have_inos = opts.follow_symlinks and w.inos.items.len == w.entries.items.len;
+    const have_inos = backend != .darwin_bulk and opts.follow_symlinks and w.inos.items.len == w.entries.items.len;
     var child_ref: ?*HandleRef = null;
     defer if (child_ref) |cr| cr.release(sh);
 
@@ -611,13 +649,10 @@ fn processEntry(
         }
     }
 
-    // Cycle key the child task will carry under follow_symlinks. Real
-    // directories are keyed by the listing's d_ino under the parent's device
-    // (exact within one filesystem; a mount or btrfs-subvolume crossing is
-    // re-keyed when the child is opened, see `resolveTaskKey`), so only
-    // symlinks -- whose target lives elsewhere -- pay a statx here.
+    // Linux usually gets directory keys from the listing and rechecks mount
+    // crossings after opening. Darwin claims directories after pruning.
     var child_key: InodeKey = .{ .dev = task.dev, .ino = ino };
-    if (!is_dir and opts.follow_symlinks and entry_kind == .sym_link) {
+    if (backend != .darwin_bulk and !is_dir and opts.follow_symlinks and entry_kind == .sym_link) {
         // stat(FOLLOW): a directory target not yet visited is descended
         if (statForSymlink(sh, handle, name, true)) |res| {
             // Leaving the root's device may land on a filesystem the
@@ -625,10 +660,10 @@ fn processEntry(
             // the rest of the walk. Ordered before the child task is pushed,
             // so the worker that scans it observes the cleared flag.
             if (res.is_dir and res.key.dev != sh.root_dev) sh.trust_short.store(false, .release);
-            is_dir = res.is_dir and !sh.visitedBefore(res.key);
+            is_dir = res.is_dir and !try sh.visitedBefore(res.key);
             child_key = res.key;
         }
-    } else if (is_dir and opts.follow_symlinks) {
+    } else if (backend != .darwin_bulk and is_dir and opts.follow_symlinks) {
         // A real directory whose inode was already claimed (reached first
         // through a symlink, on another thread or earlier in this one) is
         // still reported -- only the descent is skipped. Every directory is
@@ -636,10 +671,10 @@ fn processEntry(
         // once, so the result size does not depend on which path won the
         // race; only the subtree's placement does.
         if (ino != 0) {
-            if (sh.visitedBefore(child_key)) is_dir = false;
+            if (try sh.visitedBefore(child_key)) is_dir = false;
         } else if (statForSymlink(sh, handle, name, false)) |res| {
             // Listing gave no inode (non-Linux backends, DT_UNKNOWN).
-            if (sh.visitedBefore(res.key)) is_dir = false;
+            if (try sh.visitedBefore(res.key)) is_dir = false;
             child_key = res.key;
         }
     }
@@ -675,11 +710,23 @@ fn processEntry(
         }
     }
 
-    if (is_dir and sh.pattern != null and !dirInPatternScope(sh.pattern_prefix, relative_path))
-        return;
-
-    if (is_dir and may_descend and action != .skip_dir) {
+    const follow_link = backend == .darwin_bulk and opts.follow_symlinks and entry_kind == .sym_link;
+    if ((is_dir or follow_link) and may_descend and action != .skip_dir) {
+        if (sh.pattern != null and !dirInPatternScope(sh.pattern_prefix, relative_path)) return;
         if (too_long_to_open) return reportError(sh, full, error.NameTooLong);
+        if (backend == .darwin_bulk and opts.follow_symlinks) {
+            // Preserve discovery order, but do not claim paths that the
+            // visitor or traversal filters prevent us from opening.
+            const target = statForSymlink(sh, handle, name, follow_link);
+            if (follow_link and (target == null or !target.?.is_dir)) return;
+            if (target) |directory| {
+                if (directory.is_dir) {
+                    const state: DarwinVisit = if (follow_link) .queued_link else .visited;
+                    if (try sh.darwinVisitedBefore(directory.key, state)) return;
+                    child_key = directory.key;
+                }
+            }
+        }
         const cr = child_ref.* orelse blk: {
             const cr = try sh.allocator.create(HandleRef);
             cr.* = .{ .handle = handle, .refs = .init(1) };
@@ -703,6 +750,7 @@ fn processEntry(
             .parent = cr,
             .dev = child_key.dev,
             .ino = child_key.ino,
+            .follow_link = follow_link,
         };
         try sh.queue.push(sh.allocator, sh.io, w.id, child);
     }
@@ -752,6 +800,14 @@ fn openTaskDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!?Ha
 
     const handle = open_result catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
+        // The visitor already saw this link. It can stop resolving to a
+        // directory between the stat and the queued open.
+        if (backend == .darwin_bulk and task.follow_link) {
+            switch (err) {
+                error.NotDir, error.FileNotFound, error.SymLinkLoop => return null,
+                else => {},
+            }
+        }
         const plen = taskPrefixLen(sh, w, task);
         const display = if (plen > 0) w.path_buf[0 .. plen - 1] else sh.root_path;
         try reportError(sh, display, err);
@@ -770,7 +826,7 @@ fn openChild(sh: *SharedWorkerState, parent: Handle, name: []const u8, task: *Di
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
-            .NOFOLLOW = !sh.options.follow_symlinks,
+            .NOFOLLOW = !sh.options.follow_symlinks or (backend == .darwin_bulk and !task.follow_link),
         };
         if (builtin.os.tag == .linux and sh.options.follow_symlinks) {
             // The task's inherited (dev, d_ino) key is only right while the
@@ -1096,7 +1152,7 @@ fn openat2NoXdevNoatime(sh: *SharedWorkerState, dirfd: posix.fd_t, name_z: [*:0]
 /// those pay one statx to learn the real (dev, ino). The task's own key is
 /// already in the visited set, so only a *different* real key can mean the
 /// directory was visited before; then this returns false.
-fn resolveTaskKey(sh: *SharedWorkerState, task: *DirTask, handle: Handle, dot_ino: u64) bool {
+fn resolveTaskKey(sh: *SharedWorkerState, task: *DirTask, handle: Handle, dot_ino: u64) Allocator.Error!bool {
     if (!task.verify_key and dot_ino != 0 and dot_ino == task.ino and dot_ino != BTRFS_FIRST_FREE_OBJECTID) {
         @branchHint(.likely);
         return true;
@@ -1116,13 +1172,13 @@ fn resolveTaskKey(sh: *SharedWorkerState, task: *DirTask, handle: Handle, dot_in
     // already read without trust; the btrfs-subvolume case stays on the
     // root's device and its scan is unaffected.
     if (key.dev != sh.root_dev) sh.trust_short.store(false, .release);
-    if (sh.visitedBefore(key)) return false;
+    if (try sh.visitedBefore(key)) return false;
     task.dev = key.dev;
     task.ino = key.ino;
     return true;
 }
 
-pub fn recordRootVisited(sh: *SharedWorkerState) void {
+pub fn recordRootVisited(sh: *SharedWorkerState) Allocator.Error!void {
     const root = if (sh.root_path.len == 0) "." else sh.root_path;
     if (is_windows_backend) {
         return; // symlink following unimplemented on the ntdll backend
@@ -1150,7 +1206,7 @@ pub fn recordRootVisited(sh: *SharedWorkerState) void {
         const stat = std.Io.Dir.cwd().statFile(sh.io, root, .{ .follow_symlinks = true }) catch return;
         sh.root_key = .{ .dev = 0, .ino = @intCast(stat.inode) };
     }
-    _ = sh.visitedBefore(sh.root_key);
+    _ = try sh.visitedBefore(sh.root_key);
 }
 
 /// Stats the handle as fast as possible
