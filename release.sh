@@ -71,6 +71,16 @@ else
     cd rust && cargo build && cd -
 fi
 
+# Cross-compile the static library for every Rust target and record the
+# checksums in rust/prebuilt.sha256, which is part of the release commit.
+echo -e "${GREEN}Building prebuilt libraries...${NC}"
+if [ "$DRY_RUN" = true ]; then
+    echo -e "${BLUE}[DRY-RUN] Would run: scripts/build-prebuilt.sh dist/prebuilt${NC}"
+else
+    rm -rf dist/prebuilt
+    scripts/build-prebuilt.sh dist/prebuilt
+fi
+
 # Verify the changes (skip in dry-run)
 if [ "$DRY_RUN" = false ]; then
     echo -e "${GREEN}Verifying changes...${NC}"
@@ -86,14 +96,6 @@ if [ "$DRY_RUN" = true ]; then
 else
     git add --all
     git commit -m "chore: version to ${NEW_VERSION}"
-fi
-
-# Publish to crates.io
-echo -e "${GREEN}Publishing to crates.io...${NC}"
-if [ "$DRY_RUN" = true ]; then
-    echo -e "${BLUE}[DRY-RUN] Would run: cd rust && cargo publish${NC}"
-else
-    (cd rust && cargo publish)
 fi
 
 
@@ -119,6 +121,21 @@ else
     git push origin "v${NEW_VERSION}"
 fi
 
+# The crate downloads these, so they must be public before it is published.
+echo -e "${GREEN}Uploading prebuilt libraries to the GitHub release...${NC}"
+if [ "$DRY_RUN" = true ]; then
+    echo -e "${BLUE}[DRY-RUN] Would run: gh release create \"v${NEW_VERSION}\" dist/prebuilt/*.a --generate-notes${NC}"
+else
+    gh release create "v${NEW_VERSION}" dist/prebuilt/*.a --title "v${NEW_VERSION}" --generate-notes
+fi
+
+# Publish to crates.io
+echo -e "${GREEN}Publishing to crates.io...${NC}"
+if [ "$DRY_RUN" = true ]; then
+    echo -e "${BLUE}[DRY-RUN] Would run: cd rust && cargo publish${NC}"
+else
+    (cd rust && cargo publish)
+fi
 
 if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}[DRY-RUN] Completed. No changes were made.${NC}"

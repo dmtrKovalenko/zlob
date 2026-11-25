@@ -4,7 +4,17 @@ Zlob is a very fast glob implementation that is faster than ignore crate and eve
 
 ## Requirements
 
-To compile this crate, install Zig 0.17.1 or newer and add it to your `PATH`. [Download Zig](https://ziglang.org/download/)
+You do not need to install Zig. The library is written in Zig, and every release ships it compiled for the common targets. The build script downloads the one for your target from the [GitHub release](https://github.com/dmtrKovalenko/zlob/releases) with `curl` and checks it against a sha256 that is part of the crate.
+
+When there is no prebuilt library for your target, or the download fails, the build script compiles the Zig sources. That needs Zig 0.17.1 or newer on your `PATH` (or in `ZIG`). [Download Zig](https://ziglang.org/download/)
+
+| Variable | Effect |
+| --- | --- |
+| `ZLOB_BUILD=source` | Always compile with Zig; never download. |
+| `ZLOB_BUILD=prebuilt` | Fail the build instead of falling back to Zig. |
+| `ZLOB_PREBUILT_URL=<url>` | Download `<url>/libzlob-<target>.a` instead, for example from your own mirror. The checksum is still checked. |
+| `ZLOB_PREBUILT_DIR=<dir>` | Take `libzlob-<target>.a` from a local directory, for builds without network access. |
+| `ZLOB_ZIG_CPU=<cpu>` | Compile with Zig for this CPU (for example `x86_64_v3`). Prebuilt libraries use the baseline CPU. |
 
 ## Misc
 

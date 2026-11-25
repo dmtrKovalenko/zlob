@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // Minimal self-contained headers for bindgen. They rely only on clang's
@@ -17,6 +17,12 @@ typedef __UINT32_TYPE__ uint32_t;\n\
 typedef __UINT64_TYPE__ uint64_t;\n\
 typedef __INTPTR_TYPE__ intptr_t;\n\
 typedef __UINTPTR_TYPE__ uintptr_t;\n";
+
+/// sha256 of every prebuilt library of this release, one `<sha256>  <file>`
+/// per line after a `# zlob <version>` header. scripts/build-prebuilt.sh
+/// writes it at release time, before the libraries are uploaded.
+const PREBUILT_SUMS: &str = include_str!("prebuilt.sha256");
+const PREBUILT_URL: &str = "https://github.com/dmtrKovalenko/zlob/releases/download";
 
 #[derive(Debug)]
 struct BindgenCallbacks {
@@ -134,15 +140,29 @@ fn main() {
         .write_to_file(out_dir.join("zlob_bindings.rs"))
         .expect("Couldn't write bindings!");
 
+    // A prebuilt library needs no Zig. Without one, compile from source.
+    let in_checkout = zig_src_dir == "src";
+    let no_prebuilt = match prebuilt_library(&target, &out_dir, in_checkout) {
+        Ok(lib_dir) => {
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            println!("cargo:rustc-link-lib=static=zlob");
+            return;
+        }
+        Err(why) => why,
+    };
+
     println!("cargo:rerun-if-env-changed=ZIG");
     let zig = env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
-    let zig_version = Command::new(&zig)
+    let zig_works = Command::new(&zig)
         .arg("version")
         .output()
-        .expect("Failed to find zig. Please install zig or set the ZIG environment variable.");
-
-    if !zig_version.status.success() {
-        panic!("Failed to run zig. Please ensure zig is installed and accessible.");
+        .is_ok_and(|o| o.status.success());
+    if !zig_works {
+        panic!(
+            "zlob has no prebuilt library to use ({no_prebuilt}) and cannot run `{zig}` to \
+             compile it.\nInstall Zig 0.17.1 or newer from https://ziglang.org/download/ or \
+             set ZIG to the compiler path."
+        );
     }
 
     // Windows note: "native" would also resolve to GNU/MinGW ABI (Zig ships
@@ -255,6 +275,140 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}/lib", out_dir.display());
     println!("cargo:rustc-link-lib=static=zlob");
+}
+
+/// Fetch the prebuilt static library for `target` and return the directory to
+/// link from, or the reason to compile from source instead.
+///
+/// `ZLOB_BUILD=source` always compiles, `ZLOB_BUILD=prebuilt` fails the build
+/// when no prebuilt library can be used. The default uses a prebuilt library
+/// when one exists, except in a git checkout (where the Zig sources may have
+/// local changes) and when `ZLOB_ZIG_CPU` asks for a non-baseline CPU.
+fn prebuilt_library(target: &str, out_dir: &Path, in_checkout: bool) -> Result<PathBuf, String> {
+    for var in ["ZLOB_BUILD", "ZLOB_PREBUILT_DIR", "ZLOB_PREBUILT_URL"] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    println!("cargo:rerun-if-changed=prebuilt.sha256");
+
+    let mode = env::var("ZLOB_BUILD").unwrap_or_default();
+    let required = match mode.as_str() {
+        "source" => return Err("ZLOB_BUILD=source".into()),
+        "prebuilt" => true,
+        "" | "auto" => false,
+        other => panic!("ZLOB_BUILD must be `auto`, `prebuilt` or `source`, not `{other}`"),
+    };
+
+    let result = fetch_prebuilt(target, out_dir, required, in_checkout);
+    match &result {
+        Err(why) if required => panic!("ZLOB_BUILD=prebuilt, but {why}"),
+        // The fallback is a normal outcome in a checkout; say why elsewhere.
+        Err(why) if !in_checkout => println!("cargo:warning=zlob: compiling with Zig: {why}"),
+        _ => {}
+    }
+    result
+}
+
+fn fetch_prebuilt(
+    target: &str,
+    out_dir: &Path,
+    required: bool,
+    in_checkout: bool,
+) -> Result<PathBuf, String> {
+    let local_dir = env::var_os("ZLOB_PREBUILT_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+
+    if !required {
+        if in_checkout {
+            return Err("this is a git checkout".into());
+        }
+        if env::var("ZLOB_ZIG_CPU").is_ok_and(|c| !c.is_empty()) {
+            return Err("ZLOB_ZIG_CPU is set and prebuilt libraries use the baseline CPU".into());
+        }
+    }
+
+    let asset = format!("libzlob-{target}.a");
+    // A directory you built yourself carries its own checksum list.
+    let sums = match &local_dir {
+        Some(dir) if dir.join("prebuilt.sha256").exists() => {
+            std::fs::read_to_string(dir.join("prebuilt.sha256")).map_err(|e| e.to_string())?
+        }
+        _ => PREBUILT_SUMS.to_string(),
+    };
+    let version = env::var("CARGO_PKG_VERSION").unwrap();
+    if sums.lines().next() != Some(&format!("# zlob {version}")) {
+        return Err(format!("the checksum list is not for zlob {version}"));
+    }
+    let expected = sums
+        .lines()
+        .filter_map(|line| line.split_once("  "))
+        .find(|(_, name)| *name == asset)
+        .map(|(sum, _)| sum)
+        .ok_or(format!("there is no prebuilt library for {target}"))?;
+
+    // rustc looks for zlob.lib on MSVC and libzlob.a everywhere else.
+    let lib_dir = out_dir.join("prebuilt");
+    let lib = lib_dir.join(if target.contains("msvc") {
+        "zlob.lib"
+    } else {
+        "libzlob.a"
+    });
+    if verify_sha256(&lib, expected).is_ok() {
+        return Ok(lib_dir);
+    }
+    std::fs::create_dir_all(&lib_dir).map_err(|e| e.to_string())?;
+
+    let partial = lib_dir.join(format!("{asset}.partial"));
+    let source = match &local_dir {
+        Some(dir) => {
+            let from = dir.join(&asset);
+            std::fs::copy(&from, &partial).map_err(|e| format!("{}: {e}", from.display()))?;
+            from.display().to_string()
+        }
+        None => {
+            let base = env::var("ZLOB_PREBUILT_URL")
+                .ok()
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| format!("{PREBUILT_URL}/v{version}"));
+            let url = format!("{}/{asset}", base.trim_end_matches('/'));
+            let status = Command::new("curl")
+                .args(["--fail", "--location", "--silent", "--show-error"])
+                .args(["--retry", "3", "--connect-timeout", "30", "--output"])
+                .arg(&partial)
+                .arg(&url)
+                .status()
+                .map_err(|e| format!("cannot run curl to download {url}: {e}"))?;
+            if !status.success() {
+                let _ = std::fs::remove_file(&partial);
+                return Err(format!("curl could not download {url} ({status})"));
+            }
+            url
+        }
+    };
+
+    if let Err(e) = verify_sha256(&partial, expected) {
+        let _ = std::fs::remove_file(&partial);
+        return Err(format!("{source}: {e}"));
+    }
+    std::fs::rename(&partial, &lib).map_err(|e| e.to_string())?;
+    Ok(lib_dir)
+}
+
+fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let actual: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "sha256 mismatch: expected {expected}, got {actual}"
+        ))
+    }
 }
 
 /// Map a Rust target triple to one libclang accepts.

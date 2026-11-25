@@ -16,6 +16,8 @@ include = [
     "/Cargo.toml",
     "/Cargo.lock", 
     "/build.rs",
+    # Checksums of the prebuilt libraries attached to this version's GitHub release
+    "/prebuilt.sha256",
     "/README.md",
     # Zig build system (symlinks resolved by cargo during packaging)
     "/build.zig",
@@ -35,6 +37,8 @@ bitflags = "2"
 
 [build-dependencies]
 bindgen = "0.72"
+# Checks the prebuilt library that build.rs downloads.
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

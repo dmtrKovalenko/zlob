@@ -63,6 +63,63 @@ jobs:
       - name: aarch64 via qemu
         run: ./scripts/test_nolibc_threads.sh aarch64-linux-musl qemu-aarch64
 
+  # A Rust user has no Zig installed: the crate must link a prebuilt library.
+  rust-prebuilt:
+    name: Rust crate with prebuilt library (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            rust_target: aarch64-apple-darwin
+          - os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the prebuilt library
+        shell: bash
+        run: scripts/build-prebuilt.sh --target ${{ matrix.rust_target }} dist/prebuilt
+
+      # ZIG points nowhere, so the test fails if build.rs falls back to Zig.
+      - name: Test Rust crate without Zig
+        working-directory: rust
+        shell: bash
+        env:
+          ZLOB_BUILD: prebuilt
+          ZIG: zig-must-not-run
+        run: |
+          export ZLOB_PREBUILT_DIR="$(cd ../dist/prebuilt && pwd)"
+          cargo test --release
+
+  # Every release cross-compiles all targets from one machine; keep that working.
+  prebuilt-all-targets:
+    name: Prebuilt libraries for all targets
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build
+        run: scripts/build-prebuilt.sh dist/prebuilt
+
   docs-rs:
     name: docs.rs build
     runs-on: ubuntu-latest
