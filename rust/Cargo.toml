@@ -35,6 +35,8 @@ bitflags = "2"
 
 [build-dependencies]
 bindgen = "0.72"
+# Checks the Zig compiler that build.rs downloads when none is installed.
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
