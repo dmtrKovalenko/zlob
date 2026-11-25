@@ -67,7 +67,9 @@ echo -e "${GREEN}Updating rust/Cargo.toml...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would update version to \"${NEW_VERSION}\" in rust/Cargo.toml${NC}"
 else
-    sed -i "s/^version = \"[^\"]*\"/version = \"${NEW_VERSION}\"/" rust/Cargo.toml
+    sed -i "s/^version = \"[^\"]*\"/version = \"${NEW_VERSION}\"/" rust/Cargo.toml rust/prebuilt/*/Cargo.toml
+    # zlob pins the zlob-prebuilt-* crates to its own version
+    sed -i "s/version = \"=[^\"]*\"/version = \"=${NEW_VERSION}\"/" rust/Cargo.toml
     cd rust && cargo build && cd -
 fi
 
@@ -86,6 +88,20 @@ if [ "$DRY_RUN" = true ]; then
 else
     git add --all
     git commit -m "chore: version to ${NEW_VERSION}"
+fi
+
+# Cross-compile the static library for every Rust target into the
+# zlob-prebuilt-* crates and publish them. zlob depends on them, so they go first.
+echo -e "${GREEN}Building and publishing prebuilt libraries...${NC}"
+if [ "$DRY_RUN" = true ]; then
+    echo -e "${BLUE}[DRY-RUN] Would run: scripts/build-prebuilt.sh${NC}"
+    echo -e "${BLUE}[DRY-RUN] Would run: cargo publish --allow-dirty in rust/prebuilt/*${NC}"
+else
+    scripts/build-prebuilt.sh
+    for crate in rust/prebuilt/*/; do
+        # The libraries are not in git, which cargo reports as a dirty tree.
+        (cd "$crate" && cargo publish --allow-dirty)
+    done
 fi
 
 # Publish to crates.io

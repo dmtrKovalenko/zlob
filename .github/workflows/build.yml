@@ -63,6 +63,74 @@ jobs:
       - name: aarch64 via qemu
         run: ./scripts/test_nolibc_threads.sh aarch64-linux-musl qemu-aarch64
 
+  # A Rust user has no Zig installed: the crate must link a prebuilt library.
+  rust-prebuilt:
+    name: Rust crate with prebuilt library (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            rust_target: aarch64-apple-darwin
+          - os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the prebuilt library
+        shell: bash
+        run: scripts/build-prebuilt.sh --target ${{ matrix.rust_target }}
+
+      # ZIG points nowhere, so the test fails if build.rs falls back to Zig.
+      - name: Test Rust crate without Zig
+        working-directory: rust
+        env:
+          ZLOB_BUILD: prebuilt
+          ZIG: zig-must-not-run
+        run: cargo test --release
+
+  # Every release cross-compiles all targets from one machine; keep that
+  # working and keep each crate under the crates.io size limit.
+  prebuilt-all-targets:
+    name: Prebuilt libraries for all targets
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: scripts/build-prebuilt.sh
+
+      - name: Package the prebuilt crates
+        run: |
+          for crate in rust/prebuilt/*/; do
+            (cd "$crate" && cargo package --allow-dirty --no-verify)
+            size=$(stat -c %s "$crate"target/package/*.crate)
+            echo "$crate: $size bytes"
+            # crates.io rejects packages over 10 MB
+            [ "$size" -lt 10000000 ]
+          done
+
   docs-rs:
     name: docs.rs build
     runs-on: ubuntu-latest

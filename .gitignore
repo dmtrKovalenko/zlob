@@ -3,3 +3,6 @@ zig-out/
 rust/target/
 rust/.zig-cache/
 *.core
+
+# Prebuilt static libraries, built at release time by scripts/build-prebuilt.sh
+rust/prebuilt/*/lib/

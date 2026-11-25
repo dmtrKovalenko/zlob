@@ -953,7 +953,32 @@ dependencies = [
  "proptest",
  "tempfile",
  "walkdir",
+ "zlob-prebuilt-android",
+ "zlob-prebuilt-apple",
+ "zlob-prebuilt-bsd",
+ "zlob-prebuilt-linux",
+ "zlob-prebuilt-windows",
 ]
+
+[[package]]
+name = "zlob-prebuilt-android"
+version = "1.8.2"
+
+[[package]]
+name = "zlob-prebuilt-apple"
+version = "1.8.2"
+
+[[package]]
+name = "zlob-prebuilt-bsd"
+version = "1.8.2"
+
+[[package]]
+name = "zlob-prebuilt-linux"
+version = "1.8.2"
+
+[[package]]
+name = "zlob-prebuilt-windows"
+version = "1.8.2"
 
 [[package]]
 name = "zmij"
