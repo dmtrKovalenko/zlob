@@ -864,6 +864,45 @@ test "sort: sortPathsParallel matches pdq on full paths (parallel pool, randomiz
     try checkSortAgainstPdq(std.heap.smp_allocator, 20000, 16, 5);
 }
 
+fn noopVisit(_: ?*anyopaque, _: *const walk.Entry) walk.VisitAction {
+    return .cont;
+}
+
+test "walk on macOS starts 6 workers and the whole pool once its syscalls are off-CPU" {
+    if (walk.backend != .darwin_bulk) return error.SkipZigTest;
+
+    var t: TestTree = .{ .io = undefined };
+    try t.init("worker_limit");
+    defer t.deinit();
+    // The root listing queues 64 directories at once, enough for one spawn
+    // burst up to the limit and too few for the probe to finish a window.
+    var buf: [64]u8 = undefined;
+    for (0..64) |d| {
+        try t.mkdir(try std.fmt.bufPrint(&buf, "d{d:0>2}", .{d}));
+        try t.write(try std.fmt.bufPrint(&buf, "d{d:0>2}/a.txt", .{d}), "a");
+    }
+
+    const api = &walk.__internal_test_api;
+    defer api.force_blocked = false;
+    const cases = [_]struct { threads: u16, blocked: bool, helpers: usize }{
+        .{ .threads = 4, .blocked = false, .helpers = 3 },
+        .{ .threads = 6, .blocked = false, .helpers = 5 },
+        .{ .threads = 7, .blocked = false, .helpers = 5 },
+        .{ .threads = 8, .blocked = false, .helpers = 5 },
+        .{ .threads = 64, .blocked = false, .helpers = 5 },
+        .{ .threads = 7, .blocked = true, .helpers = 6 },
+        .{ .threads = 8, .blocked = true, .helpers = 7 },
+        .{ .threads = 64, .blocked = true, .helpers = 7 },
+    };
+    for (cases) |c| {
+        api.force_blocked = c.blocked;
+        const opts: walk.Options = .{ .threads = c.threads, .meta = .{ .size = true } };
+        try testing.expectEqual(@min(@as(u32, c.threads), 8), walk.effectiveThreads(&opts));
+        try walk.visit(testing.allocator, t.root, opts, .{ .visit = noopVisit });
+        try testing.expectEqual(c.helpers, api.last_spawned);
+    }
+}
+
 test "walk empty root and missing root" {
     var t: TestTree = .{ .io = undefined };
     try t.init("empty");

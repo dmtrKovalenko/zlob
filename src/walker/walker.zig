@@ -32,6 +32,11 @@ pub const IgnoreRules = ignore_rules_mod.IgnoreRules;
 /// Sorting hook for `test/test_walk.zig`.
 pub const __internal_test_api = if (builtin.is_test) struct {
     pub const sortPathsParallel = sorting.sortPathsParallel;
+    /// Start every walk as if `worker.IoProbe` had already lifted the macOS
+    /// helper limit.
+    pub var force_blocked: bool = false;
+    /// Helper threads the last finished walk started.
+    pub var last_spawned: usize = 0;
 } else struct {};
 
 pub const WalkError = types.WalkError;
@@ -205,7 +210,9 @@ pub fn collectAs(gpa: Allocator, root: []const u8, options: Options, comptime Ad
     // frees them), so a failure here leaks nothing.
     if (options.sort) {
         const io = options.io orelse std.Io.Threaded.global_single_threaded.io();
-        entries = try sorting.sortPathsParallel(Out, Adapter.relativePath, gpa, io, entries, n_workers);
+        // Sorting is CPU work, so it is not bound by the macOS walker cap.
+        const sort_threads: u32 = if (options.threads != 0) @min(options.threads, 1024) else n_workers;
+        entries = try sorting.sortPathsParallel(Out, Adapter.relativePath, gpa, io, entries, sort_threads);
     }
 
     // Nothing below may fail once chunk ownership starts moving.
@@ -232,11 +239,11 @@ pub fn effectiveThreads(opts: *const Options) u32 {
     //
     // This is only the size of the worker pool. A walk starts at most
     // `worker.DARWIN_CPU_BOUND_WORKERS` of them and adds the rest only once
-    // it measures itself blocking on disk I/O (see `worker.IoProbe`), the
-    // one case where the extra workers pay: trees too large for the kernel's
-    // filesystem cache (around a million entries on a 128 GB machine, half
-    // that for real repositories with metadata) and cold caches. That holds
-    // for name-only walks too.
+    // it measures its directory syscalls mostly off-CPU (see
+    // `worker.IoProbe`). That is the case the extra workers pay in: trees too
+    // large for the kernel's filesystem cache (around a million entries on a
+    // 128 GB machine, half that for real repositories with metadata) and cold
+    // caches, for name-only walks too.
     if (backend == .darwin_bulk) {
         const requested: u32 = if (opts.threads != 0)
             opts.threads
@@ -362,6 +369,7 @@ fn walkImpl(
 
     sh.workers = workers;
     sh.threads = threads;
+    if (builtin.is_test) sh.blocked.store(__internal_test_api.force_blocked, .monotonic);
 
     const parents = ignore_rules.parents;
     if (parents) |node| node.retain();
@@ -382,6 +390,7 @@ fn walkImpl(
     // trees never create a single helper thread.
     worker.workerLoop(&sh, &workers[0]);
     for (sh.threads[0..sh.spawned.load(.acquire)]) |t| t.join();
+    if (builtin.is_test) __internal_test_api.last_spawned = sh.spawned.load(.acquire);
 
     return sh.failureResult();
 }

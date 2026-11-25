@@ -54,9 +54,9 @@ pub const FinishFn = *const fn (ctx: *anyopaque, worker_id: u32, sh: *SharedWork
 /// syscall loses throughput to kernel lock contention (see
 /// `walker.effectiveThreads`).
 pub const DARWIN_CPU_BOUND_WORKERS: u32 = 6;
-/// macOS: pool size. The workers above
-/// `DARWIN_CPU_BOUND_WORKERS` start only once the walk is measured to be
-/// blocking on disk I/O (see `IoProbe`).
+/// macOS: pool size. The workers above `DARWIN_CPU_BOUND_WORKERS` start only
+/// once the walk's directory syscalls are measured to be mostly off-CPU (see
+/// `IoProbe`).
 pub const DARWIN_IO_BOUND_WORKERS: u32 = 8;
 
 const Failure = enum(u8) { none = 0, aborted = 1, oom = 2, read_failed = 3, permission_denied = 4, name_too_long = 5 };
@@ -192,9 +192,9 @@ pub const SharedWorkerState = struct {
     /// Set (under `spawn_lock`) once a spawn failed; no further attempts.
     spawn_failed: bool = false,
     /// macOS: set by `IoProbe` once a worker's directory syscalls were mostly
-    /// blocked rather than on-CPU. Lifts the helper limit from the CPU-bound
-    /// knee to the whole pool. Never cleared.
-    io_bound: std.atomic.Value(bool) = .init(false),
+    /// off-CPU. Lifts the helper limit from the CPU-bound knee to the whole
+    /// pool. Never cleared.
+    blocked: std.atomic.Value(bool) = .init(false),
 
     pub fn fail(sh: *SharedWorkerState, f: Failure) void {
         sh.abort_signal.store(true, .release);
@@ -242,7 +242,7 @@ pub const SharedWorkerState = struct {
     /// that is the whole pool.
     inline fn helperLimit(sh: *SharedWorkerState) usize {
         if (comptime backend == .darwin_bulk) {
-            if (!sh.io_bound.load(.monotonic)) return @min(sh.threads.len, DARWIN_CPU_BOUND_WORKERS - 1);
+            if (!sh.blocked.load(.monotonic)) return @min(sh.threads.len, DARWIN_CPU_BOUND_WORKERS - 1);
         }
         return sh.threads.len;
     }
@@ -315,7 +315,7 @@ pub const Worker = struct {
     scoped_path: ?[]u8 = null,
     /// macOS: see `IoProbe`. `probe_this_dir` is set by `workerLoop` for the
     /// directories whose open + listing get timed.
-    probe: IoProbe = .{},
+    probe: if (comptime_darwin) IoProbe else void = if (comptime_darwin) .{} else {},
     probe_this_dir: bool = false,
 
     pub fn init(w: *Worker, id: u32, sh: *SharedWorkerState) !void {
@@ -442,9 +442,11 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
     // worker that sees more queued directories than there are threads to take
     // them starts enough helpers to cover the backlog. Once this worker has
     // seen the pool full it stops looking, so the steady-state loop carries
-    // no shared loads. The check must stay ahead of `taskDone` so `spawned`
-    // is final by the time the queue closes (the collect barrier in
-    // walker.zig relies on that).
+    // no shared loads. (A macOS pool larger than the CPU-bound knee fills only
+    // when the walk is off-CPU; a warm walk keeps looking, and keeps probing,
+    // to its end.) The check must stay ahead of `taskDone` so `spawned` is
+    // final by the time the queue closes (the collect barrier in walker.zig
+    // relies on that).
     var may_spawn = state.threads.len > 0;
     // macOS: only a pool larger than the CPU-bound knee has workers whose
     // start depends on the probe.
@@ -453,7 +455,7 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
     while (state.queue.pop(state.io, worker.id)) |next_task| {
         var task = next_task;
         if (!state.abort_signal.load(.acquire)) {
-            worker.probe_this_dir = probing and may_spawn and worker.probe.due();
+            if (comptime_darwin) worker.probe_this_dir = probing and may_spawn and worker.probe.due();
             processDir(state, worker, &task) catch |err| switch (err) {
                 error.OutOfMemory => state.fail(.oom),
                 error.ReadFailed => state.fail(.read_failed),
@@ -483,25 +485,32 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
 
 const comptime_darwin = backend == .darwin_bulk;
 
-/// macOS: tells a walk that blocks on disk I/O from one that is CPU-bound in
-/// the kernel, by comparing wall time with thread CPU time across the open
-/// and the listing of sampled directories.
+/// macOS: tells a walk whose directory syscalls are mostly off-CPU from one
+/// that is CPU-bound in the kernel, by comparing wall time with thread CPU
+/// time across the open and the listing of sampled directories.
 ///
-/// The two cases need opposite thread counts. A warm walk spends ~99% of its
-/// wall time on-CPU (contended kernel locks spin), and every worker past
-/// `DARWIN_CPU_BOUND_WORKERS` slows it down. A walk of a tree the kernel's
-/// filesystem cache no longer holds (or of a cold cache) re-reads APFS
-/// B-tree nodes with synchronous 4 KiB reads inside the listing syscall --
-/// about one per directory -- and sits ~50% blocked; there more workers mean
-/// more reads in flight (1M files: 6 workers 1540 ms, 8 workers 1330 ms; fff
-/// on chromium, 545k entries: 1080 ms against 900 ms).
+/// The two cases need opposite thread counts. A warm walk on an idle machine
+/// spends ~99% of its wall time on-CPU (contended kernel locks spin), and
+/// every worker past `DARWIN_CPU_BOUND_WORKERS` slows it down. A walk of a
+/// tree the kernel's filesystem cache no longer holds (or of a cold cache)
+/// re-reads APFS B-tree nodes with synchronous 4 KiB reads inside the listing
+/// syscall -- about one per directory -- and sits ~50% off-CPU; there more
+/// workers mean more reads in flight (1M files: 6 workers 1540 ms, 8 workers
+/// 1330 ms; fff on chromium, 545k entries: 1080 ms against 900 ms).
 ///
-/// Only the walker's own syscalls are timed: entry filtering and the caller's
-/// visitor run after the span ends, so a visitor that waits on a lock or does
-/// its own I/O cannot make the walk look I/O-bound. A worker that the
-/// scheduler preempts inside a span does look blocked, which is why one
-/// window is not enough: the limit lifts only after `BLOCKED_WINDOWS`
-/// consecutive blocked windows on the same worker.
+/// The span covers `openat`, the listing syscalls and the copy of the names
+/// into the worker's scratch lists. Entry filtering and the caller's visitor
+/// run after it ends, so a visitor that waits on a lock or does its own I/O
+/// does not count.
+///
+/// Off-CPU is not only disk I/O, and the probe cannot tell the causes apart
+/// (getrusage reports no block input for these reads). A worker also reads
+/// as off-CPU when the scheduler preempts it on an overloaded machine, and
+/// when several processes walk at once. `BLOCKED_WINDOWS` consecutive windows
+/// filter a single preemption, not sustained overload. Measured outcome of
+/// the extra workers in those cases: three concurrent walks 610 ms each with
+/// 8 workers against 740 ms with 6; no measurable change under 32 busy
+/// threads on 16 cores.
 pub const IoProbe = struct {
     tick: u32 = 0,
     samples: u32 = 0,
@@ -542,13 +551,17 @@ pub const IoProbe = struct {
 
     inline fn end(p: *IoProbe, sh: *SharedWorkerState, span: Span) void {
         if (comptime !comptime_darwin) return;
-        p.wall_ns += clockNs(.UPTIME_RAW) -| span.wall_ns;
-        p.cpu_ns += clockNs(.THREAD_CPUTIME_ID) -| span.cpu_ns;
+        const wall_end = clockNs(.UPTIME_RAW);
+        const cpu_end = clockNs(.THREAD_CPUTIME_ID);
+        // A failed clock read would turn into a span as long as the uptime.
+        if (span.wall_ns == 0 or span.cpu_ns == 0 or wall_end == 0 or cpu_end == 0) return;
+        p.wall_ns += wall_end -| span.wall_ns;
+        p.cpu_ns += cpu_end -| span.cpu_ns;
         p.samples += 1;
         if (p.samples < WINDOW_SAMPLES) return;
         if (p.cpu_ns * 100 < p.wall_ns * BLOCKED_BELOW_PERCENT) {
             p.blocked_streak += 1;
-            if (p.blocked_streak >= BLOCKED_WINDOWS) sh.io_bound.store(true, .monotonic);
+            if (p.blocked_streak >= BLOCKED_WINDOWS) sh.blocked.store(true, .monotonic);
         } else {
             p.blocked_streak = 0;
         }
@@ -577,7 +590,11 @@ inline fn spawnBurst(spawned: usize, queued: usize) usize {
 const FULL_BURST_QUEUED: usize = 8;
 
 fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void {
-    const probe_span: IoProbe.Span = if (w.probe_this_dir) .begin() else .{};
+    // The root and followed links also stat and take `visited_mutex` below;
+    // those tasks are not timed.
+    const probed = comptime_darwin and w.probe_this_dir and
+        !(sh.options.follow_symlinks and (task.depth == 0 or task.follow_link));
+    const probe_span: IoProbe.Span = if (probed) .begin() else .{};
     const handle = (try openTaskDir(sh, w, task)) orelse return;
     var handle_consumed = false;
     defer if (!handle_consumed) closeHandle(handle, sh.io);
@@ -629,7 +646,7 @@ fn processDir(sh: *SharedWorkerState, w: *Worker, task: *DirTask) WalkError!void
     w.saw_exact_dot_git = false;
     w.saw_dot_jj = false;
     const scanned = scan.scanDir(sh, w, handle);
-    if (w.probe_this_dir) w.probe.end(sh, probe_span);
+    if (probed) w.probe.end(sh, probe_span);
     scanned catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {

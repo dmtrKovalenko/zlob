@@ -77,7 +77,7 @@ fn printHelp(w: *Io.Writer, program_name: []const u8) void {
         \\    -s, --sorted         Sort results alphabetically (default: unsorted)
         \\    -B, --no-brace       Disable brace expansion (default: enabled)
         \\    -G, --no-gitignore   Don't respect .gitignore rules (default: enabled)
-        \\    -j, --threads <NUM>  Walk recursive '**' globs with NUM worker threads (default: serial)
+        \\    -j, --threads <NUM>  Walk recursive '**' globs with up to NUM worker threads (default: serial)
         \\    -h, --help           Print help information
         \\    -V, --version        Print version information
         \\

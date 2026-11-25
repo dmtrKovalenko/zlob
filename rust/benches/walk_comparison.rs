@@ -330,25 +330,10 @@ fn bench_walk(c: &mut Criterion) {
             .sum()
     }
 
-    /// Parallel metadata walk with an explicit worker count, the way an
-    /// application with its own thread pool calls the walker (fff passes half
-    /// the cores, or all performance cores).
-    fn zlob_meta_threads(root: &Path, threads: usize) -> u64 {
-        use std::sync::atomic::AtomicU64;
-        let acc = AtomicU64::new(0);
-        let mut b = WalkBuilder::new(root).unwrap();
-        b.options(WalkFlags::RECOMMENDED);
-        b.threads(threads);
-        b.metadata(WalkMetadata::SIZE | WalkMetadata::MTIME);
-        b.run(|e| {
-            acc.fetch_add(e.size().unwrap_or(0), Ordering::Relaxed);
-            WalkState::Continue
-        })
-        .unwrap();
-        acc.load(Ordering::Relaxed)
-    }
-
-    fn zlob_meta(root: &Path, parallel: bool, gitignore: bool) -> u64 {
+    /// `threads`: `None` = the walker's default; `Some(n)` = a caller-chosen
+    /// count, the way an application with its own thread pool calls the
+    /// walker (fff passes half the cores, or all performance cores).
+    fn zlob_meta(root: &Path, parallel: bool, gitignore: bool, threads: Option<usize>) -> u64 {
         // Streaming walk so it matches walkdir's iterator and ignore's
         // per-entry callback: each entry's size is summed as it is visited,
         // nothing is materialized. Serial uses `run_serial` (plain local,
@@ -360,6 +345,9 @@ fn bench_walk(c: &mut Criterion) {
             WalkFlags::empty()
         });
         b.metadata(WalkMetadata::SIZE | WalkMetadata::MTIME | WalkMetadata::INODE);
+        if let Some(threads) = threads {
+            b.threads(threads);
+        }
         if parallel {
             use std::sync::atomic::AtomicU64;
             let acc = AtomicU64::new(0);
@@ -467,12 +455,12 @@ fn bench_walk(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::from_parameter("zlob_meta_serial"),
             root,
-            |b, r| b.iter(|| std::hint::black_box(zlob_meta(r, false, false))),
+            |b, r| b.iter(|| std::hint::black_box(zlob_meta(r, false, false, None))),
         );
         group.bench_with_input(
             BenchmarkId::from_parameter("zlob_meta_parallel"),
             root,
-            |b, r| b.iter(|| std::hint::black_box(zlob_meta(r, true, false))),
+            |b, r| b.iter(|| std::hint::black_box(zlob_meta(r, true, false, None))),
         );
         group.bench_with_input(BenchmarkId::from_parameter("walkdir_meta"), root, |b, r| {
             b.iter(|| std::hint::black_box(walkdir_meta(r)))
@@ -487,12 +475,12 @@ fn bench_walk(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::from_parameter("zlob_meta_gitignore_serial"),
             root,
-            |b, r| b.iter(|| std::hint::black_box(zlob_meta(r, false, true))),
+            |b, r| b.iter(|| std::hint::black_box(zlob_meta(r, false, true, None))),
         );
         group.bench_with_input(
             BenchmarkId::from_parameter("zlob_meta_gitignore_parallel"),
             root,
-            |b, r| b.iter(|| std::hint::black_box(zlob_meta(r, true, true))),
+            |b, r| b.iter(|| std::hint::black_box(zlob_meta(r, true, true, None))),
         );
         group.bench_with_input(
             BenchmarkId::from_parameter("ignore_meta_gitignore_parallel"),
@@ -500,12 +488,13 @@ fn bench_walk(c: &mut Criterion) {
             |b, r| b.iter(|| std::hint::black_box(ignore_meta_parallel(r, true))),
         );
 
-        // gitignore + metadata with a caller-chosen worker count
+        // gitignore + metadata with a caller-chosen worker count. macOS caps
+        // the pool at 8, so 8 and 12 run the same configuration there.
         for threads in [4, 8, 12] {
             group.bench_with_input(
                 BenchmarkId::new("zlob_meta_gitignore_threads", threads),
                 root,
-                |b, r| b.iter(|| std::hint::black_box(zlob_meta_threads(r, threads))),
+                |b, r| b.iter(|| std::hint::black_box(zlob_meta(r, true, true, Some(threads)))),
             );
         }
 

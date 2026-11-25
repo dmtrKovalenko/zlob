@@ -2209,7 +2209,8 @@ const RecursiveMatchSink = struct {
 /// Worker threads used by ZLOB_PARALLEL recursive globs. Four is the
 /// break-even-safe default: on the kernel tree t4 is never slower than t1
 /// above ~2k entries while t16 loses below ~4k. 0 = walker default (CPU
-/// count, capped at 16).
+/// count, capped at 16). macOS caps every count at 8, see
+/// `walk.effectiveThreads`.
 var glob_parallel_threads: u16 = 4;
 
 pub fn setGlobParallelThreads(n: u16) void {
