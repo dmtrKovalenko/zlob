@@ -393,7 +393,10 @@ typedef int (*zlob_walk_errfunc_t)(const char *epath, int eerrno);
 typedef struct zlob_walk_options {
   uint32_t flags;              /* ZLOB_WALK_* bits */
   uint32_t meta_mask;          /* ZLOB_META_* bits to fetch per entry */
-  uint16_t threads;            /* worker threads; 0 = one per CPU, 1 = caller thread */
+  uint16_t threads;            /* worker threads; 0 = one per CPU, 1 = caller thread.
+                                  An upper bound: macOS caps it at 8 and starts more
+                                  than 6 only for walks that block on disk I/O
+                                  (zlob_walk_max_workers returns the pool size) */
   uint16_t max_depth;          /* 0 = unlimited; 1 = direct children only */
   zlob_walk_errfunc_t errfunc; /* optional, may be NULL */
   /* Optional glob filter (NULL = report everything). Only entries whose

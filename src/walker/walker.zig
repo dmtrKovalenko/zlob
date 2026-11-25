@@ -221,27 +221,35 @@ pub fn collectAs(gpa: Allocator, root: []const u8, options: Options, comptime Ad
 }
 
 pub fn effectiveThreads(opts: *const Options) u32 {
+    // macOS (APFS): every directory syscall (openat, getattrlistbulk,
+    // getdirentries64, even fstat) serializes on system-wide kernel locks.
+    // Throughput peaks at ~2.3x single-threaded around 4-6 threads and then
+    // goes *negative*: on a 12P+4E M4 Max a warm metadata walk takes 180 ms
+    // with 6 workers, 245 ms with 8, 470 ms with 12 and 540 ms with 16 (as
+    // slow as one thread, at 16x the CPU). The contention is not per-process
+    // -- separate processes slow each other down just the same -- so an
+    // explicit `threads` is an upper bound here, not a promise.
+    //
+    // This is only the size of the worker pool. A walk starts at most
+    // `worker.DARWIN_CPU_BOUND_WORKERS` of them and adds the rest only once
+    // it measures itself blocking on disk I/O (see `worker.IoProbe`), the
+    // one case where the extra workers pay: trees too large for the kernel's
+    // filesystem cache (around a million entries on a 128 GB machine, half
+    // that for real repositories with metadata) and cold caches. That holds
+    // for name-only walks too.
+    if (backend == .darwin_bulk) {
+        const requested: u32 = if (opts.threads != 0)
+            opts.threads
+        else
+            @intCast(@max(std.Thread.getCpuCount() catch 1, 1));
+        return @min(requested, worker.DARWIN_IO_BOUND_WORKERS);
+    }
     if (opts.threads != 0) return @min(opts.threads, 1024);
     const n: u32 = @intCast(@max(std.Thread.getCpuCount() catch 1, 1));
     // Directory enumeration is syscall-bound and contends on per-process and
-    // per-mount kernel locks (the fd table, vnode/namecache locks).
-    // Beyond a low count more workers only fight over those locks rather than doing useful I/O.
-    //
-    // macOS (APFS): throughput climbs to a low single-digit worker count and
-    // then regresses as the shared VFS name-cache / vnode locks dominate
-    // (below single-threaded past ~12). The peak depends on how long each
-    // syscall holds those locks:
-    //   - name-only walks (getdirentries64) hold them briefly -> peak ~6.
-    //   - metadata walks (getattrlistbulk) assemble attribute records under
-    //     the same locks, so contention bites one worker earlier -> peak ~5.
-    // Measured on Apple-silicon (M-series); we never oversubscribe past the
-    // logical core count on smaller machines.
-    //
-    // Linux: the dcache lock scales further, so allow more workers there.
-    if (backend == .darwin_bulk) {
-        const cap: u32 = if (opts.meta.any()) 8 else 6;
-        return @min(n, cap);
-    }
+    // per-mount kernel locks (the fd table, dcache locks). Beyond a low count
+    // more workers only fight over those locks rather than doing useful I/O.
+    // Linux's dcache scales much further than XNU's VFS, so allow more there.
     return @min(n, 16);
 }
 

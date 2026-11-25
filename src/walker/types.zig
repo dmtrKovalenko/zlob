@@ -210,6 +210,8 @@ pub const TrustShortGetdents = enum(u8) { auto, never };
 
 pub const Options = struct {
     /// Worker thread count. 0 = one per CPU (capped). 1 = caller thread only.
+    /// An upper bound: macOS caps the pool and only starts the workers a walk
+    /// can use (see `effectiveThreads`, which returns the pool size).
     threads: u16 = 0,
     /// Stack size in bytes for each helper worker thread. 0 = 1 MiB
     /// (`thread.DEFAULT_STACK_SIZE`). Small stacks let glibc's stack cache

@@ -614,6 +614,21 @@ pub fn build(b: *std.Build) void {
             });
             b.installArtifact(compare_walker);
 
+            // fff-shaped parallel walk benchmark (see bench/bench_walk.zig)
+            const bench_walk = b.addExecutable(.{
+                .name = "bench_walk",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("bench/bench_walk.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "zlob", .module = mod },
+                    },
+                }),
+            });
+            b.installArtifact(bench_walk);
+
             const compare_walker_cmd = b.addRunArtifact(compare_walker);
             compare_walker_cmd.step.dependOn(b.getInstallStep());
             const compare_walker_step = b.step("compare-walker", "Compare walker backends");

@@ -50,6 +50,15 @@ pub const SinkFn = *const fn (ctx: *anyopaque, worker_id: u32, entry: *const Ent
 /// the queue has closed.
 pub const FinishFn = *const fn (ctx: *anyopaque, worker_id: u32, sh: *SharedWorkerState) void;
 
+/// macOS: workers a walk starts by default. Past this every directory
+/// syscall loses throughput to kernel lock contention (see
+/// `walker.effectiveThreads`).
+pub const DARWIN_CPU_BOUND_WORKERS: u32 = 6;
+/// macOS: pool size. The workers above
+/// `DARWIN_CPU_BOUND_WORKERS` start only once the walk is measured to be
+/// blocking on disk I/O (see `IoProbe`).
+pub const DARWIN_IO_BOUND_WORKERS: u32 = 8;
+
 const Failure = enum(u8) { none = 0, aborted = 1, oom = 2, read_failed = 3, permission_denied = 4, name_too_long = 5 };
 const InodeKey = struct { dev: u64, ino: u64 };
 const DarwinVisit = enum { queued_link, visited };
@@ -182,6 +191,10 @@ pub const SharedWorkerState = struct {
     spawn_lock: std.atomic.Value(bool) = .init(false),
     /// Set (under `spawn_lock`) once a spawn failed; no further attempts.
     spawn_failed: bool = false,
+    /// macOS: set by `IoProbe` once a worker spent a window mostly blocked in
+    /// the kernel rather than on-CPU. Lifts the helper limit from the
+    /// CPU-bound knee to the whole pool. Never cleared.
+    io_bound: std.atomic.Value(bool) = .init(false),
 
     pub fn fail(sh: *SharedWorkerState, f: Failure) void {
         sh.abort_signal.store(true, .release);
@@ -210,12 +223,12 @@ pub const SharedWorkerState = struct {
     /// A failed spawn is not fatal -- the work stays with the threads already
     /// running (worker 0 at minimum), so the walk completes with less
     /// parallelism.
-    fn spawnHelpers(sh: *SharedWorkerState, want: usize) void {
+    fn spawnHelpers(sh: *SharedWorkerState, want: usize, limit: usize) void {
         if (sh.spawn_lock.swap(true, .acquire)) return;
         defer sh.spawn_lock.store(false, .release);
         var n = sh.spawned.load(.monotonic);
         if (sh.spawn_failed) return;
-        const target = @min(sh.threads.len, n +| want);
+        const target = @min(limit, n +| want);
         while (n < target) : (n += 1) {
             sh.threads[n] = Thread.spawn(workerThreadMain, @ptrCast(&sh.workers[n + 1]), sh.options.thread_stack_size) catch {
                 sh.spawn_failed = true;
@@ -223,6 +236,15 @@ pub const SharedWorkerState = struct {
             };
             sh.spawned.store(n + 1, .release);
         }
+    }
+
+    /// Helper threads that may be running right now. Everywhere but macOS
+    /// that is the whole pool.
+    inline fn helperLimit(sh: *SharedWorkerState) usize {
+        if (comptime backend == .darwin_bulk) {
+            if (!sh.io_bound.load(.monotonic)) return @min(sh.threads.len, DARWIN_CPU_BOUND_WORKERS - 1);
+        }
+        return sh.threads.len;
     }
 
     fn visitedBefore(sh: *SharedWorkerState, key: InodeKey) Allocator.Error!bool {
@@ -420,10 +442,15 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
     // is final by the time the queue closes (the collect barrier in
     // walker.zig relies on that).
     var may_spawn = state.threads.len > 0;
+    // macOS: only a pool larger than the CPU-bound knee has workers whose
+    // start depends on the probe.
+    const probing = comptime_darwin and state.threads.len >= DARWIN_CPU_BOUND_WORKERS;
+    var probe: IoProbe = .{};
 
     while (state.queue.pop(state.io, worker.id)) |next_task| {
         var task = next_task;
         if (!state.abort_signal.load(.acquire)) {
+            const started = if (probing and may_spawn) probe.begin() else 0;
             processDir(state, worker, &task) catch |err| switch (err) {
                 error.OutOfMemory => state.fail(.oom),
                 error.ReadFailed => state.fail(.read_failed),
@@ -437,8 +464,12 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
                 if (spawned >= state.threads.len) {
                     may_spawn = false;
                 } else {
-                    const queued = state.queue.queued.load(.monotonic);
-                    if (queued > spawned + SPAWN_SLACK) state.spawnHelpers(spawnBurst(spawned, queued));
+                    if (probing) probe.end(state, started);
+                    const limit = state.helperLimit();
+                    if (spawned < limit) {
+                        const queued = state.queue.queued.load(.monotonic);
+                        if (queued > spawned + SPAWN_SLACK) state.spawnHelpers(spawnBurst(spawned, queued), limit);
+                    }
                 }
             }
         }
@@ -447,6 +478,62 @@ pub fn workerLoop(state: *SharedWorkerState, worker: *Worker) void {
     }
     if (state.finish) |f| f(state.sink_ctx, worker.id, state);
 }
+
+const comptime_darwin = backend == .darwin_bulk;
+
+/// macOS: tells a walk that blocks on disk I/O from one that is CPU-bound in
+/// the kernel, per worker, by comparing the wall time of its directory tasks
+/// with the CPU time the thread got.
+///
+/// The two cases need opposite thread counts. A warm walk spends ~99% of its
+/// wall time on-CPU (contended kernel locks spin), and every worker past
+/// `DARWIN_CPU_BOUND_WORKERS` slows it down. A walk of a tree the kernel's
+/// filesystem cache no longer holds (or of a cold cache) re-reads APFS
+/// B-tree nodes with synchronous 4 KiB reads inside the listing syscall --
+/// about one per directory -- and sits ~50% blocked; there more workers mean
+/// more reads in flight (1M files: 6 workers 1540 ms, 8 workers 1330 ms; fff
+/// on chromium, 545k entries: 1080 ms against 900 ms).
+///
+/// CPU time is read once per window (a syscall); wall time per directory
+/// (commpage read, ~20 ns). Time spent waiting for work is not part of the
+/// wall sum but any CPU burnt there is, which only biases towards
+/// "CPU-bound", the cheaper mistake.
+const IoProbe = struct {
+    dirs: u32 = 0,
+    wall_ns: u64 = 0,
+    cpu_start_ns: u64 = 0,
+
+    const WINDOW_DIRS: u32 = 32;
+    /// Windows shorter than this are scheduler noise.
+    const MIN_WALL_NS: u64 = std.time.ns_per_ms;
+    /// On-CPU share below which the window counts as blocked: measured ~99%
+    /// for warm walks and 50-60% for I/O-bound ones.
+    const BLOCKED_BELOW_PERCENT: u64 = 80;
+
+    inline fn clockNs(id: std.c.clockid_t) u64 {
+        var ts: std.c.timespec = undefined;
+        if (std.c.clock_gettime(id, &ts) != 0) return 0;
+        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    }
+
+    inline fn begin(p: *IoProbe) u64 {
+        if (comptime !comptime_darwin) return 0;
+        if (p.dirs == 0) p.cpu_start_ns = clockNs(.THREAD_CPUTIME_ID);
+        return clockNs(.UPTIME_RAW);
+    }
+
+    inline fn end(p: *IoProbe, sh: *SharedWorkerState, started: u64) void {
+        if (comptime !comptime_darwin) return;
+        if (started == 0) return;
+        p.wall_ns += clockNs(.UPTIME_RAW) -| started;
+        p.dirs += 1;
+        if (p.dirs < WINDOW_DIRS or p.wall_ns < MIN_WALL_NS) return;
+        const cpu_ns = clockNs(.THREAD_CPUTIME_ID) -| p.cpu_start_ns;
+        if (cpu_ns * 100 < p.wall_ns * BLOCKED_BELOW_PERCENT) sh.io_bound.store(true, .monotonic);
+        p.dirs = 0;
+        p.wall_ns = 0;
+    }
+};
 
 /// Queued directories beyond the running thread count (worker 0 plus the
 /// helpers) before another helper is worth starting.
