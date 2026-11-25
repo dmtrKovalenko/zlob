@@ -330,6 +330,24 @@ fn bench_walk(c: &mut Criterion) {
             .sum()
     }
 
+    /// Parallel metadata walk with an explicit worker count, the way an
+    /// application with its own thread pool calls the walker (fff passes half
+    /// the cores, or all performance cores).
+    fn zlob_meta_threads(root: &Path, threads: usize) -> u64 {
+        use std::sync::atomic::AtomicU64;
+        let acc = AtomicU64::new(0);
+        let mut b = WalkBuilder::new(root).unwrap();
+        b.options(WalkFlags::RECOMMENDED);
+        b.threads(threads);
+        b.metadata(WalkMetadata::SIZE | WalkMetadata::MTIME);
+        b.run(|e| {
+            acc.fetch_add(e.size().unwrap_or(0), Ordering::Relaxed);
+            WalkState::Continue
+        })
+        .unwrap();
+        acc.load(Ordering::Relaxed)
+    }
+
     fn zlob_meta(root: &Path, parallel: bool, gitignore: bool) -> u64 {
         // Streaming walk so it matches walkdir's iterator and ignore's
         // per-entry callback: each entry's size is summed as it is visited,
@@ -481,6 +499,15 @@ fn bench_walk(c: &mut Criterion) {
             root,
             |b, r| b.iter(|| std::hint::black_box(ignore_meta_parallel(r, true))),
         );
+
+        // gitignore + metadata with a caller-chosen worker count
+        for threads in [4, 8, 12] {
+            group.bench_with_input(
+                BenchmarkId::new("zlob_meta_gitignore_threads", threads),
+                root,
+                |b, r| b.iter(|| std::hint::black_box(zlob_meta_threads(r, threads))),
+            );
+        }
 
         group.finish();
     }
