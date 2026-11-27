@@ -134,15 +134,29 @@ fn main() {
         .write_to_file(out_dir.join("zlob_bindings.rs"))
         .expect("Couldn't write bindings!");
 
+    // A prebuilt library needs no Zig. Without one, compile from source.
+    let in_checkout = zig_src_dir == "src";
+    let no_prebuilt = match prebuilt_library(&target, in_checkout) {
+        Ok(lib_dir) => {
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            println!("cargo:rustc-link-lib=static=zlob");
+            return;
+        }
+        Err(why) => why,
+    };
+
     println!("cargo:rerun-if-env-changed=ZIG");
     let zig = env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
-    let zig_version = Command::new(&zig)
+    let zig_works = Command::new(&zig)
         .arg("version")
         .output()
-        .expect("Failed to find zig. Please install zig or set the ZIG environment variable.");
-
-    if !zig_version.status.success() {
-        panic!("Failed to run zig. Please ensure zig is installed and accessible.");
+        .is_ok_and(|o| o.status.success());
+    if !zig_works {
+        panic!(
+            "zlob has no prebuilt library to use ({no_prebuilt}) and cannot run `{zig}` to \
+             compile it.\nInstall Zig 0.17.1 or newer from https://ziglang.org/download/ or \
+             set ZIG to the compiler path."
+        );
     }
 
     // Windows note: "native" would also resolve to GNU/MinGW ABI (Zig ships
@@ -151,8 +165,7 @@ fn main() {
     // regardless.
     let zig_target = rust_target_to_zig(&target);
 
-    // allow to ovveride the cpu to a specific architecture e.g. x86_64v3 for AVX2
-    println!("cargo:rerun-if-env-changed=ZLOB_ZIG_CPU");
+    // Allow overriding the baseline CPU when compiling from source.
     let zig_cpu = env::var("ZLOB_ZIG_CPU").ok().filter(|s| !s.is_empty());
 
     let profile = env::var("PROFILE").unwrap();
@@ -255,6 +268,51 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}/lib", out_dir.display());
     println!("cargo:rustc-link-lib=static=zlob");
+}
+
+/// Directory of the prebuilt static library for `target`, or the reason to
+/// compile from source instead.
+///
+/// The library comes from the `zlob-prebuilt-*` crate for the target's OS,
+/// which reports its directory through `links` metadata (`DEP_*_LIB_DIR`).
+///
+/// `ZLOB_BUILD=source` always compiles, `ZLOB_BUILD=prebuilt` fails the build
+/// when there is no prebuilt library. The default uses a prebuilt library when
+/// one exists, except in a git checkout (where the Zig sources may have local
+/// changes) and when `ZLOB_ZIG_CPU` asks for a non-baseline CPU.
+fn prebuilt_library(target: &str, in_checkout: bool) -> Result<PathBuf, String> {
+    println!("cargo:rerun-if-env-changed=ZLOB_BUILD");
+    println!("cargo:rerun-if-env-changed=ZLOB_ZIG_CPU");
+    let mode = env::var("ZLOB_BUILD").unwrap_or_default();
+    let required = match mode.as_str() {
+        "source" => return Err("ZLOB_BUILD=source".into()),
+        "prebuilt" => true,
+        "" | "auto" => false,
+        other => panic!("ZLOB_BUILD must be `auto`, `prebuilt` or `source`, not `{other}`"),
+    };
+
+    let lib_dir = env::vars_os().find_map(|(key, value)| {
+        let key = key.to_str()?;
+        (key.starts_with("DEP_ZLOB_PREBUILT_") && key.ends_with("_LIB_DIR"))
+            .then(|| PathBuf::from(value))
+    });
+    let result = if !required && in_checkout {
+        Err("this is a git checkout".to_string())
+    } else if !required && env::var("ZLOB_ZIG_CPU").is_ok_and(|c| !c.is_empty()) {
+        Err("ZLOB_ZIG_CPU is set and prebuilt libraries use the baseline CPU".to_string())
+    } else if env::var_os("CARGO_FEATURE_PREBUILT").is_none() {
+        Err("the `prebuilt` feature is off".to_string())
+    } else {
+        lib_dir.ok_or(format!("there is no prebuilt library for {target}"))
+    };
+
+    match &result {
+        Err(why) if required => panic!("ZLOB_BUILD=prebuilt, but {why}"),
+        // The fallback is the normal outcome in a checkout.
+        Err(why) if !in_checkout => println!("cargo:warning=zlob: compiling with Zig: {why}"),
+        _ => {}
+    }
+    result
 }
 
 /// Map a Rust target triple to one libclang accepts.

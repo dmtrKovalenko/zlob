@@ -48,18 +48,30 @@ else
     echo -e "${YELLOW}Releasing version ${NEW_VERSION}...${NC}"
 fi
 
-# Check for uncommitted changes
-# if [ -n "$(git status --porcelain)" ]; then
-#     echo -e "${RED}Error: You have uncommitted changes. Please commit or stash them first.${NC}"
-#     exit 1
-# fi
+if [ "$DRY_RUN" = false ] && [ -n "$(git status --porcelain)" ]; then
+    echo -e "${RED}Error: Start the release from a clean checkout.${NC}"
+    exit 1
+fi
+
+if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    echo -e "${RED}Error: Invalid release version: ${NEW_VERSION}${NC}"
+    exit 1
+fi
+
+sed_in_place() {
+    if [[ $(uname -s) == Darwin ]]; then
+        sed -i '' "$@"
+    else
+        sed -i "$@"
+    fi
+}
 
 # Update version in build.zig.zon
 echo -e "${GREEN}Updating build.zig.zon...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would update .version to \"${NEW_VERSION}\" in build.zig.zon${NC}"
 else
-    sed -i "s/\.version = \"[^\"]*\"/.version = \"${NEW_VERSION}\"/" build.zig.zon
+    sed_in_place "s/\.version = \"[^\"]*\"/.version = \"${NEW_VERSION}\"/" build.zig.zon
 fi
 
 # Update version in Cargo.toml
@@ -67,35 +79,30 @@ echo -e "${GREEN}Updating rust/Cargo.toml...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would update version to \"${NEW_VERSION}\" in rust/Cargo.toml${NC}"
 else
-    sed -i "s/^version = \"[^\"]*\"/version = \"${NEW_VERSION}\"/" rust/Cargo.toml
-    cd rust && cargo build && cd -
+    sed_in_place "s/^version = \"[^\"]*\"/version = \"${NEW_VERSION}\"/" rust/Cargo.toml rust/prebuilt/*/Cargo.toml
+    # zlob pins the zlob-prebuilt-* crates to its own version
+    sed_in_place "/^zlob-prebuilt-/s/version = \"=[^\"]*\"/version = \"=${NEW_VERSION}\"/" rust/Cargo.toml
+    (cd rust && cargo build)
 fi
 
 # Verify the changes (skip in dry-run)
 if [ "$DRY_RUN" = false ]; then
     echo -e "${GREEN}Verifying changes...${NC}"
     grep -q "\.version = \"${NEW_VERSION}\"" build.zig.zon || { echo -e "${RED}Failed to update build.zig.zon${NC}"; exit 1; }
-    grep -q "^version = \"${NEW_VERSION}\"" rust/Cargo.toml || { echo -e "${RED}Failed to update rust/Cargo.toml${NC}"; exit 1; }
+    for manifest in rust/Cargo.toml rust/prebuilt/*/Cargo.toml; do
+        grep -Fxq "version = \"${NEW_VERSION}\"" "$manifest" || { echo -e "${RED}Failed to update ${manifest}${NC}"; exit 1; }
+    done
 fi
 
 # Create commit
 echo -e "${GREEN}Creating commit...${NC}"
 if [ "$DRY_RUN" = true ]; then
-    echo -e "${BLUE}[DRY-RUN] Would run: git add build.zig.zon rust/Cargo.toml${NC}"
-    echo -e "${BLUE}[DRY-RUN] Would run: git commit -m \"chore: bump version to ${NEW_VERSION}\"${NC}"
+    echo -e "${BLUE}[DRY-RUN] Would stage the Zig and Cargo manifests and Cargo.lock${NC}"
+    echo -e "${BLUE}[DRY-RUN] Would run: git commit -m \"chore: version to ${NEW_VERSION}\"${NC}"
 else
-    git add --all
+    git add -- build.zig.zon rust/Cargo.toml rust/Cargo.lock rust/prebuilt/*/Cargo.toml
     git commit -m "chore: version to ${NEW_VERSION}"
 fi
-
-# Publish to crates.io
-echo -e "${GREEN}Publishing to crates.io...${NC}"
-if [ "$DRY_RUN" = true ]; then
-    echo -e "${BLUE}[DRY-RUN] Would run: cd rust && cargo publish${NC}"
-else
-    (cd rust && cargo publish)
-fi
-
 
 echo -e "${GREEN}Pushing commit...${NC}"
 if [ "$DRY_RUN" = true ]; then
@@ -115,6 +122,7 @@ fi
 echo -e "${GREEN}Pushing tag...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would run: git push origin \"v${NEW_VERSION}\"${NC}"
+    echo -e "${BLUE}[DRY-RUN] The tag would trigger the GitHub Actions publishing workflow${NC}"
 else
     git push origin "v${NEW_VERSION}"
 fi
@@ -123,5 +131,5 @@ fi
 if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}[DRY-RUN] Completed. No changes were made.${NC}"
 else
-    echo -e "${GREEN}Successfully released version ${NEW_VERSION}!${NC}"
+    echo -e "${GREEN}Pushed v${NEW_VERSION}. GitHub Actions will build and publish the Rust crates.${NC}"
 fi

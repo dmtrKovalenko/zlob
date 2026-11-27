@@ -166,6 +166,19 @@
 //! }
 //! ```
 
+// build.rs links the static library from these crates. They have no Rust API;
+// naming them here keeps Cargo from reporting them as unused dependencies.
+#[cfg(all(feature = "prebuilt", target_os = "android"))]
+use zlob_prebuilt_android as _;
+#[cfg(all(feature = "prebuilt", target_vendor = "apple"))]
+use zlob_prebuilt_apple as _;
+#[cfg(all(feature = "prebuilt", any(target_os = "freebsd", target_os = "netbsd")))]
+use zlob_prebuilt_bsd as _;
+#[cfg(all(feature = "prebuilt", target_os = "linux"))]
+use zlob_prebuilt_linux as _;
+#[cfg(all(feature = "prebuilt", windows))]
+use zlob_prebuilt_windows as _;
+
 mod error;
 mod flags;
 mod indicies;

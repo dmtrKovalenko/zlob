@@ -69,6 +69,10 @@ pub fn build(b: *std.Build) void {
     // to avoid providing both dynamic and static libraries, force the build to only produce a single static lib
     const static_only = b.option(bool, "static-only", "Only build static library, skip dynamic library") orelse false;
 
+    // Drop debug info from the static library. The prebuilt libraries shipped
+    // to Rust users are built this way to keep the crates small.
+    const strip = b.option(bool, "strip", "Omit debug info from the static library");
+
     // Helper to create source paths
     const srcPath = struct {
         fn get(builder: *std.Build, dir: []const u8, file: []const u8) std.Build.LazyPath {
@@ -220,6 +224,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = use_libc,
             // required for shared libraries on musl
             .pic = true,
+            .strip = strip,
             .imports = &.{
                 .{ .name = "zlob", .module = zlob_core_mod },
                 .{ .name = "zlob_flags", .module = flags_mod },

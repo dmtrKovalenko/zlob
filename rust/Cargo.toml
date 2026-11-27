@@ -33,6 +33,34 @@ rustc-args = ["--cfg", "docsrs"]
 [dependencies]
 bitflags = "2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+zlob-prebuilt-linux = { version = "=1.8.2", path = "prebuilt/linux", optional = true }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+zlob-prebuilt-apple = { version = "=1.8.2", path = "prebuilt/apple", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+zlob-prebuilt-windows = { version = "=1.8.2", path = "prebuilt/windows", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+zlob-prebuilt-android = { version = "=1.8.2", path = "prebuilt/android", optional = true }
+
+[target.'cfg(any(target_os = "freebsd", target_os = "netbsd"))'.dependencies]
+zlob-prebuilt-bsd = { version = "=1.8.2", path = "prebuilt/bsd", optional = true }
+
+[features]
+default = ["prebuilt"]
+# Link the static library shipped in the zlob-prebuilt-* crate for the target
+# instead of compiling the Zig sources. Turn it off to always build with Zig
+# and to keep the prebuilt crates out of your dependency tree.
+prebuilt = [
+    "dep:zlob-prebuilt-linux",
+    "dep:zlob-prebuilt-apple",
+    "dep:zlob-prebuilt-windows",
+    "dep:zlob-prebuilt-android",
+    "dep:zlob-prebuilt-bsd",
+]
+
 [build-dependencies]
 bindgen = "0.72"
 
