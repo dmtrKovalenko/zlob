@@ -895,9 +895,10 @@ pub export fn zlob_walk(
     return 0;
 }
 
-/// Worker count a walk with `options` would use (always >= 1). Every entry's
-/// `worker_id` is strictly below this bound, so it is the exact size for
-/// caller-side per-worker shards. NULL options = defaults.
+/// Size of the worker pool of a walk with `options` (always >= 1); a walk can
+/// start fewer threads. Every entry's `worker_id` is strictly below this
+/// bound, so it is the exact size for caller-side per-worker shards. NULL
+/// options = defaults.
 pub export fn zlob_walk_max_workers(options: ?*const zlob_walk_options_t) usize {
     const opts = walkOptionsFromC(options);
     return walk.effectiveThreads(&opts);

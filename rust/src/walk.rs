@@ -250,6 +250,13 @@ impl WalkBuilder {
     }
 
     /// Number of worker threads. `0` (default) = one per CPU; `1` = run on the calling thread.
+    ///
+    /// This is an upper bound. On macOS directory syscalls serialize on
+    /// system-wide kernel locks and more than 6 workers make a warm walk
+    /// slower, so the pool is capped at 8 there and workers past the sixth
+    /// start only when the walk's directory syscalls are mostly off-CPU
+    /// (waiting for disk, for example). [`Self::max_workers`] returns the
+    /// pool size.
     pub fn threads(&mut self, n: usize) -> &mut Self {
         self.threads = n.min(u16::MAX as usize) as u16;
         self
@@ -262,8 +269,9 @@ impl WalkBuilder {
         self
     }
 
-    /// Number of worker threads a [`Self::run`] / [`Self::collect`] with the
-    /// current configuration will use (always >= 1). Every entry's
+    /// Size of the worker pool of a [`Self::run`] / [`Self::collect`] with the
+    /// current configuration (always >= 1); a walk can start fewer threads.
+    /// Every entry's
     /// [`WalkEntry::worker_id`] is strictly below this bound, so it is the
     /// exact size for caller-side per-worker shards:
     ///
@@ -1118,6 +1126,13 @@ mod tests {
         b.threads(0);
         let auto = b.max_workers();
         assert!(auto >= 1);
+        // macOS caps the pool; other platforms honour the request.
+        b.threads(64);
+        if cfg!(target_os = "macos") {
+            assert_eq!(b.max_workers(), 8);
+        } else {
+            assert_eq!(b.max_workers(), 64);
+        }
     }
 
     #[test]

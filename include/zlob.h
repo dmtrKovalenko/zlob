@@ -172,7 +172,8 @@ int zlob(const char *restrict pattern, int flags, int (*errfunc)(const char *epa
 void zlobfree(zlob_t *pzlob);
 
 /* Worker thread count for ZLOB_PARALLEL recursive globs. Default 4.
- * 0 = one per CPU (capped at 16). Process-wide; not per-call. */
+ * 0 = one per CPU (capped at 16; macOS caps every count at 8).
+ * Process-wide; not per-call. */
 void zlob_set_threads(unsigned threads);
 
 /**
@@ -393,7 +394,11 @@ typedef int (*zlob_walk_errfunc_t)(const char *epath, int eerrno);
 typedef struct zlob_walk_options {
   uint32_t flags;              /* ZLOB_WALK_* bits */
   uint32_t meta_mask;          /* ZLOB_META_* bits to fetch per entry */
-  uint16_t threads;            /* worker threads; 0 = one per CPU, 1 = caller thread */
+  uint16_t threads;            /* worker threads; 0 = one per CPU, 1 = caller thread.
+                                  An upper bound: macOS caps it at 8 and starts more
+                                  than 6 only when the directory syscalls of the walk
+                                  are mostly off-CPU, e.g. waiting for disk
+                                  (zlob_walk_max_workers returns the pool size) */
   uint16_t max_depth;          /* 0 = unlimited; 1 = direct children only */
   zlob_walk_errfunc_t errfunc; /* optional, may be NULL */
   /* Optional glob filter (NULL = report everything). Only entries whose
@@ -456,9 +461,10 @@ typedef int (*zlob_walk_cb)(const zlob_walk_entry_t *entry, void *ctx);
 int zlob_walk(const char *root, const zlob_walk_options_t *options, zlob_walk_cb cb, void *ctx,
               void **out_rules);
 
-/** Number of worker threads a walk with `options` would use (always >= 1).
- *  Every entry's `worker_id` is strictly below this bound, so it is the exact
- *  size for caller-side per-worker shards. NULL options = defaults. */
+/** Size of the worker pool of a walk with `options` (always >= 1). A walk can
+ *  start fewer threads. Every entry's `worker_id` is strictly below this
+ *  bound, so it is the exact size for caller-side per-worker shards.
+ *  NULL options = defaults. */
 size_t zlob_walk_max_workers(const zlob_walk_options_t *options);
 
 /** Free the allocated ignore rules set, NUL is noop */
