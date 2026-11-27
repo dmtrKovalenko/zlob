@@ -90,29 +90,6 @@ else
     git commit -m "chore: version to ${NEW_VERSION}"
 fi
 
-# Cross-compile the static library for every Rust target into the
-# zlob-prebuilt-* crates and publish them. zlob depends on them, so they go first.
-echo -e "${GREEN}Building and publishing prebuilt libraries...${NC}"
-if [ "$DRY_RUN" = true ]; then
-    echo -e "${BLUE}[DRY-RUN] Would run: scripts/build-prebuilt.sh${NC}"
-    echo -e "${BLUE}[DRY-RUN] Would run: cargo publish --allow-dirty in rust/prebuilt/*${NC}"
-else
-    scripts/build-prebuilt.sh
-    for crate in rust/prebuilt/*/; do
-        # The libraries are not in git, which cargo reports as a dirty tree.
-        (cd "$crate" && cargo publish --allow-dirty)
-    done
-fi
-
-# Publish to crates.io
-echo -e "${GREEN}Publishing to crates.io...${NC}"
-if [ "$DRY_RUN" = true ]; then
-    echo -e "${BLUE}[DRY-RUN] Would run: cd rust && cargo publish${NC}"
-else
-    (cd rust && cargo publish)
-fi
-
-
 echo -e "${GREEN}Pushing commit...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would run: git push${NC}"
@@ -131,6 +108,7 @@ fi
 echo -e "${GREEN}Pushing tag...${NC}"
 if [ "$DRY_RUN" = true ]; then
     echo -e "${BLUE}[DRY-RUN] Would run: git push origin \"v${NEW_VERSION}\"${NC}"
+    echo -e "${BLUE}[DRY-RUN] The tag would trigger the GitHub Actions publishing workflow${NC}"
 else
     git push origin "v${NEW_VERSION}"
 fi
@@ -139,5 +117,5 @@ fi
 if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}[DRY-RUN] Completed. No changes were made.${NC}"
 else
-    echo -e "${GREEN}Successfully released version ${NEW_VERSION}!${NC}"
+    echo -e "${GREEN}Pushed v${NEW_VERSION}. GitHub Actions will build and publish the Rust crates.${NC}"
 fi

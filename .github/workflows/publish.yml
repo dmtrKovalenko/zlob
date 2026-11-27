@@ -1,0 +1,63 @@
+name: Publish Rust crates
+
+on:
+  push:
+    tags: ['v[0-9]*']
+
+concurrency:
+  group: crates-io-${{ github.ref }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.1'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify crate versions match the release tag
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for manifest in rust/prebuilt/*/Cargo.toml rust/Cargo.toml; do
+            if ! grep -Fxq "version = \"$version\"" "$manifest"; then
+              echo "::error file=$manifest::Expected crate version $version from tag $GITHUB_REF_NAME"
+              exit 1
+            fi
+          done
+
+      - name: Build prebuilt libraries
+        run: scripts/build-prebuilt.sh
+
+      - name: Authenticate to crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish prebuilt crates, then zlob
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          ZLOB_BUILD: prebuilt
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for manifest in rust/prebuilt/*/Cargo.toml rust/Cargo.toml; do
+            name=$(sed -n 's/^name = "\([^"]*\)"$/\1/p' "$manifest" | head -n 1)
+            records=$(curl -fsS --retry 3 "https://index.crates.io/zl/ob/$name")
+            if jq -es --arg version "$version" 'any(.[]; .vers == $version)' <<< "$records" > /dev/null; then
+              echo "$name $version is already on crates.io"
+              continue
+            fi
+            cargo publish --manifest-path "$manifest" --allow-dirty
+          done
