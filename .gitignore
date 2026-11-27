@@ -6,3 +6,4 @@ rust/.zig-cache/
 
 # Prebuilt static libraries, built at release time by scripts/build-prebuilt.sh
 rust/prebuilt/*/lib/
+rust/prebuilt/*/target/

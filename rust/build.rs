@@ -165,8 +165,7 @@ fn main() {
     // regardless.
     let zig_target = rust_target_to_zig(&target);
 
-    // allow to ovveride the cpu to a specific architecture e.g. x86_64v3 for AVX2
-    println!("cargo:rerun-if-env-changed=ZLOB_ZIG_CPU");
+    // Allow overriding the baseline CPU when compiling from source.
     let zig_cpu = env::var("ZLOB_ZIG_CPU").ok().filter(|s| !s.is_empty());
 
     let profile = env::var("PROFILE").unwrap();
@@ -283,6 +282,7 @@ fn main() {
 /// changes) and when `ZLOB_ZIG_CPU` asks for a non-baseline CPU.
 fn prebuilt_library(target: &str, in_checkout: bool) -> Result<PathBuf, String> {
     println!("cargo:rerun-if-env-changed=ZLOB_BUILD");
+    println!("cargo:rerun-if-env-changed=ZLOB_ZIG_CPU");
     let mode = env::var("ZLOB_BUILD").unwrap_or_default();
     let required = match mode.as_str() {
         "source" => return Err("ZLOB_BUILD=source".into()),
