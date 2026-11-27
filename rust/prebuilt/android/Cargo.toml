@@ -1,6 +1,6 @@
 [package]
 name = "zlob-prebuilt-android"
-version = "1.8.2"
+version = "1.8.3"
 edition = "2021"
 license = "MIT"
 description = "Prebuilt zlob static libraries for Android. Depend on the zlob crate, not on this one."

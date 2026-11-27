@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "zlob"
-version = "1.8.2"
+version = "1.8.3"
 dependencies = [
  "bindgen",
  "bitflags",
@@ -962,23 +962,23 @@ dependencies = [
 
 [[package]]
 name = "zlob-prebuilt-android"
-version = "1.8.2"
+version = "1.8.3"
 
 [[package]]
 name = "zlob-prebuilt-apple"
-version = "1.8.2"
+version = "1.8.3"
 
 [[package]]
 name = "zlob-prebuilt-bsd"
-version = "1.8.2"
+version = "1.8.3"
 
 [[package]]
 name = "zlob-prebuilt-linux"
-version = "1.8.2"
+version = "1.8.3"
 
 [[package]]
 name = "zlob-prebuilt-windows"
-version = "1.8.2"
+version = "1.8.3"
 
 [[package]]
 name = "zmij"
